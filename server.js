@@ -232,83 +232,88 @@ const runScan = async () => {
   log(`Starting scan #${scanCount}...`);
 
   try {
-    // Step 1 — fetch all tickers
-    const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
-    const valid   = tickers
+    // Step 1 — fetch all tickers from Bybit (no regional blocks)
+    const res     = await fetchJSON('https://api.bybit.com/v5/market/tickers?category=linear');
+    const tickers = res?.result?.list || [];
+
+    const valid = tickers
       .filter(t =>
         t.symbol.endsWith('USDT') &&
         !t.symbol.includes('_') &&
         !EXCLUDE.has(t.symbol) &&
-        parseFloat(t.quoteVolume) >= MIN_VOLUME_USD
+        parseFloat(t.turnover24h) >= MIN_VOLUME_USD
       )
       .map(t => ({
         symbol:  t.symbol,
         price:   parseFloat(t.lastPrice),
-        change:  parseFloat(t.priceChangePercent),
-        volume:  parseFloat(t.quoteVolume),
+        change:  parseFloat(t.price24hPcnt) * 100,
+        volume:  parseFloat(t.turnover24h),
+        funding: parseFloat(t.fundingRate) * 100,
       }))
-      .filter(t => Math.abs(t.change) < 8) // not already pumped
+      .filter(t => Math.abs(t.change) < 8)
       .sort((a, b) => b.volume - a.volume)
-      .slice(0, 80); // top 80 by volume
+      .slice(0, 80);
 
-    log(`Fetched ${valid.length} candidates`);
+    log(`Fetched ${valid.length} candidates from Bybit`);
 
     // Step 2 — enrich top candidates
     const alerts = [];
 
     for (const coin of valid) {
-      await sleep(350); // rate limit
+      await sleep(350);
 
-      let volSpike1H    = 0;
-      let fundingRate   = 0;
+      let volSpike1H     = 0;
       let longShortRatio = 1;
-      let oiSpikePct    = 0;
+      let oiSpikePct     = 0;
 
       // 1H klines for volume spike
       try {
-        const klines = await fetchJSON(
-          `https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=1h&limit=6`
+        const klRes  = await fetchJSON(
+          `https://api.bybit.com/v5/market/kline?category=linear&symbol=${coin.symbol}&interval=60&limit=6`
         );
+        const klines = klRes?.result?.list || [];
         if (klines.length >= 4) {
-          const latestVol = parseFloat(klines[klines.length - 1][5]);
-          const prevVols  = klines.slice(0, -1).map(k => parseFloat(k[5]));
+          const latestVol = parseFloat(klines[0][5]);
+          const prevVols  = klines.slice(1).map(k => parseFloat(k[5]));
           const avgVol    = prevVols.reduce((a, b) => a + b, 0) / prevVols.length;
           volSpike1H      = avgVol > 0 ? latestVol / avgVol : 0;
         }
       } catch { /* skip */ }
 
-      // Funding rate
-      try {
-        const fData   = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`);
-        fundingRate   = parseFloat(fData.lastFundingRate) * 100;
-      } catch { /* skip */ }
-
       // L/S ratio
       try {
-        const lsData      = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`);
-        longShortRatio    = parseFloat(lsData[0]?.longShortRatio || 1);
+        const lsRes       = await fetchJSON(
+          `https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=${coin.symbol}&period=1h&limit=1`
+        );
+        const lsData      = lsRes?.result?.list?.[0];
+        longShortRatio    = lsData ? parseFloat(lsData.buyRatio) / (parseFloat(lsData.sellRatio) || 1) : 1;
       } catch { /* skip */ }
 
-      // OI spike
+      // OI
       try {
-        const oiData  = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
-        const currOI  = parseFloat(oiData.openInterest);
-        const lastOI  = prevOI.get(coin.symbol) || currOI;
-        oiSpikePct    = lastOI > 0 ? ((currOI - lastOI) / lastOI) * 100 : 0;
-        prevOI.set(coin.symbol, currOI);
+        const oiRes  = await fetchJSON(
+          `https://api.bybit.com/v5/market/open-interest?category=linear&symbol=${coin.symbol}&intervalTime=5min&limit=2`
+        );
+        const oiList = oiRes?.result?.list || [];
+        if (oiList.length >= 2) {
+          const curr  = parseFloat(oiList[0].openInterest);
+          const prev  = parseFloat(oiList[1].openInterest);
+          oiSpikePct  = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
+          prevOI.set(coin.symbol, curr);
+        }
       } catch { /* skip */ }
 
       const score = calcScore({
         change:        coin.change,
         volume:        coin.volume,
-        fundingRate,
+        fundingRate:   coin.funding,
         longShortRatio,
         volSpike1H,
         oiSpikePct,
       });
 
       if (score >= MIN_SCORE && canAlert(`score_${coin.symbol}`)) {
-        alerts.push({ ...coin, score, fundingRate, longShortRatio, volSpike1H, oiSpikePct });
+        alerts.push({ ...coin, score, fundingRate: coin.funding, longShortRatio, volSpike1H, oiSpikePct });
         markAlerted(`score_${coin.symbol}`);
       }
     }
@@ -316,7 +321,7 @@ const runScan = async () => {
     log(`Scan #${scanCount} complete — ${alerts.length} alerts`);
 
     // Step 3 — send alerts
-    for (const coin of alerts.slice(0, 5)) { // max 5 per scan
+    for (const coin of alerts.slice(0, 5)) {
       const dirEmoji = coin.fundingRate < 0 && coin.longShortRatio < 1 ? '📈 LONG' : '👀 WATCH';
       const msg = `
 🎯 <b>SIGNAL DETECTED</b>
