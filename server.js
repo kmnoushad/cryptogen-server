@@ -419,29 +419,28 @@ const runScan = async () => {
   log(`Starting scan #${scanCount}...`);
 
   try {
-    // Fetch all tickers from Bybit
-    const res     = await fetchJSON('https://api.bybit.com/v5/market/tickers?category=linear');
-    const tickers = res?.result?.list || [];
+    // Fetch all tickers from Binance Futures
+    const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
 
     const valid = tickers
       .filter(t =>
         t.symbol.endsWith('USDT') &&
         !t.symbol.includes('_') &&
         !EXCLUDE.has(t.symbol) &&
-        parseFloat(t.turnover24h) >= MIN_VOLUME_USD
+        parseFloat(t.quoteVolume) >= MIN_VOLUME_USD
       )
       .map(t => ({
         symbol:  t.symbol,
         price:   parseFloat(t.lastPrice),
-        change:  parseFloat(t.price24hPcnt) * 100,
-        volume:  parseFloat(t.turnover24h),
-        funding: parseFloat(t.fundingRate || 0) * 100,
+        change:  parseFloat(t.priceChangePercent),
+        volume:  parseFloat(t.quoteVolume),
+        funding: 0, // fetched per coin below
       }))
       .filter(t => Math.abs(t.change) < 8)
       .sort((a, b) => b.volume - a.volume)
       .slice(0, 80);
 
-    log(`Fetched ${valid.length} candidates`);
+    log(`Fetched ${valid.length} candidates from Binance Futures`);
 
     const freeAlerts    = [];
     const premiumAlerts = [];
@@ -453,13 +452,18 @@ const runScan = async () => {
       let longShortRatio = 1;
       let oiSpikePct     = 0;
 
-      // 1H klines
+      // Funding rate
       try {
-        const kl   = await fetchJSON(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${coin.symbol}&interval=60&limit=6`);
-        const ks   = kl?.result?.list || [];
-        if (ks.length >= 4) {
-          const latestVol = parseFloat(ks[0][5]);
-          const prevVols  = ks.slice(1).map(k => parseFloat(k[5]));
+        const fData    = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`);
+        coin.funding   = parseFloat(fData.lastFundingRate) * 100;
+      } catch { /* skip */ }
+
+      // 1H klines for volume spike
+      try {
+        const klines    = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=1h&limit=6`);
+        if (klines.length >= 4) {
+          const latestVol = parseFloat(klines[klines.length - 1][5]);
+          const prevVols  = klines.slice(0, -1).map(k => parseFloat(k[5]));
           const avgVol    = prevVols.reduce((a, b) => a + b, 0) / prevVols.length;
           volSpike1H      = avgVol > 0 ? latestVol / avgVol : 0;
         }
@@ -467,20 +471,17 @@ const runScan = async () => {
 
       // L/S ratio
       try {
-        const ls       = await fetchJSON(`https://api.bybit.com/v5/market/account-ratio?category=linear&symbol=${coin.symbol}&period=1h&limit=1`);
-        const lsData   = ls?.result?.list?.[0];
-        longShortRatio = lsData ? parseFloat(lsData.buyRatio) / (parseFloat(lsData.sellRatio) || 1) : 1;
+        const lsData      = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`);
+        longShortRatio    = parseFloat(lsData[0]?.longShortRatio || 1);
       } catch { /* skip */ }
 
-      // OI
+      // OI spike
       try {
-        const oi     = await fetchJSON(`https://api.bybit.com/v5/market/open-interest?category=linear&symbol=${coin.symbol}&intervalTime=5min&limit=2`);
-        const oiList = oi?.result?.list || [];
-        if (oiList.length >= 2) {
-          const curr = parseFloat(oiList[0].openInterest);
-          const prev = parseFloat(oiList[1].openInterest);
-          oiSpikePct = prev > 0 ? ((curr - prev) / prev) * 100 : 0;
-        }
+        const oiData   = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
+        const currOI   = parseFloat(oiData.openInterest);
+        const lastOI   = prevOI.get(coin.symbol) || currOI;
+        oiSpikePct     = lastOI > 0 ? ((currOI - lastOI) / lastOI) * 100 : 0;
+        prevOI.set(coin.symbol, currOI);
       } catch { /* skip */ }
 
       const score = calcScore({
