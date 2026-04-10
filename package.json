@@ -1,6 +1,6 @@
 {
   "name": "cryptogen-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CryptoGen 24/7 Telegram alert server",
   "main": "server.js",
   "type": "module",
