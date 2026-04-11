@@ -464,10 +464,10 @@ const runScan = async () => {
     log(`Fetched ${valid.length} candidates from Binance Futures`);
 
     // ── Check BTC condition first ─────────────────────────────────────────────
-    const btc = await getBTCStatus();
-    const btcDumping = btc && btc.change < -1.5; // BTC dropping more than 1.5%
+    const btcStatus   = await getBTCStatus();
+    const btcDumping  = btcStatus && btcStatus.change < -1.5;
     if (btcDumping) {
-      log(`⚠️ BTC dumping ${btc.change.toFixed(2)}% — LONG alerts suppressed this scan`);
+      log(`⚠️ BTC dumping ${btcStatus.change.toFixed(2)}% — LONG alerts suppressed this scan`);
     }
 
     const freeAlerts    = [];
