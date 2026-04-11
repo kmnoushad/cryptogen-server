@@ -503,35 +503,19 @@ const runScan = async () => {
   log(`Starting scan #${scanCount}...`);
 
   try {
-    // Fetch all tickers from Binance Futures
     const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
-
     const valid = tickers
-      .filter(t =>
-        t.symbol.endsWith('USDT') &&
-        !t.symbol.includes('_') &&
-        !EXCLUDE.has(t.symbol) &&
-        parseFloat(t.quoteVolume) >= MIN_VOLUME_USD
-      )
-      .map(t => ({
-        symbol:  t.symbol,
-        price:   parseFloat(t.lastPrice),
-        change:  parseFloat(t.priceChangePercent),
-        volume:  parseFloat(t.quoteVolume),
-        funding: 0, // fetched per coin below
-      }))
+      .filter(t => t.symbol.endsWith('USDT') && !t.symbol.includes('_') && !EXCLUDE.has(t.symbol) && parseFloat(t.quoteVolume) >= MIN_VOLUME_USD)
+      .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), funding: 0 }))
       .filter(t => Math.abs(t.change) < 8)
       .sort((a, b) => b.volume - a.volume)
       .slice(0, 80);
 
     log(`Fetched ${valid.length} candidates from Binance Futures`);
 
-    // ── Check BTC condition first ─────────────────────────────────────────────
-    const btcStatus   = await getBTCStatus();
-    const btcDumping  = btcStatus && btcStatus.change < -1.5;
-    if (btcDumping) {
-      log(`⚠️ BTC dumping ${btcStatus.change.toFixed(2)}% — LONG alerts suppressed this scan`);
-    }
+    const btcStatus  = await getBTCStatus();
+    const btcDumping = btcStatus && btcStatus.change < -1.5;
+    if (btcDumping) log(`⚠️ BTC dumping ${btcStatus.change.toFixed(2)}% — suppressing LONG alerts`);
 
     const freeAlerts    = [];
     const premiumAlerts = [];
@@ -539,202 +523,138 @@ const runScan = async () => {
     for (const coin of valid) {
       await sleep(350);
 
-      let volSpike1H     = 0;
+      let volSpike15m    = 0;
       let longShortRatio = 1;
       let oiSpikePct     = 0;
-      let price15mChange = 0; // price change in last 15 min
-      let volSpike15m    = 0; // volume spike on current 15m candle
+      let price15mChange = 0;
+      let obData         = null;
+      let obDecision     = { go: true, reason: 'No OB data' };
 
-      // Funding rate
+      // Funding
       try {
-        const fData    = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`);
-        coin.funding   = parseFloat(fData.lastFundingRate) * 100;
+        const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`);
+        coin.funding = parseFloat(f.lastFundingRate) * 100;
       } catch { /* skip */ }
 
-      // 1H klines for volume spike + 15min momentum check
+      // 15m klines — volume spike + price momentum
       try {
-        const klines    = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=8`);
+        const klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=8`);
         if (klines.length >= 4) {
-          // Volume spike on latest candle vs average
-          const latestVol = parseFloat(klines[klines.length - 1][5]);
-          const prevVols  = klines.slice(0, -1).map(k => parseFloat(k[5]));
-          const avgVol    = prevVols.reduce((a, b) => a + b, 0) / prevVols.length;
+          const latestVol = parseFloat(klines[klines.length-1][5]);
+          const prevVols  = klines.slice(0,-1).map(k => parseFloat(k[5]));
+          const avgVol    = prevVols.reduce((a,b) => a+b, 0) / prevVols.length;
           volSpike15m     = avgVol > 0 ? latestVol / avgVol : 0;
-          volSpike1H      = volSpike15m; // use 15m spike for scoring
-
-          // Price change in last 15 min (open of latest candle vs close)
-          const latestOpen  = parseFloat(klines[klines.length - 1][1]);
-          const latestClose = parseFloat(klines[klines.length - 1][4]);
+          const latestOpen  = parseFloat(klines[klines.length-1][1]);
+          const latestClose = parseFloat(klines[klines.length-1][4]);
           price15mChange    = latestOpen > 0 ? ((latestClose - latestOpen) / latestOpen) * 100 : 0;
         }
       } catch { /* skip */ }
 
       // L/S ratio
       try {
-        const lsData      = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`);
-        longShortRatio    = parseFloat(lsData[0]?.longShortRatio || 1);
+        const ls = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`);
+        longShortRatio = parseFloat(ls[0]?.longShortRatio || 1);
       } catch { /* skip */ }
 
       // OI spike
       try {
-        const oiData   = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
-        const currOI   = parseFloat(oiData.openInterest);
-        const lastOI   = prevOI.get(coin.symbol) || currOI;
-        oiSpikePct     = lastOI > 0 ? ((currOI - lastOI) / lastOI) * 100 : 0;
-        prevOI.set(coin.symbol, currOI);
+        const oi    = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
+        const curr  = parseFloat(oi.openInterest);
+        const last  = prevOI.get(coin.symbol) || curr;
+        oiSpikePct  = last > 0 ? ((curr - last) / last) * 100 : 0;
+        prevOI.set(coin.symbol, curr);
       } catch { /* skip */ }
 
-      // ── Order Book Imbalance ──────────────────────────────────────────────────
-      let orderBook = null;
-      try {
-        orderBook = await analyzeOrderBook(coin.symbol, coin.price);
-      } catch { /* skip */ }
+      // Direction
+      const isLong  = coin.funding < 0 && longShortRatio < 1;
+      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
 
-      const score = calcScore({
-        change: coin.change, volume: coin.volume,
-        fundingRate: coin.funding, longShortRatio,
-        volSpike1H, oiSpikePct,
-      });
+      // Score
+      const score = calcScore({ change: coin.change, volume: coin.volume, fundingRate: coin.funding, longShortRatio, volSpike1H: volSpike15m, oiSpikePct });
 
-      // ── Order Book Imbalance Check ─────────────────────────────────────────
-      let obDecision = { go: true, reason: 'No OB data', score: 0 };
-      let obData     = null;
-      try {
-        const obRes  = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${coin.symbol}&limit=50`);
-        if (obRes) {
-          const bids = obRes.bids.map(b => ({ price: parseFloat(b[0]), qty: parseFloat(b[1]) }));
-          const asks = obRes.asks.map(a => ({ price: parseFloat(a[0]), qty: parseFloat(a[1]) }));
-          const rangeTop  = coin.price * 1.02;
-          const rangeBot  = coin.price * 0.98;
-          const nearBids  = bids.filter(b => b.price >= rangeBot);
-          const nearAsks  = asks.filter(a => a.price <= rangeTop);
-          const totalBid  = nearBids.reduce((s, b) => s + b.qty * b.price, 0);
-          const totalAsk  = nearAsks.reduce((s, a) => s + a.qty * a.price, 0);
-          const ratio     = totalAsk > 0 ? totalBid / totalAsk : 1;
-          const bigBuy    = bids.reduce((m, b) => b.qty*b.price > m.size ? {price:b.price,size:b.qty*b.price} : m, {price:0,size:0});
-          const bigSell   = asks.reduce((m, a) => a.qty*a.price > m.size ? {price:a.price,size:a.qty*a.price} : m, {price:0,size:0});
-          const buyProx   = bigBuy.price  > 0 ? ((coin.price - bigBuy.price)  / coin.price) * 100 : 99;
-          const sellProx  = bigSell.price > 0 ? ((bigSell.price - coin.price) / coin.price) * 100 : 99;
-          const hasBuyWall  = buyProx  < 1.5 && bigBuy.size  > 50000;
-          const hasSellWall = sellProx < 1.5 && bigSell.size > 50000;
-
-          obData = { ratio: parseFloat(ratio.toFixed(2)), bigBuy, bigSell, buyProx: parseFloat(buyProx.toFixed(2)), sellProx: parseFloat(sellProx.toFixed(2)), hasBuyWall, hasSellWall };
-
-          // Decision for LONG
-          if (isLong) {
-            if (ratio >= 1.5 && !hasSellWall)   obDecision = { go: true,  reason: `✅ Buy wall ${ratio.toFixed(1)}x`,          score: 20 };
-            else if (hasSellWall)                obDecision = { go: false, reason: `🚫 Sell wall ${sellProx.toFixed(1)}% away`, score: -20 };
-            else if (ratio < 0.7)                obDecision = { go: false, reason: `🚫 Sell-heavy ${ratio.toFixed(1)}x`,        score: -15 };
-            else                                 obDecision = { go: true,  reason: `🟡 Neutral book`,                           score: 0   };
-          }
-          // Decision for SHORT
-          if (isShort) {
-            if (ratio <= 0.7 && !hasBuyWall)     obDecision = { go: true,  reason: `✅ Sell wall ${(1/ratio).toFixed(1)}x`,    score: 20 };
-            else if (hasBuyWall)                  obDecision = { go: false, reason: `🚫 Buy wall ${buyProx.toFixed(1)}% away`,  score: -20 };
-            else if (ratio > 1.5)                 obDecision = { go: false, reason: `🚫 Buy-heavy ${ratio.toFixed(1)}x`,        score: -15 };
-            else                                  obDecision = { go: true,  reason: `🟡 Neutral book`,                          score: 0   };
-          }
-        }
-      } catch { /* skip OB check */ }
-
-      // Skip if order book says no
-      if (!obDecision.go) {
-        log(`⏭ SKIP ${coin.symbol} — Order book: ${obDecision.reason}`);
-        continue;
-      }
-        // ── Fade detection — check if previously alerted coin is dropping ──
+      // ── Fade detection ────────────────────────────────────────────────────────
+      const key = `score_${coin.symbol}`;
+      if (!canAlert(key)) {
         const sig = signalPrices.get(coin.symbol);
         if (sig && sig.direction === 'LONG') {
           const dropPct = ((sig.price - coin.price) / sig.price) * 100;
           if (dropPct >= FADE_THRESHOLD_PCT) {
-            log(`⚠️ FADE: ${coin.symbol} dropped ${dropPct.toFixed(1)}% from signal`);
-            const fadeMsg = `
-⚠️ <b>MOMENTUM FADING</b>
-━━━━━━━━━━━━━━━
-🔴 <b>${coin.symbol.replace('USDT','')}</b> dropped <b>${dropPct.toFixed(1)}%</b> from signal price
-📉 Signal price: <b>$${sig.price}</b>
-📉 Current price: <b>$${coin.price}</b>
-⏰ <b>${gstNow()} GST</b>
-━━━━━━━━━━━━━━━
-⚡ Consider exiting or tightening stop loss
-            `.trim();
-            await postToChannel(PREMIUM_CHANNEL, fadeMsg);
-            signalPrices.delete(coin.symbol); // don't spam fade warnings
+            log(`⚠️ FADE: ${coin.symbol} dropped ${dropPct.toFixed(1)}%`);
+            await postToChannel(PREMIUM_CHANNEL, `⚠️ <b>MOMENTUM FADING</b>\n━━━━━━━━━━━━━━━\n🔴 <b>${coin.symbol.replace('USDT','')}</b> dropped <b>${dropPct.toFixed(1)}%</b> from signal\n📉 Entry: <b>$${sig.price}</b> → Now: <b>$${coin.price}</b>\n⏰ <b>${gstNow()} GST</b>\n━━━━━━━━━━━━━━━\n⚡ Consider exiting or tightening stop`);
+            signalPrices.delete(coin.symbol);
           }
         }
         continue;
       }
 
-      // ── Momentum confirmation — BOTH price up AND volume spike required ──
-      const isLong  = coin.funding < 0 && longShortRatio < 1;
-      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
-
-      // For LONG: price must be rising in last 15m + volume spike + BTC not dumping
+      // ── Momentum filter ───────────────────────────────────────────────────────
       if (isLong && (price15mChange < 0.3 || volSpike15m < 1.5 || btcDumping)) {
-        log(`⏭ SKIP ${coin.symbol} LONG — no momentum or BTC dumping`);
+        log(`⏭ SKIP ${coin.symbol} LONG — no momentum (15m: ${price15mChange.toFixed(2)}%, vol: ${volSpike15m.toFixed(1)}x)`);
         continue;
       }
-      // For SHORT: price must be falling in last 15m + volume spike
       if (isShort && (price15mChange > -0.3 || volSpike15m < 1.5)) {
         log(`⏭ SKIP ${coin.symbol} SHORT — no momentum (15m: ${price15mChange.toFixed(2)}%, vol: ${volSpike15m.toFixed(1)}x)`);
         continue;
       }
 
       // ── Order Book filter ─────────────────────────────────────────────────────
-      if (orderBook) {
-        // For LONG: need buy wall stronger than sell wall
-        if (isLong && orderBook.signal === 'STRONG_SELL') {
-          log(`⏭ SKIP ${coin.symbol} LONG — sell wall ${orderBook.sellWall} >> buy wall ${orderBook.buyWall}`);
-          continue;
-        }
-        // For SHORT: need sell wall stronger than buy wall
-        if (isShort && orderBook.signal === 'STRONG_BUY') {
-          log(`⏭ SKIP ${coin.symbol} SHORT — buy wall ${orderBook.buyWall} >> sell wall ${orderBook.sellWall}`);
-          continue;
-        }
-      }
+      try {
+        const ob      = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${coin.symbol}&limit=50`);
+        const bids    = ob.bids.map(b => ({ price: parseFloat(b[0]), qty: parseFloat(b[1]) }));
+        const asks    = ob.asks.map(a => ({ price: parseFloat(a[0]), qty: parseFloat(a[1]) }));
+        const nearBids = bids.filter(b => b.price >= coin.price * 0.98);
+        const nearAsks = asks.filter(a => a.price <= coin.price * 1.02);
+        const totalBid = nearBids.reduce((s,b) => s + b.qty * b.price, 0);
+        const totalAsk = nearAsks.reduce((s,a) => s + a.qty * a.price, 0);
+        const ratio    = totalAsk > 0 ? totalBid / totalAsk : 1;
+        const bigSell  = asks.reduce((m,a) => a.qty*a.price > m.size ? {price:a.price,size:a.qty*a.price} : m, {price:0,size:0});
+        const bigBuy   = bids.reduce((m,b) => b.qty*b.price > m.size ? {price:b.price,size:b.qty*b.price} : m, {price:0,size:0});
+        const sellProx = bigSell.price > 0 ? ((bigSell.price - coin.price) / coin.price) * 100 : 99;
+        const buyProx  = bigBuy.price  > 0 ? ((coin.price - bigBuy.price)  / coin.price) * 100 : 99;
+        const hasSellWall = sellProx < 1.5 && bigSell.size > 50000;
+        const hasBuyWall  = buyProx  < 1.5 && bigBuy.size  > 50000;
 
-      // ── Order book filter — skip if walls oppose direction ─────────────────
-      if (orderBook) {
-        if (isLong && orderBook.bigSellWall) {
-          log(`⏭ SKIP ${coin.symbol} LONG — big sell wall (imbalance: ${orderBook.imbalance})`);
-          continue;
-        }
-        if (isShort && orderBook.bigBuyWall) {
-          log(`⏭ SKIP ${coin.symbol} SHORT — big buy wall (imbalance: ${orderBook.imbalance})`);
-          continue;
-        }
-      }
+        obData = { ratio: parseFloat(ratio.toFixed(2)) };
 
-      const coinData = { ...coin, score, longShortRatio, volSpike1H, oiSpikePct, price15mChange, volSpike15m, orderBook };
+        if (isLong) {
+          if (hasSellWall)  { obDecision = { go: false, reason: `🚫 Sell wall ${sellProx.toFixed(1)}% away` }; }
+          else if (ratio < 0.7) { obDecision = { go: false, reason: `🚫 Sell-heavy book ${ratio.toFixed(1)}x` }; }
+          else if (ratio >= 1.5) { obDecision = { go: true,  reason: `✅ Buy wall ${ratio.toFixed(1)}x` }; }
+          else              { obDecision = { go: true,  reason: `🟡 Neutral book` }; }
+        }
+        if (isShort) {
+          if (hasBuyWall)   { obDecision = { go: false, reason: `🚫 Buy wall ${buyProx.toFixed(1)}% away` }; }
+          else if (ratio > 1.5)  { obDecision = { go: false, reason: `🚫 Buy-heavy book ${ratio.toFixed(1)}x` }; }
+          else if (ratio <= 0.7) { obDecision = { go: true,  reason: `✅ Sell wall ${(1/ratio).toFixed(1)}x` }; }
+          else               { obDecision = { go: true,  reason: `🟡 Neutral book` }; }
+        }
+      } catch { /* skip OB */ }
+
+      if (!obDecision.go) {
+        log(`⏭ SKIP ${coin.symbol} — OB: ${obDecision.reason}`);
+        continue;
+      }
 
       if (score >= PREMIUM_MIN_SCORE) {
-        premiumAlerts.push(coinData);
-        if (score >= FREE_MIN_SCORE) freeAlerts.push(coinData);
+        premiumAlerts.push({ ...coin, score, longShortRatio, volSpike1H: volSpike15m, oiSpikePct, price15mChange, obData, obDecision });
+        if (score >= FREE_MIN_SCORE) freeAlerts.push({ ...coin, score });
         markAlert(key);
-        signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : isShort ? 'SHORT' : 'WATCH', firedAt: Date.now() });
+        signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : 'SHORT', firedAt: Date.now() });
       }
     }
 
     log(`Scan #${scanCount} — Free: ${freeAlerts.length} Premium: ${premiumAlerts.length}`);
 
-    // ── Post to Premium channel (score 3+) ──
-    const btc = await getBTCStatus();
-    const btcLine = btc
-      ? `\n${btc.emoji} BTC: <b>$${btc.price.toLocaleString()}</b> ${btc.change > 0 ? '+' : ''}${btc.change.toFixed(2)}% — ${btc.condition}`
-      : '';
+    const btc     = btcStatus;
+    const btcLine = btc ? `\n${btc.emoji} BTC: <b>$${btc.price.toLocaleString()}</b> ${btc.change > 0 ? '+' : ''}${btc.change.toFixed(2)}% — ${btc.condition}` : '';
 
     for (const coin of premiumAlerts.slice(0, MAX_ALERTS_PER_SCAN)) {
-      const isLong  = coin.funding < 0 && coin.longShortRatio < 1;
-      const isShort = coin.funding > 0.01 && coin.longShortRatio > 1.2;
+      const isLong   = coin.funding < 0 && coin.longShortRatio < 1;
+      const isShort  = coin.funding > 0.01 && coin.longShortRatio > 1.2;
       const dirEmoji = isLong ? '🟢' : isShort ? '🔴' : '🟡';
       const dir      = isLong ? '📈 LONG' : isShort ? '📉 SHORT' : '👀 WATCH';
       const scoreBar = '█'.repeat(Math.min(Math.floor(coin.score), 10)) + '░'.repeat(Math.max(0, 10 - Math.floor(coin.score)));
-
-      const obLine = orderBook
-      const obLine = obData
-        ? `\n📖 OB: <b>${obDecision.reason}</b> | Ratio: <b>${obData.ratio}x</b>`
-        : '';
+      const obLine   = coin.obData ? `\n📖 OB: <b>${coin.obDecision.reason}</b> | Ratio: <b>${coin.obData.ratio}x</b>` : '';
 
       const premiumMsg = `
 ${dirEmoji} <b>NEXIO PRIME SIGNAL</b>
