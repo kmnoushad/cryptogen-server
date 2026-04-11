@@ -19,9 +19,13 @@ const SCAN_INTERVAL_MS    = 300000;  // 5 min
 const POLL_INTERVAL_MS    = 30000;   // 30 sec
 const ALERT_COOLDOWN_MS   = 1800000; // 30 min
 const FREE_MIN_SCORE      = 4;       // free channel threshold
-const PREMIUM_MIN_SCORE   = 3;       // premium channel threshold
+const PREMIUM_MIN_SCORE   = 3.5;     // premium channel threshold — raised from 3
 const MIN_VOLUME_USD      = 1000000; // $1M min volume
 const MAX_ALERTS_PER_SCAN = 5;
+const FADE_THRESHOLD_PCT  = 2.0;     // send warning if price drops 2% after signal
+
+// ── Track signal prices for fade detection ────────────────────────────────────
+const signalPrices = new Map(); // symbol → { price, direction, firedAt }
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const alertHistory = new Map();
@@ -459,6 +463,13 @@ const runScan = async () => {
 
     log(`Fetched ${valid.length} candidates from Binance Futures`);
 
+    // ── Check BTC condition first ─────────────────────────────────────────────
+    const btc = await getBTCStatus();
+    const btcDumping = btc && btc.change < -1.5; // BTC dropping more than 1.5%
+    if (btcDumping) {
+      log(`⚠️ BTC dumping ${btc.change.toFixed(2)}% — LONG alerts suppressed this scan`);
+    }
+
     const freeAlerts    = [];
     const premiumAlerts = [];
 
@@ -468,6 +479,8 @@ const runScan = async () => {
       let volSpike1H     = 0;
       let longShortRatio = 1;
       let oiSpikePct     = 0;
+      let price15mChange = 0; // price change in last 15 min
+      let volSpike15m    = 0; // volume spike on current 15m candle
 
       // Funding rate
       try {
@@ -475,14 +488,21 @@ const runScan = async () => {
         coin.funding   = parseFloat(fData.lastFundingRate) * 100;
       } catch { /* skip */ }
 
-      // 1H klines for volume spike
+      // 1H klines for volume spike + 15min momentum check
       try {
-        const klines    = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=1h&limit=6`);
+        const klines    = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=8`);
         if (klines.length >= 4) {
+          // Volume spike on latest candle vs average
           const latestVol = parseFloat(klines[klines.length - 1][5]);
           const prevVols  = klines.slice(0, -1).map(k => parseFloat(k[5]));
           const avgVol    = prevVols.reduce((a, b) => a + b, 0) / prevVols.length;
-          volSpike1H      = avgVol > 0 ? latestVol / avgVol : 0;
+          volSpike15m     = avgVol > 0 ? latestVol / avgVol : 0;
+          volSpike1H      = volSpike15m; // use 15m spike for scoring
+
+          // Price change in last 15 min (open of latest candle vs close)
+          const latestOpen  = parseFloat(klines[klines.length - 1][1]);
+          const latestClose = parseFloat(klines[klines.length - 1][4]);
+          price15mChange    = latestOpen > 0 ? ((latestClose - latestOpen) / latestOpen) * 100 : 0;
         }
       } catch { /* skip */ }
 
@@ -508,14 +528,53 @@ const runScan = async () => {
       });
 
       const key = `score_${coin.symbol}`;
-      if (!canAlert(key)) continue;
+      if (!canAlert(key)) {
+        // ── Fade detection — check if previously alerted coin is dropping ──
+        const sig = signalPrices.get(coin.symbol);
+        if (sig && sig.direction === 'LONG') {
+          const dropPct = ((sig.price - coin.price) / sig.price) * 100;
+          if (dropPct >= FADE_THRESHOLD_PCT) {
+            log(`⚠️ FADE: ${coin.symbol} dropped ${dropPct.toFixed(1)}% from signal`);
+            const fadeMsg = `
+⚠️ <b>MOMENTUM FADING</b>
+━━━━━━━━━━━━━━━
+🔴 <b>${coin.symbol.replace('USDT','')}</b> dropped <b>${dropPct.toFixed(1)}%</b> from signal price
+📉 Signal price: <b>$${sig.price}</b>
+📉 Current price: <b>$${coin.price}</b>
+⏰ <b>${gstNow()} GST</b>
+━━━━━━━━━━━━━━━
+⚡ Consider exiting or tightening stop loss
+            `.trim();
+            await postToChannel(PREMIUM_CHANNEL, fadeMsg);
+            signalPrices.delete(coin.symbol); // don't spam fade warnings
+          }
+        }
+        continue;
+      }
 
-      const coinData = { ...coin, score, longShortRatio, volSpike1H, oiSpikePct };
+      // ── Momentum confirmation — BOTH price up AND volume spike required ──
+      const isLong  = coin.funding < 0 && longShortRatio < 1;
+      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
+
+      // For LONG: price must be rising in last 15m + volume spike + BTC not dumping
+      if (isLong && (price15mChange < 0.3 || volSpike15m < 1.5 || btcDumping)) {
+        log(`⏭ SKIP ${coin.symbol} LONG — no momentum or BTC dumping`);
+        continue;
+      }
+      // For SHORT: price must be falling in last 15m + volume spike
+      if (isShort && (price15mChange > -0.3 || volSpike15m < 1.5)) {
+        log(`⏭ SKIP ${coin.symbol} SHORT — no momentum (15m: ${price15mChange.toFixed(2)}%, vol: ${volSpike15m.toFixed(1)}x)`);
+        continue;
+      }
+
+      const coinData = { ...coin, score, longShortRatio, volSpike1H, oiSpikePct, price15mChange, volSpike15m };
 
       if (score >= PREMIUM_MIN_SCORE) {
         premiumAlerts.push(coinData);
         if (score >= FREE_MIN_SCORE) freeAlerts.push(coinData);
         markAlert(key);
+        // Track signal price for fade detection
+        signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : isShort ? 'SHORT' : 'WATCH', firedAt: Date.now() });
       }
     }
 
@@ -541,6 +600,7 @@ ${dir} <b>${coin.symbol.replace('USDT','')}</b>
 ━━━━━━━━━━━━━━━
 💰 Price: <b>$${coin.price}</b>
 💸 Funding: <b>${coin.funding.toFixed(3)}%</b>
+🕯 15m Move: <b>${coin.price15mChange > 0 ? '+' : ''}${coin.price15mChange?.toFixed(2)}%</b>
 🔊 Vol Spike: <b>${coin.volSpike1H.toFixed(1)}x</b>
 📦 OI: <b>${coin.oiSpikePct > 0 ? '+' : ''}${coin.oiSpikePct.toFixed(1)}%</b>
 ⚖️ L/S: <b>${coin.longShortRatio.toFixed(2)}</b>
