@@ -133,7 +133,24 @@ const postToChannel = async (channelId, text) => {
   } catch { /* skip */ }
 };
 
-// ── Scoring ───────────────────────────────────────────────────────────────────
+// ── Get BTC status ────────────────────────────────────────────────────────────
+const getBTCStatus = async () => {
+  try {
+    const res = await fetchJSON('https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT');
+    const btc = res?.result?.list?.[0];
+    if (!btc) return null;
+    const price     = parseFloat(btc.lastPrice);
+    const change    = parseFloat(btc.price24hPcnt) * 100;
+    const funding   = parseFloat(btc.fundingRate) * 100;
+    let condition, emoji;
+    if (change > 2 && funding < 0.01)        { condition = '✅ GOOD — BTC pumping, low funding'; emoji = '🟢'; }
+    else if (change > 0 && funding < 0.02)   { condition = '🟡 NEUTRAL — BTC stable';            emoji = '🟡'; }
+    else if (change < -2)                     { condition = '🔴 CAUTION — BTC dumping';           emoji = '🔴'; }
+    else if (funding > 0.03)                  { condition = '⚠️ RISKY — BTC funding too high';    emoji = '🟠'; }
+    else                                      { condition = '🟡 NEUTRAL — Monitor BTC';            emoji = '🟡'; }
+    return { price, change, funding, condition, emoji };
+  } catch { return null; }
+};
 const calcScore = ({ change, volume, fundingRate, longShortRatio, volSpike1H, oiSpikePct }) => {
   let score = 0;
   if (Math.abs(change) < 1)       score += 2;
@@ -505,41 +522,56 @@ const runScan = async () => {
     log(`Scan #${scanCount} — Free: ${freeAlerts.length} Premium: ${premiumAlerts.length}`);
 
     // ── Post to Premium channel (score 3+) ──
+    const btc = await getBTCStatus();
+    const btcLine = btc
+      ? `\n${btc.emoji} BTC: <b>$${btc.price.toLocaleString()}</b> ${btc.change > 0 ? '+' : ''}${btc.change.toFixed(2)}% — ${btc.condition}`
+      : '';
+
     for (const coin of premiumAlerts.slice(0, MAX_ALERTS_PER_SCAN)) {
-      const dir = coin.funding < 0 && coin.longShortRatio < 1 ? '📈 LONG' : '👀 WATCH';
-      const msg = `
-👑 <b>NEXIO PRIME SIGNAL</b>
+      const isLong  = coin.funding < 0 && coin.longShortRatio < 1;
+      const isShort = coin.funding > 0.01 && coin.longShortRatio > 1.2;
+      const dirEmoji = isLong ? '🟢' : isShort ? '🔴' : '🟡';
+      const dir      = isLong ? '📈 LONG' : isShort ? '📉 SHORT' : '👀 WATCH';
+      const scoreBar = '█'.repeat(Math.min(Math.floor(coin.score), 10)) + '░'.repeat(Math.max(0, 10 - Math.floor(coin.score)));
+
+      const premiumMsg = `
+${dirEmoji} <b>NEXIO PRIME SIGNAL</b>
 ━━━━━━━━━━━━━━━
-${dir} <b>${coin.symbol.replace('USDT','')}</b> — Score: <b>${coin.score}/10</b>
+${dir} <b>${coin.symbol.replace('USDT','')}</b>
+━━━━━━━━━━━━━━━
 💰 Price: <b>$${coin.price}</b>
 💸 Funding: <b>${coin.funding.toFixed(3)}%</b>
 🔊 Vol Spike: <b>${coin.volSpike1H.toFixed(1)}x</b>
 📦 OI: <b>${coin.oiSpikePct > 0 ? '+' : ''}${coin.oiSpikePct.toFixed(1)}%</b>
 ⚖️ L/S: <b>${coin.longShortRatio.toFixed(2)}</b>
+📊 Score: <b>${coin.score}/10</b> ${scoreBar}${btcLine}
 ⏰ <b>${gstNow()} GST</b>
 ━━━━━━━━━━━━━━━
 <a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
       `.trim();
-      await postToChannel(PREMIUM_CHANNEL, msg);
-      await sleep(500);
-    }
 
-    // ── Post to Free channel (score 4+ only) ──
-    for (const coin of freeAlerts.slice(0, 3)) { // max 3 for free
-      const dir = coin.funding < 0 && coin.longShortRatio < 1 ? '📈 LONG' : '👀 WATCH';
-      const msg = `
-🎯 <b>NEXIO SIGNAL</b>
+      const freeMsg = `
+${dirEmoji} <b>${coin.symbol.replace('USDT','')} — ${dir}</b>
 ━━━━━━━━━━━━━━━
-${dir} <b>${coin.symbol.replace('USDT','')}</b>
 💰 Price: <b>$${coin.price}</b>
 💸 Funding: <b>${coin.funding.toFixed(3)}%</b>
+📊 Score: <b>${coin.score}/10</b> ${scoreBar}${btcLine}
 ⏰ <b>${gstNow()} GST</b>
 ━━━━━━━━━━━━━━━
 <a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
+━━━━━━━━━━━━━━━
+🔒 <b>This is a basic signal.</b>
+👑 <b>Nexio Prime</b> members get:
+• Full data (Vol, OI, L/S ratio)
+• Earlier signals (score 3+)
+• Whale footprint alerts
+• Liquidity sweep alerts
 
-👑 Get full signals → @NexioAlertBot
+💎 <a href="https://t.me/+xct9p5ep021hY2U8">Join Nexio Prime →</a>
       `.trim();
-      await postToChannel(FREE_CHANNEL, msg);
+
+      await postToChannel(PREMIUM_CHANNEL, premiumMsg);
+      if (coin.score >= FREE_MIN_SCORE) await postToChannel(FREE_CHANNEL, freeMsg);
       await sleep(500);
     }
 
