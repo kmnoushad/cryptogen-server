@@ -172,6 +172,69 @@ const calcScore = ({ change, volume, fundingRate, longShortRatio, volSpike1H, oi
   return Math.round(score * 10) / 10;
 };
 
+// ── Order Book Imbalance Detector ─────────────────────────────────────────────
+// Checks real-time order book depth within 2% of current price
+// Returns: { imbalance, buyWall, sellWall, signal, confidence }
+// imbalance > 1 = more buyers = bullish
+// imbalance < 1 = more sellers = bearish
+const analyzeOrderBook = async (symbol, currentPrice) => {
+  try {
+    const res  = await fetchJSON(
+      `https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=100`
+    );
+    if (!res?.bids || !res?.asks) return null;
+
+    const range = currentPrice * 0.02; // look within 2% of price
+
+    // Sum buy orders (bids) within 2% below price
+    let totalBids = 0;
+    for (const [price, qty] of res.bids) {
+      const p = parseFloat(price);
+      const q = parseFloat(qty);
+      if (p >= currentPrice - range) totalBids += p * q;
+      else break;
+    }
+
+    // Sum sell orders (asks) within 2% above price
+    let totalAsks = 0;
+    for (const [price, qty] of res.asks) {
+      const p = parseFloat(price);
+      const q = parseFloat(qty);
+      if (p <= currentPrice + range) totalAsks += p * q;
+      else break;
+    }
+
+    const total      = totalBids + totalAsks;
+    const imbalance  = totalAsks > 0 ? totalBids / totalAsks : 1;
+    const buyPct     = total > 0 ? (totalBids / total) * 100 : 50;
+    const sellPct    = 100 - buyPct;
+
+    // Detect large walls
+    const bigBuyWall  = totalBids > totalAsks * 2.5; // buyers 2.5x stronger
+    const bigSellWall = totalAsks > totalBids * 2.5; // sellers 2.5x stronger
+
+    let signal, confidence, emoji;
+    if (imbalance >= 2.5)      { signal = 'STRONG BUY WALL';  confidence = 'HIGH';   emoji = '🟢'; }
+    else if (imbalance >= 1.5) { signal = 'BUY PRESSURE';     confidence = 'MOD';    emoji = '🟡'; }
+    else if (imbalance >= 0.8) { signal = 'BALANCED';         confidence = 'NEUTRAL'; emoji = '⚪'; }
+    else if (imbalance >= 0.4) { signal = 'SELL PRESSURE';    confidence = 'MOD';    emoji = '🟠'; }
+    else                        { signal = 'STRONG SELL WALL'; confidence = 'HIGH';   emoji = '🔴'; }
+
+    return {
+      imbalance:    parseFloat(imbalance.toFixed(2)),
+      buyWall:      parseFloat((totalBids / 1000).toFixed(1)),   // in $K
+      sellWall:     parseFloat((totalAsks / 1000).toFixed(1)),   // in $K
+      buyPct:       parseFloat(buyPct.toFixed(1)),
+      sellPct:      parseFloat(sellPct.toFixed(1)),
+      bigBuyWall,
+      bigSellWall,
+      signal,
+      confidence,
+      emoji,
+    };
+  } catch { return null; }
+};
+
 // ── Bot commands ──────────────────────────────────────────────────────────────
 const handleCommand = async (msg) => {
   const chatId    = String(msg.chat?.id);
@@ -521,14 +584,64 @@ const runScan = async () => {
         prevOI.set(coin.symbol, currOI);
       } catch { /* skip */ }
 
+      // ── Order Book Imbalance ──────────────────────────────────────────────────
+      let orderBook = null;
+      try {
+        orderBook = await analyzeOrderBook(coin.symbol, coin.price);
+      } catch { /* skip */ }
+
       const score = calcScore({
         change: coin.change, volume: coin.volume,
         fundingRate: coin.funding, longShortRatio,
         volSpike1H, oiSpikePct,
       });
 
-      const key = `score_${coin.symbol}`;
-      if (!canAlert(key)) {
+      // ── Order Book Imbalance Check ─────────────────────────────────────────
+      let obDecision = { go: true, reason: 'No OB data', score: 0 };
+      let obData     = null;
+      try {
+        const obRes  = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${coin.symbol}&limit=50`);
+        if (obRes) {
+          const bids = obRes.bids.map(b => ({ price: parseFloat(b[0]), qty: parseFloat(b[1]) }));
+          const asks = obRes.asks.map(a => ({ price: parseFloat(a[0]), qty: parseFloat(a[1]) }));
+          const rangeTop  = coin.price * 1.02;
+          const rangeBot  = coin.price * 0.98;
+          const nearBids  = bids.filter(b => b.price >= rangeBot);
+          const nearAsks  = asks.filter(a => a.price <= rangeTop);
+          const totalBid  = nearBids.reduce((s, b) => s + b.qty * b.price, 0);
+          const totalAsk  = nearAsks.reduce((s, a) => s + a.qty * a.price, 0);
+          const ratio     = totalAsk > 0 ? totalBid / totalAsk : 1;
+          const bigBuy    = bids.reduce((m, b) => b.qty*b.price > m.size ? {price:b.price,size:b.qty*b.price} : m, {price:0,size:0});
+          const bigSell   = asks.reduce((m, a) => a.qty*a.price > m.size ? {price:a.price,size:a.qty*a.price} : m, {price:0,size:0});
+          const buyProx   = bigBuy.price  > 0 ? ((coin.price - bigBuy.price)  / coin.price) * 100 : 99;
+          const sellProx  = bigSell.price > 0 ? ((bigSell.price - coin.price) / coin.price) * 100 : 99;
+          const hasBuyWall  = buyProx  < 1.5 && bigBuy.size  > 50000;
+          const hasSellWall = sellProx < 1.5 && bigSell.size > 50000;
+
+          obData = { ratio: parseFloat(ratio.toFixed(2)), bigBuy, bigSell, buyProx: parseFloat(buyProx.toFixed(2)), sellProx: parseFloat(sellProx.toFixed(2)), hasBuyWall, hasSellWall };
+
+          // Decision for LONG
+          if (isLong) {
+            if (ratio >= 1.5 && !hasSellWall)   obDecision = { go: true,  reason: `✅ Buy wall ${ratio.toFixed(1)}x`,          score: 20 };
+            else if (hasSellWall)                obDecision = { go: false, reason: `🚫 Sell wall ${sellProx.toFixed(1)}% away`, score: -20 };
+            else if (ratio < 0.7)                obDecision = { go: false, reason: `🚫 Sell-heavy ${ratio.toFixed(1)}x`,        score: -15 };
+            else                                 obDecision = { go: true,  reason: `🟡 Neutral book`,                           score: 0   };
+          }
+          // Decision for SHORT
+          if (isShort) {
+            if (ratio <= 0.7 && !hasBuyWall)     obDecision = { go: true,  reason: `✅ Sell wall ${(1/ratio).toFixed(1)}x`,    score: 20 };
+            else if (hasBuyWall)                  obDecision = { go: false, reason: `🚫 Buy wall ${buyProx.toFixed(1)}% away`,  score: -20 };
+            else if (ratio > 1.5)                 obDecision = { go: false, reason: `🚫 Buy-heavy ${ratio.toFixed(1)}x`,        score: -15 };
+            else                                  obDecision = { go: true,  reason: `🟡 Neutral book`,                          score: 0   };
+          }
+        }
+      } catch { /* skip OB check */ }
+
+      // Skip if order book says no
+      if (!obDecision.go) {
+        log(`⏭ SKIP ${coin.symbol} — Order book: ${obDecision.reason}`);
+        continue;
+      }
         // ── Fade detection — check if previously alerted coin is dropping ──
         const sig = signalPrices.get(coin.symbol);
         if (sig && sig.direction === 'LONG') {
@@ -567,13 +680,38 @@ const runScan = async () => {
         continue;
       }
 
-      const coinData = { ...coin, score, longShortRatio, volSpike1H, oiSpikePct, price15mChange, volSpike15m };
+      // ── Order Book filter ─────────────────────────────────────────────────────
+      if (orderBook) {
+        // For LONG: need buy wall stronger than sell wall
+        if (isLong && orderBook.signal === 'STRONG_SELL') {
+          log(`⏭ SKIP ${coin.symbol} LONG — sell wall ${orderBook.sellWall} >> buy wall ${orderBook.buyWall}`);
+          continue;
+        }
+        // For SHORT: need sell wall stronger than buy wall
+        if (isShort && orderBook.signal === 'STRONG_BUY') {
+          log(`⏭ SKIP ${coin.symbol} SHORT — buy wall ${orderBook.buyWall} >> sell wall ${orderBook.sellWall}`);
+          continue;
+        }
+      }
+
+      // ── Order book filter — skip if walls oppose direction ─────────────────
+      if (orderBook) {
+        if (isLong && orderBook.bigSellWall) {
+          log(`⏭ SKIP ${coin.symbol} LONG — big sell wall (imbalance: ${orderBook.imbalance})`);
+          continue;
+        }
+        if (isShort && orderBook.bigBuyWall) {
+          log(`⏭ SKIP ${coin.symbol} SHORT — big buy wall (imbalance: ${orderBook.imbalance})`);
+          continue;
+        }
+      }
+
+      const coinData = { ...coin, score, longShortRatio, volSpike1H, oiSpikePct, price15mChange, volSpike15m, orderBook };
 
       if (score >= PREMIUM_MIN_SCORE) {
         premiumAlerts.push(coinData);
         if (score >= FREE_MIN_SCORE) freeAlerts.push(coinData);
         markAlert(key);
-        // Track signal price for fade detection
         signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : isShort ? 'SHORT' : 'WATCH', firedAt: Date.now() });
       }
     }
@@ -593,6 +731,11 @@ const runScan = async () => {
       const dir      = isLong ? '📈 LONG' : isShort ? '📉 SHORT' : '👀 WATCH';
       const scoreBar = '█'.repeat(Math.min(Math.floor(coin.score), 10)) + '░'.repeat(Math.max(0, 10 - Math.floor(coin.score)));
 
+      const obLine = orderBook
+      const obLine = obData
+        ? `\n📖 OB: <b>${obDecision.reason}</b> | Ratio: <b>${obData.ratio}x</b>`
+        : '';
+
       const premiumMsg = `
 ${dirEmoji} <b>NEXIO PRIME SIGNAL</b>
 ━━━━━━━━━━━━━━━
@@ -604,7 +747,7 @@ ${dir} <b>${coin.symbol.replace('USDT','')}</b>
 🔊 Vol Spike: <b>${coin.volSpike1H.toFixed(1)}x</b>
 📦 OI: <b>${coin.oiSpikePct > 0 ? '+' : ''}${coin.oiSpikePct.toFixed(1)}%</b>
 ⚖️ L/S: <b>${coin.longShortRatio.toFixed(2)}</b>
-📊 Score: <b>${coin.score}/10</b> ${scoreBar}${btcLine}
+📊 Score: <b>${coin.score}/10</b> ${scoreBar}${obLine}${btcLine}
 ⏰ <b>${gstNow()} GST</b>
 ━━━━━━━━━━━━━━━
 <a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
