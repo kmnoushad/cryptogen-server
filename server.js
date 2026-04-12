@@ -498,6 +498,70 @@ const pollUsers = async () => {
 };
 
 // ── Main scan ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// NEXIO ACCUMULATION DETECTOR
+// The fundamental problem with all scanners:
+// They detect RESULT of pump (score 5 after 3 green candles)
+// We need to detect CAUSE of pump (accumulation before move)
+//
+// PHASE 1 — LOADING: flat price + rising OI + negative funding + low volume
+// PHASE 2 — BREAKOUT: first candle with volume spike on LOADING coin = ENTRY
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Tracks coins in LOADING (accumulation) state across scans
+// symbol → { oiHistory: [], scanCount: 0, firstSeen: Date }
+const loadingCoins = new Map();
+
+// Detect accumulation state from 15m klines
+const detectAccumulation = (klines, currentOI, prevOIVal, funding, longShortRatio) => {
+  if (klines.length < 6) return null;
+
+  const candles     = klines.slice(-6); // last 6 candles = 90 min
+  const latestCandle = candles[candles.length - 1];
+  const prevCandles  = candles.slice(0, -1);
+
+  // Price range over last 6 candles — must be tight (< 1.5%)
+  const highs    = candles.map(c => parseFloat(c[2]));
+  const lows     = candles.map(c => parseFloat(c[3]));
+  const rangeHigh = Math.max(...highs);
+  const rangeLow  = Math.min(...lows);
+  const rangePct  = rangeLow > 0 ? ((rangeHigh - rangeLow) / rangeLow) * 100 : 99;
+
+  // Volume on latest candle vs average of prev candles
+  const latestVol = parseFloat(latestCandle[5]);
+  const prevVols  = prevCandles.map(c => parseFloat(c[5]));
+  const avgVol    = prevVols.reduce((a,b) => a+b, 0) / prevVols.length;
+  const volRatio  = avgVol > 0 ? latestVol / avgVol : 0;
+
+  // Price move on latest candle
+  const latestOpen  = parseFloat(latestCandle[1]);
+  const latestClose = parseFloat(latestCandle[4]);
+  const latestMove  = latestOpen > 0 ? ((latestClose - latestOpen) / latestOpen) * 100 : 0;
+
+  // OI building — current > previous
+  const oiBuilding = prevOIVal > 0 && currentOI > prevOIVal;
+  const oiGrowthPct = prevOIVal > 0 ? ((currentOI - prevOIVal) / prevOIVal) * 100 : 0;
+
+  // ── LOADING conditions ────────────────────────────────────────────────────
+  // Price flat + OI building + funding negative + volume quiet
+  const isLoading = (
+    rangePct < 1.5 &&        // price tight — no big moves yet
+    funding < -0.005 &&      // shorts paying — longs accumulating
+    longShortRatio < 1.0 &&  // more shorts than longs (fuel for squeeze)
+    oiBuilding &&            // OI growing — positions being loaded
+    volRatio < 1.2           // volume QUIET — no breakout yet
+  );
+
+  // ── BREAKOUT conditions ───────────────────────────────────────────────────
+  // First candle with volume spike + price moving UP
+  const isBreakout = (
+    volRatio >= 1.8 &&       // volume suddenly 1.8x+ average
+    latestMove >= 0.4        // price moving up on this candle
+  );
+
+  return { isLoading, isBreakout, rangePct, volRatio, latestMove, oiGrowthPct };
+};
+
 const runScan = async () => {
   scanCount++;
   log(`Starting scan #${scanCount}...`);
@@ -507,26 +571,27 @@ const runScan = async () => {
     const valid = tickers
       .filter(t => t.symbol.endsWith('USDT') && !t.symbol.includes('_') && !EXCLUDE.has(t.symbol) && parseFloat(t.quoteVolume) >= MIN_VOLUME_USD)
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), funding: 0 }))
-      .filter(t => Math.abs(t.change) < 8)
+      .filter(t => Math.abs(t.change) < 15) // allow wider range — catch early moves
       .sort((a, b) => b.volume - a.volume)
       .slice(0, 80);
 
-    log(`Fetched ${valid.length} candidates from Binance Futures`);
+    log(`Fetched ${valid.length} candidates`);
 
     const btcStatus  = await getBTCStatus();
     const btcDumping = btcStatus && btcStatus.change < -1.5;
-    if (btcDumping) log(`⚠️ BTC dumping ${btcStatus.change.toFixed(2)}% — suppressing LONG alerts`);
+    if (btcDumping) log(`⚠️ BTC dumping — suppressing LONG alerts`);
 
-    const freeAlerts    = [];
     const premiumAlerts = [];
+    const freeAlerts    = [];
+    const loadingAlerts = []; // coins in accumulation — send as WATCH
 
     for (const coin of valid) {
-      await sleep(350);
+      await sleep(400);
 
-      let volSpike15m    = 0;
       let longShortRatio = 1;
       let oiSpikePct     = 0;
-      let price15mChange = 0;
+      let currentOI      = 0;
+      let klines         = [];
       let obData         = null;
       let obDecision     = { go: true, reason: 'No OB data' };
 
@@ -536,18 +601,9 @@ const runScan = async () => {
         coin.funding = parseFloat(f.lastFundingRate) * 100;
       } catch { /* skip */ }
 
-      // 15m klines — volume spike + price momentum
+      // 15m klines — 8 candles for accumulation analysis
       try {
-        const klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=8`);
-        if (klines.length >= 4) {
-          const latestVol = parseFloat(klines[klines.length-1][5]);
-          const prevVols  = klines.slice(0,-1).map(k => parseFloat(k[5]));
-          const avgVol    = prevVols.reduce((a,b) => a+b, 0) / prevVols.length;
-          volSpike15m     = avgVol > 0 ? latestVol / avgVol : 0;
-          const latestOpen  = parseFloat(klines[klines.length-1][1]);
-          const latestClose = parseFloat(klines[klines.length-1][4]);
-          price15mChange    = latestOpen > 0 ? ((latestClose - latestOpen) / latestOpen) * 100 : 0;
-        }
+        klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=8`);
       } catch { /* skip */ }
 
       // L/S ratio
@@ -556,48 +612,16 @@ const runScan = async () => {
         longShortRatio = parseFloat(ls[0]?.longShortRatio || 1);
       } catch { /* skip */ }
 
-      // OI spike
+      // OI
       try {
-        const oi    = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
-        const curr  = parseFloat(oi.openInterest);
-        const last  = prevOI.get(coin.symbol) || curr;
-        oiSpikePct  = last > 0 ? ((curr - last) / last) * 100 : 0;
-        prevOI.set(coin.symbol, curr);
+        const oi   = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`);
+        currentOI  = parseFloat(oi.openInterest);
+        const lastOI = prevOI.get(coin.symbol) || currentOI;
+        oiSpikePct   = lastOI > 0 ? ((currentOI - lastOI) / lastOI) * 100 : 0;
+        prevOI.set(coin.symbol, currentOI);
       } catch { /* skip */ }
 
-      // Direction
-      const isLong  = coin.funding < 0 && longShortRatio < 1;
-      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
-
-      // Score
-      const score = calcScore({ change: coin.change, volume: coin.volume, fundingRate: coin.funding, longShortRatio, volSpike1H: volSpike15m, oiSpikePct });
-
-      // ── Fade detection ────────────────────────────────────────────────────────
-      const key = `score_${coin.symbol}`;
-      if (!canAlert(key)) {
-        const sig = signalPrices.get(coin.symbol);
-        if (sig && sig.direction === 'LONG') {
-          const dropPct = ((sig.price - coin.price) / sig.price) * 100;
-          if (dropPct >= FADE_THRESHOLD_PCT) {
-            log(`⚠️ FADE: ${coin.symbol} dropped ${dropPct.toFixed(1)}%`);
-            await postToChannel(PREMIUM_CHANNEL, `⚠️ <b>MOMENTUM FADING</b>\n━━━━━━━━━━━━━━━\n🔴 <b>${coin.symbol.replace('USDT','')}</b> dropped <b>${dropPct.toFixed(1)}%</b> from signal\n📉 Entry: <b>$${sig.price}</b> → Now: <b>$${coin.price}</b>\n⏰ <b>${gstNow()} GST</b>\n━━━━━━━━━━━━━━━\n⚡ Consider exiting or tightening stop`);
-            signalPrices.delete(coin.symbol);
-          }
-        }
-        continue;
-      }
-
-      // ── Momentum filter ───────────────────────────────────────────────────────
-      if (isLong && (price15mChange < 0.3 || volSpike15m < 1.5 || btcDumping)) {
-        log(`⏭ SKIP ${coin.symbol} LONG — no momentum (15m: ${price15mChange.toFixed(2)}%, vol: ${volSpike15m.toFixed(1)}x)`);
-        continue;
-      }
-      if (isShort && (price15mChange > -0.3 || volSpike15m < 1.5)) {
-        log(`⏭ SKIP ${coin.symbol} SHORT — no momentum (15m: ${price15mChange.toFixed(2)}%, vol: ${volSpike15m.toFixed(1)}x)`);
-        continue;
-      }
-
-      // ── Order Book filter ─────────────────────────────────────────────────────
+      // Order book
       try {
         const ob      = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${coin.symbol}&limit=50`);
         const bids    = ob.bids.map(b => ({ price: parseFloat(b[0]), qty: parseFloat(b[1]) }));
@@ -613,71 +637,224 @@ const runScan = async () => {
         const buyProx  = bigBuy.price  > 0 ? ((coin.price - bigBuy.price)  / coin.price) * 100 : 99;
         const hasSellWall = sellProx < 1.5 && bigSell.size > 50000;
         const hasBuyWall  = buyProx  < 1.5 && bigBuy.size  > 50000;
+        obData = { ratio: parseFloat(ratio.toFixed(2)), hasSellWall, hasBuyWall, sellProx: parseFloat(sellProx.toFixed(2)) };
 
-        obData = { ratio: parseFloat(ratio.toFixed(2)) };
-
-        if (isLong) {
-          if (hasSellWall)  { obDecision = { go: false, reason: `🚫 Sell wall ${sellProx.toFixed(1)}% away` }; }
-          else if (ratio < 0.7) { obDecision = { go: false, reason: `🚫 Sell-heavy book ${ratio.toFixed(1)}x` }; }
-          else if (ratio >= 1.5) { obDecision = { go: true,  reason: `✅ Buy wall ${ratio.toFixed(1)}x` }; }
-          else              { obDecision = { go: true,  reason: `🟡 Neutral book` }; }
+        const isLongDir = coin.funding < 0 && longShortRatio < 1;
+        if (isLongDir) {
+          if (hasSellWall)   obDecision = { go: false, reason: `🚫 Sell wall ${sellProx.toFixed(1)}% away` };
+          else if (ratio < 0.7) obDecision = { go: false, reason: `🚫 Sell-heavy ${ratio.toFixed(1)}x` };
+          else if (ratio >= 1.5) obDecision = { go: true,  reason: `✅ Buy wall ${ratio.toFixed(1)}x` };
+          else               obDecision = { go: true,  reason: `🟡 Neutral ${ratio.toFixed(1)}x` };
         }
-        if (isShort) {
-          if (hasBuyWall)   { obDecision = { go: false, reason: `🚫 Buy wall ${buyProx.toFixed(1)}% away` }; }
-          else if (ratio > 1.5)  { obDecision = { go: false, reason: `🚫 Buy-heavy book ${ratio.toFixed(1)}x` }; }
-          else if (ratio <= 0.7) { obDecision = { go: true,  reason: `✅ Sell wall ${(1/ratio).toFixed(1)}x` }; }
-          else               { obDecision = { go: true,  reason: `🟡 Neutral book` }; }
-        }
-      } catch { /* skip OB */ }
+      } catch { /* skip */ }
 
-      if (!obDecision.go) {
-        log(`⏭ SKIP ${coin.symbol} — OB: ${obDecision.reason}`);
+      // ── ACCUMULATION DETECTION ────────────────────────────────────────────
+      const prevOIVal  = prevOI.get(`${coin.symbol}_prev`) || 0;
+      prevOI.set(`${coin.symbol}_prev`, currentOI);
+      const accum = detectAccumulation(klines, currentOI, prevOIVal, coin.funding, longShortRatio);
+
+      if (accum) {
+        const loading = loadingCoins.get(coin.symbol);
+
+        // ── PHASE 2: BREAKOUT — coin was LOADING, now breaking out ─────────
+        if (accum.isBreakout && loading && loading.scanCount >= 1) {
+          const key = `breakout_${coin.symbol}`;
+          if (!canAlert(key) || btcDumping) {
+            if (!canAlert(key)) log(`⏭ COOLDOWN ${coin.symbol} breakout`);
+            continue;
+          }
+          if (!obDecision.go) {
+            log(`⏭ SKIP ${coin.symbol} BREAKOUT — OB: ${obDecision.reason}`);
+            loadingCoins.delete(coin.symbol);
+            continue;
+          }
+
+          log(`🚀 BREAKOUT DETECTED: ${coin.symbol} — was LOADING ${loading.scanCount} scans`);
+
+          const s        = 7; // breakout signals get high base score
+          const barChar  = '🟩';
+          const scoreBar = barChar.repeat(s) + '⬛'.repeat(10-s);
+          const entry    = coin.price;
+          const atr      = entry * 0.015;
+          const sl       = parseFloat((entry - atr).toFixed(6));
+          const tp1      = parseFloat((entry + atr).toFixed(6));
+          const tp2      = parseFloat((entry + atr*2).toFixed(6));
+          const tp3      = parseFloat((entry + atr*3).toFixed(6));
+          const fmtP     = p => p >= 100 ? p.toFixed(2) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
+          const btcLine  = btcStatus ? `\n${btcStatus.emoji} BTC: <b>$${btcStatus.price.toLocaleString()}</b> ${btcStatus.change > 0?'+':''}${btcStatus.change.toFixed(2)}% — ${btcStatus.condition}` : '';
+          const obLine   = obData ? `\n📖 OB: <b>${obDecision.reason}</b> | Ratio: <b>${obData.ratio}x</b>` : '';
+
+          const premMsg = `
+🚀 <b>NEXIO BREAKOUT SIGNAL</b>
+━━━━━━━━━━━━━━━
+📈 LONG <b>${coin.symbol.replace('USDT','')}</b> — <b>FIRST BREAK CANDLE</b>
+━━━━━━━━━━━━━━━
+⚡ <i>Caught at accumulation breakout — NOT after pump</i>
+━━━━━━━━━━━━━━━
+💰 Price: <b>$${fmtP(entry)}</b>
+💸 Funding: <b>${coin.funding.toFixed(3)}%</b> (shorts paying)
+🔊 Vol Spike: <b>${accum.volRatio.toFixed(1)}x</b> (sudden surge)
+📦 OI Built: <b>+${accum.oiGrowthPct.toFixed(2)}%</b> (quietly loaded)
+⚖️ L/S: <b>${longShortRatio.toFixed(2)}</b> (shorts fuel move)
+📐 Range: <b>${accum.rangePct.toFixed(2)}%</b> (was flat — now breaking)
+🕯 Current candle: <b>+${accum.latestMove.toFixed(2)}%</b>
+📊 Confidence: <b>HIGH</b> ${scoreBar}${obLine}${btcLine}
+━━━━━━━━━━━━━━━
+📍 Entry: <b>$${fmtP(entry)}</b>
+🛑 Stop Loss: <b>$${fmtP(sl)}</b> (-1.5%)
+🎯 TP1: <b>$${fmtP(tp1)}</b> (+1.5%) — <i>move SL to entry</i>
+🎯 TP2: <b>$${fmtP(tp2)}</b> (+3%)
+🎯 TP3: <b>$${fmtP(tp3)}</b> (+4.5%) — <i>R/R 3:1</i>
+━━━━━━━━━━━━━━━
+<a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
+          `.trim();
+
+          const freeMsg = `
+🚀 <b>${coin.symbol.replace('USDT','')} — BREAKOUT SIGNAL</b>
+━━━━━━━━━━━━━━━
+⚡ Caught at accumulation breakout
+💰 Price: <b>$${fmtP(entry)}</b>
+🔊 Vol: <b>${accum.volRatio.toFixed(1)}x surge</b>
+🕯 Move: <b>+${accum.latestMove.toFixed(2)}%</b>${btcLine}
+⏰ <b>${gstNow()} GST</b>
+━━━━━━━━━━━━━━━
+<a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
+━━━━━━━━━━━━━━━
+🔒 <b>Basic signal only.</b>
+👑 <b>Nexio Prime</b> — full data + entry/SL/TP levels
+💎 <a href="https://t.me/+xct9p5ep021hY2U8">Join Nexio Prime →</a>
+          `.trim();
+
+          await postToChannel(PREMIUM_CHANNEL, premMsg);
+          await postToChannel(FREE_CHANNEL, freeMsg);
+          markAlert(key);
+          signalPrices.set(coin.symbol, { price: entry, direction: 'LONG', firedAt: Date.now() });
+          loadingCoins.delete(coin.symbol); // remove from loading — signal fired
+          await sleep(500);
+          continue;
+        }
+
+        // ── PHASE 1: LOADING — coin in accumulation, not breaking yet ──────
+        if (accum.isLoading) {
+          const existing = loadingCoins.get(coin.symbol);
+          loadingCoins.set(coin.symbol, {
+            scanCount: (existing?.scanCount || 0) + 1,
+            firstSeen: existing?.firstSeen || Date.now(),
+            funding:   coin.funding,
+            oiGrowth:  accum.oiGrowthPct,
+          });
+          log(`🔄 LOADING: ${coin.symbol} — scan ${loadingCoins.get(coin.symbol).scanCount} | range ${accum.rangePct.toFixed(2)}% | vol ${accum.volRatio.toFixed(1)}x | funding ${coin.funding.toFixed(3)}%`);
+
+          // After 2+ scans in LOADING state, send a WATCH alert to premium
+          const loadState = loadingCoins.get(coin.symbol);
+          if (loadState.scanCount === 2) {
+            const watchKey = `watch_${coin.symbol}`;
+            if (canAlert(watchKey)) {
+              const watchMsg = `
+🔄 <b>ACCUMULATION DETECTED</b>
+━━━━━━━━━━━━━━━
+👀 WATCH <b>${coin.symbol.replace('USDT','')}</b> — Loading phase
+━━━━━━━━━━━━━━━
+<i>Whale accumulation pattern detected. Waiting for breakout candle.</i>
+━━━━━━━━━━━━━━━
+💰 Price: <b>$${coin.price}</b>
+💸 Funding: <b>${coin.funding.toFixed(3)}%</b> (negative = longs loading)
+📦 OI Building: <b>+${accum.oiGrowthPct.toFixed(2)}%</b>
+⚖️ L/S: <b>${longShortRatio.toFixed(2)}</b>
+📐 Price range: <b>${accum.rangePct.toFixed(2)}%</b> (flat = suppressed)
+🔊 Volume: <b>${accum.volRatio.toFixed(1)}x</b> (quiet = not yet)
+⏰ <b>${gstNow()} GST</b>
+━━━━━━━━━━━━━━━
+⚡ Next breakout candle = ENTRY SIGNAL
+🎯 Set alert at: <b>$${(coin.price * 1.005).toFixed(5)}</b>
+<a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Watch Chart</a>
+              `.trim();
+              await postToChannel(PREMIUM_CHANNEL, watchMsg);
+              markAlert(watchKey);
+            }
+          }
+          continue;
+        }
+      }
+
+      // ── CLEAN UP stale loading coins ──────────────────────────────────────
+      if (loadingCoins.has(coin.symbol)) {
+        const ls = loadingCoins.get(coin.symbol);
+        // If been loading for more than 10 scans (50 min) without breakout — remove
+        if (ls.scanCount > 10) {
+          log(`🗑 EXPIRED LOADING: ${coin.symbol} — ${ls.scanCount} scans without breakout`);
+          loadingCoins.delete(coin.symbol);
+        }
+      }
+
+      // ── FADE DETECTION for previously alerted coins ───────────────────────
+      const key = `score_${coin.symbol}`;
+      if (!canAlert(key)) {
+        const sig = signalPrices.get(coin.symbol);
+        if (sig && sig.direction === 'LONG') {
+          const dropPct = ((sig.price - coin.price) / sig.price) * 100;
+          if (dropPct >= FADE_THRESHOLD_PCT) {
+            log(`⚠️ FADE: ${coin.symbol} dropped ${dropPct.toFixed(1)}%`);
+            await postToChannel(PREMIUM_CHANNEL, `⚠️ <b>MOMENTUM FADING</b>\n━━━━━━━━━━━━━━━\n🔴 <b>${coin.symbol.replace('USDT','')}</b> dropped <b>${dropPct.toFixed(1)}%</b> from signal\n📉 Entry: <b>$${sig.price}</b> → Now: <b>$${coin.price}</b>\n⏰ <b>${gstNow()} GST</b>\n━━━━━━━━━━━━━━━\n⚡ Consider exiting or tightening stop`);
+            signalPrices.delete(coin.symbol);
+          }
+        }
         continue;
       }
 
-      if (score >= PREMIUM_MIN_SCORE) {
-        premiumAlerts.push({ ...coin, score, longShortRatio, volSpike1H: volSpike15m, oiSpikePct, price15mChange, obData, obDecision });
-        if (score >= FREE_MIN_SCORE) freeAlerts.push({ ...coin, score });
-        markAlert(key);
-        signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : 'SHORT', firedAt: Date.now() });
-      }
+      // ── STANDARD SIGNAL (fallback — kept as backup) ───────────────────────
+      // Only fires if not caught by accumulation detector
+      // Requires stricter criteria to avoid late entries
+      const volSpike15m    = klines.length >= 4 ? (() => {
+        const latestVol = parseFloat(klines[klines.length-1][5]);
+        const prevVols  = klines.slice(0,-1).map(k => parseFloat(k[5]));
+        const avgVol    = prevVols.reduce((a,b) => a+b, 0) / prevVols.length;
+        return avgVol > 0 ? latestVol / avgVol : 0;
+      })() : 0;
+
+      const price15mChange = klines.length >= 4 ? (() => {
+        const o = parseFloat(klines[klines.length-1][1]);
+        const c = parseFloat(klines[klines.length-1][4]);
+        return o > 0 ? ((c - o) / o) * 100 : 0;
+      })() : 0;
+
+      const isLong  = coin.funding < 0 && longShortRatio < 1;
+      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
+
+      // Very strict for standard signals — price must be moving + vol spike + OB clear
+      if (isLong && (price15mChange < 0.3 || volSpike15m < 1.5 || btcDumping || !obDecision.go)) continue;
+      if (isShort && (price15mChange > -0.3 || volSpike15m < 1.5 || !obDecision.go)) continue;
+      if (!isLong && !isShort) continue;
+
+      const score = calcScore({ change: coin.change, volume: coin.volume, fundingRate: coin.funding, longShortRatio, volSpike1H: volSpike15m, oiSpikePct });
+      if (score < PREMIUM_MIN_SCORE) continue;
+
+      premiumAlerts.push({ ...coin, score, longShortRatio, volSpike1H: volSpike15m, oiSpikePct, price15mChange, obData, obDecision });
+      if (score >= FREE_MIN_SCORE) freeAlerts.push({ ...coin, score });
+      markAlert(key);
+      signalPrices.set(coin.symbol, { price: coin.price, direction: isLong ? 'LONG' : 'SHORT', firedAt: Date.now() });
     }
 
-    log(`Scan #${scanCount} — Free: ${freeAlerts.length} Premium: ${premiumAlerts.length}`);
+    log(`Scan #${scanCount} — Loading: ${loadingCoins.size} | Alerts: ${premiumAlerts.length} | Breakouts fired above`);
 
-    const btc     = btcStatus;
-    const btcLine = btc ? `\n${btc.emoji} BTC: <b>$${btc.price.toLocaleString()}</b> ${btc.change > 0 ? '+' : ''}${btc.change.toFixed(2)}% — ${btc.condition}` : '';
+    // ── Standard alerts (backup) ──────────────────────────────────────────────
+    const btcLine = btcStatus ? `\n${btcStatus.emoji} BTC: <b>$${btcStatus.price.toLocaleString()}</b> ${btcStatus.change > 0?'+':''}${btcStatus.change.toFixed(2)}% — ${btcStatus.condition}` : '';
 
     for (const coin of premiumAlerts.slice(0, MAX_ALERTS_PER_SCAN)) {
       const isLong   = coin.funding < 0 && coin.longShortRatio < 1;
       const isShort  = coin.funding > 0.01 && coin.longShortRatio > 1.2;
       const dirEmoji = isLong ? '🟢' : isShort ? '🔴' : '🟡';
       const dir      = isLong ? '📈 LONG' : isShort ? '📉 SHORT' : '👀 WATCH';
-
-      // ── Colored score bar based on intensity ──────────────────────────────
-      const s = coin.score;
-      const filled   = Math.min(Math.floor(s), 10);
-      const empty    = Math.max(0, 10 - filled);
+      const s        = coin.score;
       const barChar  = s >= 7 ? '🟩' : s >= 5 ? '🟨' : s >= 3.5 ? '🟧' : '🟥';
-      const scoreBar = barChar.repeat(filled) + '⬛'.repeat(empty);
-
-      // ── Trade levels ──────────────────────────────────────────────────────
-      const entry = coin.price;
-      const atr   = entry * 0.015; // approximate 1.5% ATR
-      const sl    = isLong  ? parseFloat((entry - atr).toFixed(6))       : parseFloat((entry + atr).toFixed(6));
-      const tp1   = isLong  ? parseFloat((entry + atr).toFixed(6))       : parseFloat((entry - atr).toFixed(6));
-      const tp2   = isLong  ? parseFloat((entry + atr * 2).toFixed(6))   : parseFloat((entry - atr * 2).toFixed(6));
-      const tp3   = isLong  ? parseFloat((entry + atr * 3).toFixed(6))   : parseFloat((entry - atr * 3).toFixed(6));
-      const fmtP  = p => p >= 100 ? p.toFixed(2) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
-
-      const tradeLevels = (isLong || isShort) ? `
-━━━━━━━━━━━━━━━
-📍 Entry: <b>$${fmtP(entry)}</b>
-🛑 Stop Loss: <b>$${fmtP(sl)}</b> (-1.5%)
-🎯 TP1: <b>$${fmtP(tp1)}</b> (+1.5%) — <i>move SL to entry</i>
-🎯 TP2: <b>$${fmtP(tp2)}</b> (+3%)
-🎯 TP3: <b>$${fmtP(tp3)}</b> (+4.5%) — <i>R/R 3:1</i>` : '';
-
+      const scoreBar = barChar.repeat(Math.min(Math.floor(s),10)) + '⬛'.repeat(Math.max(0,10-Math.floor(s)));
+      const entry    = coin.price;
+      const atr      = entry * 0.015;
+      const sl       = isLong  ? parseFloat((entry - atr).toFixed(6)) : parseFloat((entry + atr).toFixed(6));
+      const tp1      = isLong  ? parseFloat((entry + atr).toFixed(6)) : parseFloat((entry - atr).toFixed(6));
+      const tp2      = isLong  ? parseFloat((entry + atr*2).toFixed(6)) : parseFloat((entry - atr*2).toFixed(6));
+      const tp3      = isLong  ? parseFloat((entry + atr*3).toFixed(6)) : parseFloat((entry - atr*3).toFixed(6));
+      const fmtP     = p => p >= 100 ? p.toFixed(2) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
       const obLine   = coin.obData ? `\n📖 OB: <b>${coin.obDecision.reason}</b> | Ratio: <b>${coin.obData.ratio}x</b>` : '';
 
       const premiumMsg = `
@@ -691,7 +868,14 @@ ${dir} <b>${coin.symbol.replace('USDT','')}</b>
 🔊 Vol Spike: <b>${coin.volSpike1H.toFixed(1)}x</b>
 📦 OI: <b>${coin.oiSpikePct > 0 ? '+' : ''}${coin.oiSpikePct.toFixed(1)}%</b>
 ⚖️ L/S: <b>${coin.longShortRatio.toFixed(2)}</b>
-📊 Score: <b>${coin.score}/10</b> ${scoreBar}${obLine}${btcLine}${tradeLevels}
+📊 Score: <b>${coin.score}/10</b> ${scoreBar}${obLine}${btcLine}
+━━━━━━━━━━━━━━━
+📍 Entry: <b>$${fmtP(entry)}</b>
+🛑 Stop Loss: <b>$${fmtP(sl)}</b> (-1.5%)
+🎯 TP1: <b>$${fmtP(tp1)}</b> (+1.5%) — <i>move SL to entry</i>
+🎯 TP2: <b>$${fmtP(tp2)}</b> (+3%)
+🎯 TP3: <b>$${fmtP(tp3)}</b> (+4.5%)
+⏰ <b>${gstNow()} GST</b>
 ━━━━━━━━━━━━━━━
 <a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
       `.trim();
@@ -708,10 +892,10 @@ ${dirEmoji} <b>${coin.symbol.replace('USDT','')} — ${dir}</b>
 ━━━━━━━━━━━━━━━
 🔒 <b>This is a basic signal.</b>
 👑 <b>Nexio Prime</b> members get:
-• Full data (Vol, OI, L/S ratio)
-• Earlier signals (score 3+)
+• Entry / Stop Loss / TP levels
+• Accumulation breakout alerts
+• Full data (Vol, OI, L/S, OB)
 • Whale footprint alerts
-• Liquidity sweep alerts
 
 💎 <a href="https://t.me/+xct9p5ep021hY2U8">Join Nexio Prime →</a>
       `.trim();
@@ -726,7 +910,6 @@ ${dirEmoji} <b>${coin.symbol.replace('USDT','')} — ${dir}</b>
   }
 };
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   log('🚀 Nexio server starting...');
 
