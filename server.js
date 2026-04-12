@@ -575,8 +575,8 @@ const runScan = async () => {
       try { const ls = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); longShortRatio = parseFloat(ls[0]?.longShortRatio || 1); } catch {}
       try { const oi = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`); currentOI = parseFloat(oi.openInterest); prevOI.set(coin.symbol, currentOI); } catch {}
 
-      const isLong  = coin.funding < 0 && longShortRatio < 1.0;
-      const isShort = coin.funding > 0.01 && longShortRatio > 1.2;
+      const isLong  = coin.funding < 0.005 && longShortRatio < 1.1;
+      const isShort = coin.funding > 0.015 && longShortRatio > 1.15;
       if (!isLong && !isShort) continue;
 
       const direction = isLong ? 'LONG' : 'SHORT';
@@ -594,10 +594,10 @@ const runScan = async () => {
       }
       if (tracked && tracked.scanCount >= MAX_SCANS) { coinTracker.delete(coin.symbol); continue; }
 
-      // Breakout check
-      const isBreakout = volSpike >= 1.8 && (isLong ? price15mChange >= 0.4 : price15mChange <= -0.4) && !btcDumping;
+      // Breakout check — fire if vol spike + price moving + not btc dumping
+      const isBreakout = volSpike >= 1.5 && (isLong ? price15mChange >= 0.2 : price15mChange <= -0.2) && !btcDumping;
 
-      if (isBreakout && tracked && tracked.scanCount >= 1 && tracked.confidence >= 4) {
+      if (isBreakout && tracked && tracked.scanCount >= 1 && tracked.confidence >= 3) {
         const alertKey = `breakout_${coin.symbol}`;
         if (canAlert(alertKey)) {
           tracked.entryPrice = coin.price;
@@ -616,7 +616,7 @@ const runScan = async () => {
         const c = klines.slice(-6);
         const hi = Math.max(...c.map(x => parseFloat(x[2])));
         const lo = Math.min(...c.map(x => parseFloat(x[3])));
-        return lo > 0 ? ((hi - lo) / lo) * 100 < 1.5 && volSpike < 1.3 : false;
+        return lo > 0 ? ((hi - lo) / lo) * 100 < 3.0 && volSpike < 1.5 : false;
       })();
 
       if (isLoading || tracked) {
@@ -629,7 +629,7 @@ const runScan = async () => {
         updateTracker(coin.symbol, scanData, direction);
         const state = coinTracker.get(coin.symbol);
         log(`📊 TRACKED: ${coin.symbol} ${direction} conf:${state.confidence} scan:${state.scanCount}`);
-        if (state.scanCount === 2 && state.confidence >= 5) {
+        if (state.scanCount === 2 && state.confidence >= 4) {
           const watchKey = `watch_${coin.symbol}`;
           if (canAlert(watchKey)) {
             await postSignal(buildAlert({ ...coin, ls: longShortRatio }, state, btcStatus, 'WATCH'));
