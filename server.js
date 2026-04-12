@@ -653,7 +653,31 @@ const runScan = async () => {
       const isShort  = coin.funding > 0.01 && coin.longShortRatio > 1.2;
       const dirEmoji = isLong ? '🟢' : isShort ? '🔴' : '🟡';
       const dir      = isLong ? '📈 LONG' : isShort ? '📉 SHORT' : '👀 WATCH';
-      const scoreBar = '█'.repeat(Math.min(Math.floor(coin.score), 10)) + '░'.repeat(Math.max(0, 10 - Math.floor(coin.score)));
+
+      // ── Colored score bar based on intensity ──────────────────────────────
+      const s = coin.score;
+      const filled   = Math.min(Math.floor(s), 10);
+      const empty    = Math.max(0, 10 - filled);
+      const barChar  = s >= 7 ? '🟩' : s >= 5 ? '🟨' : s >= 3.5 ? '🟧' : '🟥';
+      const scoreBar = barChar.repeat(filled) + '⬛'.repeat(empty);
+
+      // ── Trade levels ──────────────────────────────────────────────────────
+      const entry = coin.price;
+      const atr   = entry * 0.015; // approximate 1.5% ATR
+      const sl    = isLong  ? parseFloat((entry - atr).toFixed(6))       : parseFloat((entry + atr).toFixed(6));
+      const tp1   = isLong  ? parseFloat((entry + atr).toFixed(6))       : parseFloat((entry - atr).toFixed(6));
+      const tp2   = isLong  ? parseFloat((entry + atr * 2).toFixed(6))   : parseFloat((entry - atr * 2).toFixed(6));
+      const tp3   = isLong  ? parseFloat((entry + atr * 3).toFixed(6))   : parseFloat((entry - atr * 3).toFixed(6));
+      const fmtP  = p => p >= 100 ? p.toFixed(2) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
+
+      const tradeLevels = (isLong || isShort) ? `
+━━━━━━━━━━━━━━━
+📍 Entry: <b>$${fmtP(entry)}</b>
+🛑 Stop Loss: <b>$${fmtP(sl)}</b> (-1.5%)
+🎯 TP1: <b>$${fmtP(tp1)}</b> (+1.5%) — <i>move SL to entry</i>
+🎯 TP2: <b>$${fmtP(tp2)}</b> (+3%)
+🎯 TP3: <b>$${fmtP(tp3)}</b> (+4.5%) — <i>R/R 3:1</i>` : '';
+
       const obLine   = coin.obData ? `\n📖 OB: <b>${coin.obDecision.reason}</b> | Ratio: <b>${coin.obData.ratio}x</b>` : '';
 
       const premiumMsg = `
@@ -661,14 +685,13 @@ ${dirEmoji} <b>NEXIO PRIME SIGNAL</b>
 ━━━━━━━━━━━━━━━
 ${dir} <b>${coin.symbol.replace('USDT','')}</b>
 ━━━━━━━━━━━━━━━
-💰 Price: <b>$${coin.price}</b>
+💰 Price: <b>$${fmtP(entry)}</b>
 💸 Funding: <b>${coin.funding.toFixed(3)}%</b>
 🕯 15m Move: <b>${coin.price15mChange > 0 ? '+' : ''}${coin.price15mChange?.toFixed(2)}%</b>
 🔊 Vol Spike: <b>${coin.volSpike1H.toFixed(1)}x</b>
 📦 OI: <b>${coin.oiSpikePct > 0 ? '+' : ''}${coin.oiSpikePct.toFixed(1)}%</b>
 ⚖️ L/S: <b>${coin.longShortRatio.toFixed(2)}</b>
-📊 Score: <b>${coin.score}/10</b> ${scoreBar}${obLine}${btcLine}
-⏰ <b>${gstNow()} GST</b>
+📊 Score: <b>${coin.score}/10</b> ${scoreBar}${obLine}${btcLine}${tradeLevels}
 ━━━━━━━━━━━━━━━
 <a href="https://www.bybit.com/trade/usdt/${coin.symbol}">📊 Open Chart</a>
       `.trim();
@@ -676,7 +699,7 @@ ${dir} <b>${coin.symbol.replace('USDT','')}</b>
       const freeMsg = `
 ${dirEmoji} <b>${coin.symbol.replace('USDT','')} — ${dir}</b>
 ━━━━━━━━━━━━━━━
-💰 Price: <b>$${coin.price}</b>
+💰 Price: <b>$${fmtP(entry)}</b>
 💸 Funding: <b>${coin.funding.toFixed(3)}%</b>
 📊 Score: <b>${coin.score}/10</b> ${scoreBar}${btcLine}
 ⏰ <b>${gstNow()} GST</b>
