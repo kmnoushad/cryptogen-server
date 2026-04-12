@@ -492,11 +492,14 @@ ${!user?.is_premium ? '\n→ /subscribe to upgrade' : ''}
     await tg(chatId, '✅ Test alert sent to both channels!');
   }
 
-  // /scan — force immediate scan
-  if (text === '/scan' && chatId === OWNER_CHAT_ID) {
-    await tg(chatId, '🔍 Running manual scan now...');
-    runScan();
-  }
+  // ── Admin only commands ───────────────────────────────────────────────────
+  if (chatId === OWNER_CHAT_ID) {
+
+    // /scan — force immediate scan
+    if (text === '/scan') {
+      await tg(chatId, '🔍 Running manual scan now...');
+      runScan();
+    }
 
     if (text.startsWith('/activate')) {
       const targetId = text.replace('/activate', '').trim();
