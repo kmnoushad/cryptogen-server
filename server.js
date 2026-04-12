@@ -838,7 +838,7 @@ const runScan = async () => {
           tracked.state = 'BREAKOUT';
           const msg = buildAlert({ ...coin, ls: longShortRatio }, tracked, btcStatus, 'BREAKOUT');
           await postToChannel(PREMIUM_CHANNEL, msg);
-          await postToChannel(FREE_CHANNEL, `🚀 ${direction} SIGNAL — ${coin.symbol.replace('USDT','')}\n━━━━━━━━━━━━━━━\n💰 Price: $${fmtP(coin.price)}\n📊 Confidence: ${tracked.confidence}/10 ${confBar(tracked.confidence)}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n👑 Full signal with Entry/SL/TP:\n💎 t.me/+xct9p5ep021hY2U8`);
+          await postToChannel(FREE_CHANNEL, msg);
           markAlert(alertKey);
           signalPrices.set(coin.symbol, { price: coin.price, direction, firedAt: Date.now() });
           coinTracker.delete(coin.symbol);
