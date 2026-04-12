@@ -469,13 +469,34 @@ ${!user?.is_premium ? '\n→ /subscribe to upgrade' : ''}
 /txid — Submit payment TXID
 /status — Your status
 /stats — Scanner stats
+/test — Test alert pipeline
 /help — This message
 🐆 Nexio
     `.trim());
   }
 
-  // ── Admin commands ────────────────────────────────────────────────────────
-  if (chatId === OWNER_CHAT_ID) {
+  // /test — send test alert to confirm pipeline works
+  if (text === '/test') {
+    await tg(chatId, '🔧 Sending test alert to both channels...');
+    const testMsg = `
+🧪 NEXIO — TEST ALERT
+━━━━━━━━━━━━━━━
+✅ Bot is alive and connected
+📊 Both channels receiving signals
+🔍 Scanner running every 5 min
+⏰ ${gstNow()} GST
+━━━━━━━━━━━━━━━
+🐆 Nexio is watching the market
+    `.trim();
+    await postSignal(testMsg);
+    await tg(chatId, '✅ Test alert sent to both channels!');
+  }
+
+  // /scan — force immediate scan
+  if (text === '/scan' && chatId === OWNER_CHAT_ID) {
+    await tg(chatId, '🔍 Running manual scan now...');
+    runScan();
+  }
 
     if (text.startsWith('/activate')) {
       const targetId = text.replace('/activate', '').trim();
@@ -657,6 +678,26 @@ const runScan = async () => {
       if (priorityMsg) await postSignal(priorityMsg);
     }
 
+    // ── Scan summary — always post so users know bot is alive ─────────────────
+    const readyCount    = getSortedTracker().filter(c => c.state === 'READY').length;
+    const watchingCount = getSortedTracker().filter(c => c.state === 'WATCHING' || c.state === 'CONFIRMING').length;
+    const summaryMsg = `
+🔍 NEXIO SCAN #${scanCount} COMPLETE
+━━━━━━━━━━━━━━━
+⏰ ${gstNow()} GST
+📊 Scanned: ${valid.length} coins
+👀 Tracking: ${coinTracker.size} candidates
+🔥 Ready signals: ${readyCount}
+⚡ Confirming: ${watchingCount}
+━━━━━━━━━━━━━━━
+${readyCount > 0
+  ? `🚨 ${readyCount} coin${readyCount > 1 ? 's' : ''} ready — breakout imminent!`
+  : coinTracker.size > 0
+  ? `⏳ ${coinTracker.size} coin${coinTracker.size > 1 ? 's' : ''} building — waiting for confirmation`
+  : '😴 No setups yet — market quiet. Next scan in 5 min.'}
+    `.trim();
+    await postSignal(summaryMsg);
+
     log(`Scan #${scanCount} done — Tracked: ${coinTracker.size}/${MAX_TRACKED}`);
   } catch (err) { log('Scan error:', err.message); }
 };
@@ -672,7 +713,7 @@ const start = async () => {
 ⏱ Scan: 5 min | Poll: 30s
 ⏰ ${gstNow()} GST
 
-Admin: /pending /users /activate /broadcast
+Admin: /pending /users /activate /broadcast /scan /test
   `.trim());
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
