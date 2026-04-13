@@ -363,6 +363,8 @@ const buildAlert = (coin, state, btcStatus, type = 'BREAKOUT') => {
     return `  ${label}: Fund ${h.funding.toFixed(3)}% ${ok} | OI ${oiChange}% | Vol ${h.vol.toFixed(1)}x`;
   }).join('\n');
 
+  const disclaimer = `━━━━━━━━━━━━━━━\n⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>`;
+
   if (type === 'BREAKOUT') return `
 ${dirEmoji} NEXIO — ${dir} SIGNAL
 ━━━━━━━━━━━━━━━
@@ -382,6 +384,7 @@ ${histLines}
 ${btcLine}
 ⏰ ${gstNow()} GST
 📊 bybit.com/trade/usdt/${coin.symbol}
+${disclaimer}
   `.trim();
 
   if (type === 'WATCH') return `
@@ -400,6 +403,7 @@ ${isLong ? '🔄 Accumulation — whales loading quietly\n📈 Waiting for break
 🎯 Watch for breakout above $${fmtP(isLong ? entry * 1.005 : entry * 0.995)}
 ⏰ ${gstNow()} GST
 📊 bybit.com/trade/usdt/${coin.symbol}
+${disclaimer}
   `.trim();
 
   if (type === 'FADING') return `
@@ -409,6 +413,7 @@ ${isLong ? '🔄 Accumulation — whales loading quietly\n📈 Waiting for break
 ❌ Momentum reversed — setup cancelled
 ${state.entryPrice ? `📍 Was at: $${fmtP(state.entryPrice)} → Now: $${fmtP(entry)}\n⚡ Exit or tighten stop immediately` : '⚡ Do NOT enter'}
 ⏰ ${gstNow()} GST
+${disclaimer}
   `.trim();
 
   return '';
@@ -421,19 +426,25 @@ const buildPriorityList = btcStatus => {
     ? `${btcStatus.emoji} BTC: $${btcStatus.price.toLocaleString()} ${btcStatus.change > 0 ? '+' : ''}${btcStatus.change.toFixed(2)}%`
     : '';
   const lines = sorted.slice(0, 10).map((s, i) => {
-    const rank  = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
-    const dir   = s.direction === 'LONG' ? '📈' : '📉';
-    const state = s.state === 'READY' ? '🔥READY' : s.state === 'CONFIRMING' ? '⚡CONF' : '👀WATCH';
-    return `${rank} ${dir} ${s.symbol.replace('USDT','')} — ${state} ${s.confidence}/10 ${confBar(s.confidence)}`;
+    const rank      = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
+    const dir       = s.direction === 'LONG' ? '📈 LONG' : '📉 SHORT';
+    const stateLabel = s.state === 'READY'      ? '🔥 HIGH CONF'
+                     : s.state === 'CONFIRMING' ? '⚡ CONFIRMED'
+                     : '👀 WATCHING';
+    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> — ${stateLabel} ${s.confidence}/10\n     ${confBar(s.confidence)}`;
   }).join('\n');
   return `
-📊 NEXIO PRIORITY LIST
+📊 <b>NEXIO PRIORITY LIST</b>
 ━━━━━━━━━━━━━━━
 ${lines}
 ━━━━━━━━━━━━━━━
 ${btcLine}
 ⏰ ${gstNow()} GST
+🔥HIGH CONF = enter now | ⚡CONFIRMED = watch closely | 👀WATCHING = building
+━━━━━━━━━━━━━━━
+⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>
   `.trim();
+};
 };
 
 const runWatchlistScan = async () => {
@@ -597,16 +608,16 @@ const runWatchlistScan = async () => {
           ? ((sig.price - price) / sig.price) * 100
           : ((price - sig.price) / sig.price) * 100;
         if (chg >= FADE_THRESHOLD_PCT) {
-          await postSignal(`⚠️ NEXIO — MOMENTUM FADING\n━━━━━━━━━━━━━━━\n🪙 ${symbol.replace('USDT','')}\n📉 Dropped ${chg.toFixed(1)}% from signal\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n━━━━━━━━━━━━━━━\n⚡ Exit or tighten stop\n⏰ ${gstNow()} GST`);
+          await postSignal(`⚠️ NEXIO — MOMENTUM FADING\n━━━━━━━━━━━━━━━\n🪙 ${symbol.replace('USDT','')}\n📉 Dropped ${chg.toFixed(1)}% from signal\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n━━━━━━━━━━━━━━━\n⚡ Exit or tighten stop\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n⚠️ <i>DYOR — Not financial advice. Always use a stop loss.</i>`);
           signalPrices.delete(symbol);
         }
       }
     }
 
-    // Priority list every 3 watchlist scans — owner only
+    // Priority list every 3 watchlist scans — both channels
     if (watchlistScanCount % 3 === 0 && coinTracker.size > 0) {
       const msg = buildPriorityList(btcStatus);
-      if (msg) await tg(OWNER_CHAT_ID, msg);
+      if (msg) await postSignal(msg);
     }
 
     // Scan summary — only to owner, not channels
