@@ -14,8 +14,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
-const FREE_CHANNEL    = '-1003785044347';
-const PREMIUM_CHANNEL = '-1003317305473';
+const FREE_CHANNEL    = '-1003900595640';  // Nexio Signals (public)
+const PREMIUM_CHANNEL = '-1003913881352';  // Nexio Prime (private)
 const OWNER_CHAT_ID   = '6896387082';
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
