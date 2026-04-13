@@ -13,7 +13,7 @@
 //   → Fires alert to both Telegram channels
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
+const BOT_TOKEN       = '8645549182:AAH1IYpACYQShbuGtZkwJt5F6rMhAFlbMjg';
 const FREE_CHANNEL    = '-1003785044347';
 const PREMIUM_CHANNEL = '-1003317305473';
 const OWNER_CHAT_ID   = '6896387082';
@@ -794,9 +794,12 @@ const start = async () => {
   await tg(OWNER_CHAT_ID, `
 🟢 <b>Nexio Server Started</b>
 ━━━━━━━━━━━━━━━
+🤖 Bot: @NexioAlertBot
 🌍 Full Market Scan: every 10 min
 👁 Watchlist Scan: every 3 min
-📊 Both channels: same signals
+📢 Nexio Signals: public channel
+👑 Nexio Prime: private channel
+📊 All signals → both channels + owner
 ⏰ ${gstNow()} GST
 ━━━━━━━━━━━━━━━
 Admin: /fullscan /scan /pending /users /activate /broadcast /watchlist /tracking /test
