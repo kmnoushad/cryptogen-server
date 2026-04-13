@@ -445,7 +445,6 @@ ${btcLine}
 ⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>
   `.trim();
 };
-};
 
 const runWatchlistScan = async () => {
   watchlistScanCount++;
