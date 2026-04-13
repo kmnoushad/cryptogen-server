@@ -162,6 +162,7 @@ const tg = async (chatId, text) => {
 
 const postSignal = async text => {
   const payload = { parse_mode: 'HTML', disable_web_page_preview: true, text };
+  // Send to free channel
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -169,10 +170,19 @@ const postSignal = async text => {
     });
   } catch { /* skip */ }
   await sleep(300);
+  // Send to premium channel
   try {
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: PREMIUM_CHANNEL, ...payload }),
+    });
+  } catch { /* skip */ }
+  await sleep(300);
+  // Send to owner — always receives everything
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: OWNER_CHAT_ID, ...payload }),
     });
   } catch { /* skip */ }
 };
