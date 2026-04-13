@@ -13,7 +13,7 @@
 //   → Fires alert to both Telegram channels
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BOT_TOKEN       = '8645549182:AAH1IYpACYQShbuGtZkwJt5F6rMhAFlbMjg';
+const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
 const FREE_CHANNEL    = '-1003785044347';
 const PREMIUM_CHANNEL = '-1003317305473';
 const OWNER_CHAT_ID   = '6896387082';
