@@ -40,11 +40,22 @@ const MIN_ALERT_SCORE         = 6.5;
 const PUMP_EXCLUDE_PCT        = 15.0;
 
 const EXCLUDE = new Set([
+  // High cap crypto
   'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
   'ADAUSDT','DOGEUSDT','TRXUSDT','LTCUSDT','MATICUSDT',
-  'XAUTUSDT','PAXGUSDT','XAUUSDT','WBTCUSDT','HBARUSDT',
-  'BTCDOMUSDT','DEFIUSDT','USDCUSDT','TSLAUSDT','CLUSDT',
-  'AAPLUSDT','GOOGLUSDT','AMZNUSDT','MSFTUSDT','NVDAUSDT',
+  'HBARUSDT','WBTCUSDT',
+  // Commodities / gold / oil
+  'XAUTUSDT','PAXGUSDT','XAUUSDT','XAGUUSDT','CLUSDT',
+  // Stablecoins / index
+  'BTCDOMUSDT','DEFIUSDT','USDCUSDT','USDTUSDT',
+  // Tokenized US stocks
+  'TSLAUSDT','AAPLUSDT','GOOGLUSDT','AMZNUSDT','MSFTUSDT',
+  'NVDAUSDT','METAUSDT','COINUSDT','NFLXUSDT','BABAUSDT',
+  'AMDUSDT','BRKBUSDT','INTCUSDT','TSMUSDT','TSMAUSDT',
+  'UBERUSDT','ABNBUSDT','PYTUSDT','SPYUSDT','QQQUSDT',
+  'AركUSDT','PLTRУСDT','PLTRУСDT',
+  // Tokenized Asian / other stocks
+  'BRKAUSDT','SHOP1USDT','NVDAUSDT',
 ]);
 
 const MID_CAP = new Set([
@@ -535,7 +546,14 @@ const runFullMarketScan = async () => {
   try {
     const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
     const valid = tickers
-      .filter(t => t.symbol.endsWith('USDT') && !t.symbol.includes('_') && !EXCLUDE.has(t.symbol) && parseFloat(t.quoteVolume) >= MIN_VOLUME_USD && Math.abs(parseFloat(t.priceChangePercent)) < PUMP_EXCLUDE_PCT)
+      .filter(t => {
+        if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) return false;
+        if (EXCLUDE.has(t.symbol)) return false;
+        if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) return false;
+        if (Math.abs(parseFloat(t.priceChangePercent)) >= PUMP_EXCLUDE_PCT) return false;
+        if (/^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|BRKB|INTC|UBER|SPY|QQQ|ABNB|TSM|PLTR|SHOP|PYPL|SNAP|LYFT|XAU|XAG|PAX)/.test(t.symbol)) return false;
+        return true;
+      })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => {
         if (a.isMid && !b.isMid) return -1;
