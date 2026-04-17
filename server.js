@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v2.0 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v2.1 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate (must pass before any alert)
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -7,11 +7,16 @@
 // LAYER 4  — Volume Buildup BEFORE Breakout
 // LAYER 5  — Repeated Resistance Testing (Breakout Pressure)
 // LAYER 6  — Funding + L/S Confirmation
-// LAYER 7  — Trap Risk Filter (order book + fake pump detection)
+// LAYER 7  — Trap Risk Filter + Candle Wick Detector (NEW v2.1)
 // LAYER 8  — Two-Stage Alert System (WATCH → FIRE)
 // LAYER 9  — Momentum Guard (fade/exit detection post-alert)
 //
 // Min score to alert: 6.5/10
+//
+// v2.1 NEW: Candle Wick Detector in Layer 7
+//   STRONG  body>=60% wick<=25% → VALID SETUP ✅
+//   WEAK    body 30-60%         → CAUTION ⚠️
+//   FAKE    body<30% wick>60%   → SKIP ❌
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
@@ -105,8 +110,8 @@ const sb = async (path, options = {}) => {
   } catch { return null; }
 };
 
-const getWatchlist      = async () => (await sb('watchlist?select=symbol,score,direction')) || [];
-const addToWatchlist    = async (symbol, score, direction) => sb('watchlist', {
+const getWatchlist         = async () => (await sb('watchlist?select=symbol,score,direction')) || [];
+const addToWatchlist       = async (symbol, score, direction) => sb('watchlist', {
   method: 'POST',
   body: JSON.stringify({ symbol, score, direction, added_by: 'server', updated_at: new Date().toISOString() }),
 });
@@ -170,7 +175,6 @@ const checkBTCGate = async () => {
       fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
       fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
     ]);
-
     const price     = parseFloat(ticker.lastPrice);
     const change24h = parseFloat(ticker.priceChangePercent);
     const fundRate  = parseFloat(funding.lastFundingRate) * 100;
@@ -180,12 +184,10 @@ const checkBTCGate = async () => {
     const latestOpen  = parseFloat(klines[klines.length - 1][1]);
     const latestClose = parseFloat(klines[klines.length - 1][4]);
     const candleGreen = latestClose >= latestOpen;
-
     let pass = true, reason = '✅ BTC stable';
     if (change1H < -1.5)                      { pass = false; reason = `🔴 BTC dumping ${change1H.toFixed(2)}% in 1H`; }
     else if (fundRate > 0.025)                { pass = false; reason = `⚠️ BTC funding too high ${fundRate.toFixed(3)}%`; }
     else if (!candleGreen && change1H < -0.8) { pass = false; reason = `🟠 BTC bearish momentum`; }
-
     const emoji = change24h < -2 ? '🔴' : change24h < 0 ? '🟡' : '🟢';
     btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji };
     return btcGateStatus;
@@ -242,7 +244,7 @@ const checkResistanceTesting = (symbol, price, klines) => {
   const maxH      = Math.max(...highs);
   const tolerance = maxH * 0.005;
   const tests     = highs.filter(h => Math.abs(h - maxH) <= tolerance).length;
-  const testVols  = klines.filter((k, i) => Math.abs(parseFloat(k[2]) - maxH) <= tolerance).map(k => parseFloat(k[5]));
+  const testVols  = klines.filter(k => Math.abs(parseFloat(k[2]) - maxH) <= tolerance).map(k => parseFloat(k[5]));
   const volInc    = testVols.length >= 2 && testVols[testVols.length-1] > testVols[0];
   const prev      = resistanceMap.get(symbol) || { level: maxH, tests: 0 };
   if (Math.abs(maxH - prev.level) / (prev.level || 1) < 0.01) {
@@ -278,10 +280,88 @@ const checkFundingLS = (funding, ls, direction) => {
   return { score: Math.min(score, 2), funding, ls };
 };
 
-// ── LAYER 7: Trap Filter ──────────────────────────────────────────────────────
-const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding) => {
-  let trapScore = 0, reasons = [];
-  if (volSpike >= 2 && !oiBuilding) { trapScore += 2; reasons.push('vol spike no OI'); }
+// ── LAYER 7a: Candle Wick Detector (NEW v2.1) ─────────────────────────────────
+// Analyses last 3 candles for wick patterns
+// STRONG  body>=60% wick<=25% → real move, enter
+// WEAK    body 30-60%         → reduce size, caution
+// FAKE    body<30% wick>60%   → skip, likely fakeout/rug
+const checkCandleQuality = (klines, direction) => {
+  if (!klines || klines.length < 2) {
+    return { verdict: 'UNKNOWN', bodyPct: 0, upperWickPct: 0, lowerWickPct: 0, details: 'Not enough candles' };
+  }
+  const recent = klines.slice(-3);
+  const results = recent.map(k => {
+    const open  = parseFloat(k[1]);
+    const high  = parseFloat(k[2]);
+    const low   = parseFloat(k[3]);
+    const close = parseFloat(k[4]);
+    const range = high - low;
+    if (range === 0) return { bodyPct: 0, upperWickPct: 0, lowerWickPct: 0, isGreen: false };
+    const body      = Math.abs(close - open);
+    const upperWick = high - Math.max(open, close);
+    const lowerWick = Math.min(open, close) - low;
+    return {
+      bodyPct:      parseFloat(((body / range) * 100).toFixed(1)),
+      upperWickPct: parseFloat(((upperWick / range) * 100).toFixed(1)),
+      lowerWickPct: parseFloat(((lowerWick / range) * 100).toFixed(1)),
+      isGreen: close >= open,
+    };
+  });
+
+  const latest    = results[results.length - 1];
+  const wickyCount = results.filter(r => r.upperWickPct > 50 || r.bodyPct < 25).length;
+
+  let verdict, emoji, details;
+
+  if (direction === 'LONG') {
+    if (latest.bodyPct >= 60 && latest.upperWickPct <= 25 && latest.isGreen) {
+      verdict = 'STRONG'; emoji = '✅';
+      details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}% — clean breakout`;
+    } else if (latest.upperWickPct > 60 || latest.bodyPct < 25) {
+      verdict = 'FAKE'; emoji = '❌';
+      details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}% — rejection candle`;
+    } else if (wickyCount >= 2) {
+      verdict = 'FAKE'; emoji = '❌';
+      details = `${wickyCount}/3 wicky candles — repeated rejection`;
+    } else {
+      verdict = 'WEAK'; emoji = '⚠️';
+      details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}% — weak momentum`;
+    }
+  } else {
+    if (latest.bodyPct >= 60 && latest.lowerWickPct <= 25 && !latest.isGreen) {
+      verdict = 'STRONG'; emoji = '✅';
+      details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}% — clean breakdown`;
+    } else if (latest.lowerWickPct > 60 || latest.bodyPct < 25) {
+      verdict = 'FAKE'; emoji = '❌';
+      details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}% — possible reversal`;
+    } else {
+      verdict = 'WEAK'; emoji = '⚠️';
+      details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}% — weak momentum`;
+    }
+  }
+
+  return {
+    verdict, emoji, details,
+    bodyPct:      latest.bodyPct,
+    upperWickPct: latest.upperWickPct,
+    lowerWickPct: latest.lowerWickPct,
+    wickyCount,
+    isGreen: latest.isGreen,
+  };
+};
+
+// ── LAYER 7b: Trap Filter (updated — includes candle quality) ─────────────────
+const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, klines = []) => {
+  let trapScore = 0;
+  const reasons = [];
+
+  // Existing: vol spike without OI
+  if (volSpike >= 2 && !oiBuilding) {
+    trapScore += 2;
+    reasons.push('vol spike no OI confirmation');
+  }
+
+  // Existing: order book check
   try {
     const ob      = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=20`);
     const bids    = ob.bids.map(b => ({ p: parseFloat(b[0]), q: parseFloat(b[1]) }));
@@ -290,10 +370,29 @@ const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding) => 
     const askVal  = asks.filter(a => a.p <= price * 1.01).reduce((s, a) => s + a.p * a.q, 0);
     const bigSell = asks.reduce((m, a) => a.p * a.q > m.size ? { p: a.p, size: a.p * a.q } : m, { p: 0, size: 0 });
     const sellProx = bigSell.p > 0 ? ((bigSell.p - price) / price) * 100 : 99;
-    if (direction === 'LONG' && sellProx < 1.5 && bigSell.size > 30000) { trapScore += 2; reasons.push(`sell wall ${sellProx.toFixed(1)}% above`); }
-    if (direction === 'LONG' && askVal > bidVal * 2) { trapScore += 1; reasons.push('asks dominating'); }
+    if (direction === 'LONG' && sellProx < 1.5 && bigSell.size > 30000) {
+      trapScore += 2;
+      reasons.push(`sell wall ${sellProx.toFixed(1)}% above`);
+    }
+    if (direction === 'LONG' && askVal > bidVal * 2) {
+      trapScore += 1;
+      reasons.push('asks dominating bids');
+    }
   } catch { }
-  return { safe: trapScore === 0, trapScore, reasons };
+
+  // NEW v2.1: Candle wick quality check
+  const candle = checkCandleQuality(klines, direction);
+  if (candle.verdict === 'FAKE') {
+    trapScore += 2;
+    reasons.push(`fake candle: ${candle.details}`);
+  } else if (candle.verdict === 'WEAK') {
+    trapScore += 1;
+    reasons.push(`weak candle: ${candle.details}`);
+  } else if (candle.verdict === 'STRONG') {
+    trapScore = Math.max(0, trapScore - 0.5); // strong candle slightly reduces trap risk
+  }
+
+  return { safe: trapScore === 0, trapScore, reasons, candle };
 };
 
 // ── Master Score ──────────────────────────────────────────────────────────────
@@ -305,8 +404,9 @@ const calcMasterScore = ({ compression, volume, resistance, fundingLS, trap }) =
 // ── Alert Messages ────────────────────────────────────────────────────────────
 const DISCLAIMER = `━━━━━━━━━━━━━━━\n⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>`;
 
+// WATCH alert — shows candle quality warning if wicky
 const buildWatchMsg = (symbol, score, direction, layers, btc) => {
-  const isLong = direction === 'LONG';
+  const isLong  = direction === 'LONG';
   const signals = [];
   if (layers.compression.compressed && layers.compression.oiBuilding) signals.push('📦 Price coiling + OI building');
   else if (layers.compression.compressed) signals.push('📦 Price compression detected');
@@ -315,6 +415,13 @@ const buildWatchMsg = (symbol, score, direction, layers, btc) => {
   if (layers.resistance.pressure)     signals.push(`🧱 Resistance tested ${layers.resistance.tests}x — breakout pressure`);
   if (layers.fundingLS.funding < 0)   signals.push(`💸 Funding ${layers.fundingLS.funding.toFixed(3)}% — shorts paying`);
   if (layers.fundingLS.ls < 1)        signals.push(`⚖️ L/S ${layers.fundingLS.ls.toFixed(2)} — shorts dominating`);
+
+  // Candle line
+  const candle = layers.trap?.candle;
+  const candleLine = candle && candle.verdict !== 'UNKNOWN'
+    ? `\n🕯 Candle: ${candle.emoji} ${candle.verdict} — ${candle.details}`
+    : '';
+
   const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}%` : '';
   return `
 👀 <b>NEXIO — WATCH ALERT</b>
@@ -322,7 +429,7 @@ const buildWatchMsg = (symbol, score, direction, layers, btc) => {
 ${isLong ? '🟢' : '🔴'} <b>${symbol.replace('USDT','')} — ${isLong ? 'LONG' : 'SHORT'} SETUP FORMING</b>
 📊 Score: <b>${score}/10</b>  ${confBar(score)}
 ━━━━━━━━━━━━━━━
-${signals.map(s => `• ${s}`).join('\n')}
+${signals.map(s => `• ${s}`).join('\n')}${candleLine}
 ━━━━━━━━━━━━━━━
 ⏳ <b>DO NOT ENTER YET — Waiting for breakout</b>
 ${btcLine}
@@ -332,13 +439,15 @@ ${DISCLAIMER}
   `.trim();
 };
 
+// FIRE alert — shows full candle verdict with VALID/SKIP verdict
 const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc) => {
   const isLong = direction === 'LONG';
   const atr = price * 0.015;
-  const sl  = isLong ? price - atr       : price + atr;
-  const tp1 = isLong ? price + atr       : price - atr;
-  const tp2 = isLong ? price + atr * 2   : price - atr * 2;
-  const tp3 = isLong ? price + atr * 3   : price - atr * 3;
+  const sl  = isLong ? price - atr     : price + atr;
+  const tp1 = isLong ? price + atr     : price - atr;
+  const tp2 = isLong ? price + atr * 2 : price - atr * 2;
+  const tp3 = isLong ? price + atr * 3 : price - atr * 3;
+
   const confirmations = [];
   if (layers.compression.compressed && layers.compression.oiBuilding) confirmations.push('✅ OI + Price compression confirmed');
   if (layers.compression.tightening) confirmations.push('✅ Compression tightened — spring released');
@@ -347,7 +456,34 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc) =
   if (layers.fundingLS.funding < 0)   confirmations.push(`✅ Funding ${layers.fundingLS.funding.toFixed(3)}% negative`);
   if (layers.fundingLS.ls < 1)        confirmations.push(`✅ L/S ${layers.fundingLS.ls.toFixed(2)} — squeeze active`);
   if (scanCount >= 2)                 confirmations.push(`✅ ${scanCount} scans confirmed`);
-  const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}% — ${btc.reason}` : '';
+
+  // Candle quality block
+  const candle = layers.trap?.candle;
+  let candleBlock = '';
+  if (candle && candle.verdict !== 'UNKNOWN') {
+    const verdictLine = candle.verdict === 'STRONG'
+      ? `✅ Candle: STRONG — ${candle.details}`
+      : candle.verdict === 'WEAK'
+      ? `⚠️ Candle: WEAK — ${candle.details}`
+      : `❌ Candle: FAKE — ${candle.details}`;
+
+    const wickBar = isLong
+      ? `   Body ${candle.bodyPct}% | Upper wick ${candle.upperWickPct}%`
+      : `   Body ${candle.bodyPct}% | Lower wick ${candle.lowerWickPct}%`;
+
+    const overallVerdict = candle.verdict === 'STRONG'
+      ? '🟢 <b>VALID SETUP — Enter on confirmation</b>'
+      : candle.verdict === 'WEAK'
+      ? '🟡 <b>CAUTION — Reduce position size</b>'
+      : '🔴 <b>SKIP — Likely fakeout</b>';
+
+    candleBlock = `\n━━━━━━━━━━━━━━━\n🕯 <b>Candle Analysis</b>\n${verdictLine}\n${wickBar}\n${overallVerdict}`;
+  }
+
+  const btcLine = btc
+    ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}% — ${btc.reason}`
+    : '';
+
   return `
 ${isLong ? '🟢' : '🔴'} <b>NEXIO SIGNAL — ${isLong ? '📈 LONG' : '📉 SHORT'}</b>
 ━━━━━━━━━━━━━━━
@@ -361,7 +497,7 @@ ${confirmations.join('\n')}
 🛑 SL:     <b>$${fmtP(sl)}</b> (-1.5%)
 🎯 TP1:    <b>$${fmtP(tp1)}</b> (+1.5%)
 🎯 TP2:    <b>$${fmtP(tp2)}</b> (+3.0%)
-🎯 TP3:    <b>$${fmtP(tp3)}</b> (+4.5%)
+🎯 TP3:    <b>$${fmtP(tp3)}</b> (+4.5%)${candleBlock}
 ━━━━━━━━━━━━━━━
 ${btcLine}
 ⏰ ${gstNow()} GST
@@ -468,7 +604,7 @@ const runWatchlistScan = async () => {
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
       try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=12`); } catch { }
-      try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
+      try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${coin.symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
       const isLong  = funding < 0.005 && ls < 1.1;
       const isShort = funding > 0.015 && ls > 1.15;
@@ -479,13 +615,13 @@ const runWatchlistScan = async () => {
       const volume      = checkVolumeBuild(klines);
       const resistance  = checkResistanceTesting(symbol, price, klines);
       const fundingLS   = checkFundingLS(funding, ls, direction);
-      const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding);
+      // UPDATED: pass klines as 6th argument for candle wick analysis
+      const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
       const score       = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
       const layers      = { compression, volume, resistance, fundingLS, trap };
 
-      log(`📊 ${symbol} ${direction} score:${score}`);
+      log(`📊 ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict || 'N/A'}`);
 
-      // Update tracker
       const existing = coinTracker.get(symbol);
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
 
@@ -515,6 +651,7 @@ const runWatchlistScan = async () => {
       }
 
       // STAGE 2 — FIRE alert
+      // Only fires on STRONG or WEAK candle — FAKE candle blocks the alert
       const breakoutConfirmed = (() => {
         if (klines.length < 2) return false;
         const latest = klines[klines.length - 1];
@@ -523,7 +660,9 @@ const runWatchlistScan = async () => {
         return isLong ? (c > o && move >= 0.3) : (c < o && move >= 0.3);
       })();
 
-      if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && alertsFired < 4) {
+      const candleOk = trap.candle?.verdict !== 'FAKE'; // NEW: block FAKE candles from firing
+
+      if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && alertsFired < 4) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -532,8 +671,11 @@ const runWatchlistScan = async () => {
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now() });
           alertsFired++;
-          log(`🚀 FIRED: ${symbol} ${direction} score:${score}`);
+          log(`🚀 FIRED: ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict}`);
         }
+      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && !candleOk) {
+        // Log that we skipped due to fake candle
+        log(`⚠️ SKIP: ${symbol} — fake candle detected (${trap.candle?.details})`);
       }
 
       if (score < 2.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
@@ -552,15 +694,13 @@ const runWatchlistScan = async () => {
       }
     }
 
-    // Priority list every 3 scans
     if (watchlistScanCount % 3 === 0 && coinTracker.size > 0) {
       const msg = buildPriorityList(btc);
       if (msg) await postSignal(msg);
     }
 
-    // Summary to owner
-    const fire = [...coinTracker.values()].filter(c => c.state === 'FIRE').length;
-    const conf = [...coinTracker.values()].filter(c => c.state === 'CONFIRMING').length;
+    const fire    = [...coinTracker.values()].filter(c => c.state === 'FIRE').length;
+    const conf    = [...coinTracker.values()].filter(c => c.state === 'CONFIRMING').length;
     const watching = [...coinTracker.values()].filter(c => c.state === 'WATCHING').length;
     await tg(OWNER_CHAT_ID, `👁 Scan #${watchlistScanCount} | ${gstNow()}\nWatchlist: ${symbols.length} | Tracking: ${coinTracker.size}\n🔥 ${fire} | ⚡ ${conf} | 👀 ${watching}\nBTC: ${btc.pass ? '✅' : '❌'} ${btc.reason}\nAlerts: ${alertsFired}`);
 
@@ -569,10 +709,10 @@ const runWatchlistScan = async () => {
 
 // ── Bot Commands ──────────────────────────────────────────────────────────────
 const handleCommand = async msg => {
-  const chatId = String(msg.chat?.id);
-  const username = msg.from?.username || '';
+  const chatId    = String(msg.chat?.id);
+  const username  = msg.from?.username || '';
   const firstName = msg.from?.first_name || '';
-  const text = (msg.text || '').trim();
+  const text      = (msg.text || '').trim();
   await saveUser(chatId, username, firstName);
 
   if (text === '/start') {
@@ -590,7 +730,7 @@ const handleCommand = async msg => {
   }
   else if (text === '/status') {
     const all = await getAllUsers(), premium = await getPremiumUsers(), wl = await getWatchlist();
-    await tg(chatId, `📊 <b>Nexio Status</b>\n━━━━━━━━━━━━━━━\n🤖 Online ✅\n👥 Users: ${all.length} | 👑 Prime: ${premium.length}\n👁 Watchlist: ${wl.length} | Tracking: ${coinTracker.size}\n🌐 BTC: ${btcGateStatus.pass ? '✅' : '❌'} ${btcGateStatus.reason}\n⏰ ${gstNow()} GST`);
+    await tg(chatId, `📊 <b>Nexio Status</b>\n━━━━━━━━━━━━━━━\n🤖 Online ✅\n👥 Users: ${all.length} | 👑 Prime: ${premium.length}\n👁 Watchlist: ${wl.length} | Tracking: ${coinTracker.size}\n🌐 BTC: ${btcGateStatus.pass ? '✅' : '❌'} ${btcGateStatus.reason}\n🕯 Candle wick detector: ✅ Active\n⏰ ${gstNow()} GST`);
   }
   else if (text === '/watchlist') {
     const wl = await getWatchlist();
@@ -607,12 +747,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v2.1`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v2.0 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v2.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -662,9 +802,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v2.0 — 9-Layer Intelligence Scanner starting...');
+  log('🚀 Nexio v2.1 — 9-Layer Intelligence Scanner + Candle Wick Detector starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v2.0 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📦 Compression + OI detection\n🧱 Resistance pressure tracker\n🔊 Volume buildup detector\n🛡 Trap risk filter\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v2.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📦 Compression + OI detection\n🧱 Resistance pressure tracker\n🔊 Volume buildup detector\n🛡 Trap risk filter\n🕯 Candle wick detector (NEW)\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
