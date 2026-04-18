@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.2 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.3 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -30,35 +30,43 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 600000;
+const FULL_MARKET_INTERVAL_MS = 300000; // 5 min — was 10 min
 const WATCHLIST_SCAN_INTERVAL = 180000;
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
-const MIN_VOLUME_USD          = 500000;
+const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 60;
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5;
-const PUMP_EXCLUDE_PCT        = 15.0;
+const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
-  // High cap crypto
+  // ── High cap crypto ──────────────────────────────────────────────────────────
   'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
   'ADAUSDT','DOGEUSDT','TRXUSDT','LTCUSDT','MATICUSDT',
-  'HBARUSDT','WBTCUSDT',
-  // Commodities / gold / oil
-  'XAUTUSDT','PAXGUSDT','XAUUSDT','XAGUUSDT','CLUSDT',
-  // Stablecoins / index
-  'BTCDOMUSDT','DEFIUSDT','USDCUSDT','USDTUSDT',
-  // Tokenized US stocks
+  'HBARUSDT','WBTCUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
+  'ATOMUSDT','NEARUSDT','UNIUSDT','APTUSDT','LDOUSDT',
+
+  // ── Tokenized commodities — gold, silver, oil, platinum ──────────────────────
+  'XAUUSDT','XAUTUSDT','PAXGUSDT','XAGUUSDT','CLUSDT',
+  'WBTCUSDT','XPTUSD','PALAUSDT',
+
+  // ── Stablecoins / index / dom ────────────────────────────────────────────────
+  'USDCUSDT','USDTUSDT','BUSDUSDT','DAIUSDT','FRAXUSDT',
+  'BTCDOMUSDT','DEFIUSDT','ALTUSDT',
+
+  // ── Tokenized US stocks ──────────────────────────────────────────────────────
   'TSLAUSDT','AAPLUSDT','GOOGLUSDT','AMZNUSDT','MSFTUSDT',
   'NVDAUSDT','METAUSDT','COINUSDT','NFLXUSDT','BABAUSDT',
-  'AMDUSDT','BRKBUSDT','INTCUSDT','TSMUSDT','TSMAUSDT',
-  'UBERUSDT','ABNBUSDT','PYTUSDT','SPYUSDT','QQQUSDT',
-  'AركUSDT','PLTRУСDT','PLTRУСDT',
-  // Tokenized Asian / other stocks
-  'BRKAUSDT','SHOP1USDT','NVDAUSDT',
+  'AMDUSDT','BRKBUSDT','BRKAUSDT','INTCUSDT','TSMUSDT',
+  'TSMAUSDT','UBERUSDT','ABNBUSDT','SPYUSDT','QQQUSDT',
+  'PLTRУСDT','PYTUSDT','SHOP1USDT','SNAPUSDT','LYFTUSDT',
+  'RKLBUSDT','IONQUSDT','MSTRUSDT','MSTRUUSDT',
 ]);
+
+// Regex catches any tokenized asset not in the list above
+const EXCLUDE_REGEX = /^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|BRKB|INTC|UBER|SPY|QQQ|ABNB|TSM|PLTR|SHOP|PYPL|SNAP|LYFT|XAU|XAG|PAX|CL1|MSTR|RKLB|IONQ)/;
 
 const MID_CAP = new Set([
   'LINKUSDT','AVAXUSDT','DOTUSDT','ATOMUSDT','NEARUSDT',
@@ -594,194 +602,108 @@ const calcMasterScore = ({ compression, volume, resistance, fundingLS, trap }) =
 };
 
 // ── Alert Messages ────────────────────────────────────────────────────────────
-const DISCLAIMER = `━━━━━━━━━━━━━━━\n⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>`;
+// ── Shared footer (only shown once per message) ──────────────────────────────
+const FOOTER = (btc, symbol) => {
+  const btcStr = btc ? `${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0?'+':''}${btc.change?.toFixed(1)}%` : '';
+  const link   = symbol ? `bybit.com/trade/usdt/${symbol}` : '';
+  return [btcStr, link, `⏰ ${gstNow()} GST`, `<i>DYOR · SL always set</i>`].filter(Boolean).join('  |  ');
+};
 
-// EARLY ENTRY alert — pre-breakout, best R:R
+// WATCH — compact single block per coin
+const buildWatchMsg = (symbol, score, direction, layers, btc) => {
+  const isLong = direction === 'LONG';
+  const tag    = isLong ? '🟢 LONG' : '🔴 SHORT';
+  const candle = layers.trap?.candle;
+  const cv     = candle?.verdict !== 'UNKNOWN' ? ` · 🕯${candle?.emoji}${candle?.verdict}` : '';
+
+  const tags = [];
+  if (layers.compression.compressed && layers.compression.oiBuilding) tags.push('📦Coiling+OI');
+  else if (layers.compression.compressed) tags.push('📦Coiling');
+  if (layers.compression.tightening)  tags.push('🎯Tightening');
+  if (layers.volume.building)         tags.push('🔊VolBuild');
+  if (layers.resistance.pressure)     tags.push(`🧱Resist×${layers.resistance.tests}`);
+  if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
+  if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
+
+  return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
+${tags.join(' · ')}
+⏳ Waiting for breakout
+${FOOTER(btc, symbol)}`.trim();
+};
+
+// EARLY — compact pre-breakout
 const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc) => {
   const isLong = direction === 'LONG';
-  const sl     = isLong ? price - atr * 1.2 : price + atr * 1.2;
-  const tp1    = isLong ? price + atr * 1.5 : price - atr * 1.5;
-  const tp2    = isLong ? price + atr * 3.0 : price - atr * 3.0;
-  const rr     = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
-
-  const signals = [];
-  if (layers.compression.compressed && layers.compression.oiBuilding) signals.push('📦 Price coiling + OI building — spring loaded');
-  if (layers.compression.tightening)  signals.push('🎯 Range tightening — breakout imminent');
-  if (layers.fundingLS.funding < 0)   signals.push(`💸 Funding ${layers.fundingLS.funding.toFixed(3)}% — shorts paying`);
-  if (layers.fundingLS.ls < 1)        signals.push(`⚖️ L/S ${layers.fundingLS.ls.toFixed(2)} — shorts dominating`);
-  if (sweep?.swept && sweep?.recovery) signals.push(`🌊 Liquidity sweep detected — stop hunt complete`);
-  const htfLine = htf?.ema50
-    ? `📈 HTF EMA50: $${fmtP(htf.ema50)} — ${htf.reason}`
-    : '';
-  const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}%` : '';
-
-  return `
-⚡ <b>NEXIO — EARLY ENTRY</b>
-━━━━━━━━━━━━━━━
-${isLong ? '🟢' : '🔴'} <b>${symbol.replace('USDT','')} — ${isLong ? 'LONG' : 'SHORT'} (PRE-BREAKOUT)</b>
-📊 Score: <b>${score}/10</b>  ${confBar(score)}
-━━━━━━━━━━━━━━━
-<b>Why enter now:</b>
-${signals.map(s => `• ${s}`).join('\n')}
-━━━━━━━━━━━━━━━
-💰 Entry:  <b>$${fmtP(price)}</b>
-🛑 SL:     <b>$${fmtP(sl)}</b> (1.2×ATR)
-🎯 TP1:    <b>$${fmtP(tp1)}</b> (1.5×ATR)
-🎯 TP2:    <b>$${fmtP(tp2)}</b> (3.0×ATR)
-📐 R:R     <b>1:${rr}</b>
-━━━━━━━━━━━━━━━
-${htfLine}
-⚠️ <b>Small size — breakout not confirmed yet</b>
-${btcLine}
-⏰ ${gstNow()} GST
-📊 bybit.com/trade/usdt/${symbol}
-${DISCLAIMER}
-  `.trim();
-};
-
-// BREAKEVEN alert — sent after TP1 hit
-const buildBreakevenMsg = (symbol, entryPrice, tp1Price, direction) => {
-  const isLong = direction === 'LONG';
-  return `
-✅ <b>NEXIO — TP1 HIT</b>
-━━━━━━━━━━━━━━━
-🪙 <b>${symbol.replace('USDT','')}</b>
-🎯 TP1 reached: <b>$${fmtP(tp1Price)}</b>
-━━━━━━━━━━━━━━━
-⚡ <b>ACTION: Move SL to breakeven</b>
-📍 Move SL to entry: <b>$${fmtP(entryPrice)}</b>
-💰 Partial profit secured
-🎯 Let remainder run to TP2
-⏰ ${gstNow()} GST
-${DISCLAIMER}
-  `.trim();
-};
-
-
-// WATCH alert — shows candle quality warning if wicky
-const buildWatchMsg = (symbol, score, direction, layers, btc) => {
-  const isLong  = direction === 'LONG';
-  const signals = [];
-  if (layers.compression.compressed && layers.compression.oiBuilding) signals.push('📦 Price coiling + OI building');
-  else if (layers.compression.compressed) signals.push('📦 Price compression detected');
-  if (layers.compression.tightening)  signals.push('🎯 Compression tightening — spring loading');
-  if (layers.volume.building)         signals.push('🔊 Volume accumulating quietly');
-  if (layers.resistance.pressure)     signals.push(`🧱 Resistance tested ${layers.resistance.tests}x — breakout pressure`);
-  if (layers.fundingLS.funding < 0)   signals.push(`💸 Funding ${layers.fundingLS.funding.toFixed(3)}% — shorts paying`);
-  if (layers.fundingLS.ls < 1)        signals.push(`⚖️ L/S ${layers.fundingLS.ls.toFixed(2)} — shorts dominating`);
-
-  // Candle line
-  const candle = layers.trap?.candle;
-  const candleLine = candle && candle.verdict !== 'UNKNOWN'
-    ? `\n🕯 Candle: ${candle.emoji} ${candle.verdict} — ${candle.details}`
-    : '';
-
-  const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}%` : '';
-  return `
-👀 <b>NEXIO — WATCH ALERT</b>
-━━━━━━━━━━━━━━━
-${isLong ? '🟢' : '🔴'} <b>${symbol.replace('USDT','')} — ${isLong ? 'LONG' : 'SHORT'} SETUP FORMING</b>
-📊 Score: <b>${score}/10</b>  ${confBar(score)}
-━━━━━━━━━━━━━━━
-${signals.map(s => `• ${s}`).join('\n')}${candleLine}
-━━━━━━━━━━━━━━━
-⏳ <b>DO NOT ENTER YET — Waiting for breakout</b>
-${btcLine}
-⏰ ${gstNow()} GST
-📊 bybit.com/trade/usdt/${symbol}
-${DISCLAIMER}
-  `.trim();
-};
-
-// FIRE alert — shows full candle verdict with VALID/SKIP verdict
-const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = []) => {
-  const isLong = direction === 'LONG';
-  const atrValue = calculateATR(klines) || (price * 0.018);
-  const atr = atrValue;
   const sl  = isLong ? price - atr * 1.2 : price + atr * 1.2;
   const tp1 = isLong ? price + atr * 1.5 : price - atr * 1.5;
   const tp2 = isLong ? price + atr * 3.0 : price - atr * 3.0;
-  const tp3 = isLong ? price + atr * 4.5 : price - atr * 4.5;
+  const rr  = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
 
-  const confirmations = [];
-  if (layers.compression.compressed && layers.compression.oiBuilding) confirmations.push('✅ OI + Price compression confirmed');
-  if (layers.compression.tightening) confirmations.push('✅ Compression tightened — spring released');
-  if (layers.volume.spike >= 2)       confirmations.push(`✅ Volume ${layers.volume.spike}x breakout candle`);
-  if (layers.resistance.pressure)     confirmations.push(`✅ Broke resistance after ${layers.resistance.tests} tests`);
-  if (layers.fundingLS.funding < 0)   confirmations.push(`✅ Funding ${layers.fundingLS.funding.toFixed(3)}% negative`);
-  if (layers.fundingLS.ls < 1)        confirmations.push(`✅ L/S ${layers.fundingLS.ls.toFixed(2)} — squeeze active`);
-  if (scanCount >= 2)                 confirmations.push(`✅ ${scanCount} scans confirmed`);
+  const tags = [];
+  if (layers.compression.compressed && layers.compression.oiBuilding) tags.push('📦Coiling+OI');
+  if (layers.compression.tightening)  tags.push('🎯Tightening');
+  if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
+  if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
+  if (sweep?.swept && sweep?.recovery) tags.push('🌊Swept');
 
-  // Candle quality block
-  const candle = layers.trap?.candle;
-  let candleBlock = '';
-  if (candle && candle.verdict !== 'UNKNOWN') {
-    const verdictLine = candle.verdict === 'STRONG'
-      ? `✅ Candle: STRONG — ${candle.details}`
-      : candle.verdict === 'WEAK'
-      ? `⚠️ Candle: WEAK — ${candle.details}`
-      : `❌ Candle: FAKE — ${candle.details}`;
-
-    const wickBar = isLong
-      ? `   Body ${candle.bodyPct}% | Upper wick ${candle.upperWickPct}%`
-      : `   Body ${candle.bodyPct}% | Lower wick ${candle.lowerWickPct}%`;
-
-    const overallVerdict = candle.verdict === 'STRONG'
-      ? '🟢 <b>VALID SETUP — Enter on confirmation</b>'
-      : candle.verdict === 'WEAK'
-      ? '🟡 <b>CAUTION — Reduce position size</b>'
-      : '🔴 <b>SKIP — Likely fakeout</b>';
-
-    candleBlock = `\n━━━━━━━━━━━━━━━\n🕯 <b>Candle Analysis</b>\n${verdictLine}\n${wickBar}\n${overallVerdict}`;
-  }
-
-  const btcLine = btc
-    ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}% — ${btc.reason}`
-    : '';
-
-  return `
-${isLong ? '🟢' : '🔴'} <b>NEXIO SIGNAL — ${isLong ? '📈 LONG' : '📉 SHORT'}</b>
-━━━━━━━━━━━━━━━
-🪙 <b>${symbol.replace('USDT','')}</b>
-📊 Score: <b>${score}/10</b>  ${confBar(score)}
-━━━━━━━━━━━━━━━
-<b>Confirmations:</b>
-${confirmations.join('\n')}
-━━━━━━━━━━━━━━━
-💰 Entry:  <b>$${fmtP(price)}</b>
-🛑 SL:     <b>$${fmtP(sl)}</b> (1.2×ATR)
-🎯 TP1:    <b>$${fmtP(tp1)}</b> (1.5×ATR)
-🎯 TP2:    <b>$${fmtP(tp2)}</b> (3.0×ATR)
-🎯 TP3:    <b>$${fmtP(tp3)}</b> (4.5×ATR)${candleBlock}
-━━━━━━━━━━━━━━━
-${btcLine}
-⏰ ${gstNow()} GST
-📊 bybit.com/trade/usdt/${symbol}
-${DISCLAIMER}
-  `.trim();
+  return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
+${tags.join(' · ')}
+💰 $${fmtP(price)}  🛑 $${fmtP(sl)}  🎯 $${fmtP(tp1)} / $${fmtP(tp2)}  R:R 1:${rr}
+⚠️ Pre-breakout — small size
+${FOOTER(btc, symbol)}`.trim();
 };
 
+// FIRE — full signal with SL/TP
+const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = []) => {
+  const isLong   = direction === 'LONG';
+  const atr      = calculateATR(klines) || (price * 0.018);
+  const sl       = isLong ? price - atr * 1.2 : price + atr * 1.2;
+  const tp1      = isLong ? price + atr * 1.5 : price - atr * 1.5;
+  const tp2      = isLong ? price + atr * 3.0 : price - atr * 3.0;
+  const tp3      = isLong ? price + atr * 4.5 : price - atr * 4.5;
+  const candle   = layers.trap?.candle;
+
+  const conf = [];
+  if (layers.compression.compressed && layers.compression.oiBuilding) conf.push('📦OI+Coil');
+  if (layers.volume.spike >= 2)       conf.push(`🔊Vol${layers.volume.spike}x`);
+  if (layers.resistance.pressure)     conf.push(`🧱Res×${layers.resistance.tests}`);
+  if (layers.fundingLS.funding < 0)   conf.push(`💸${layers.fundingLS.funding.toFixed(3)}%`);
+  if (layers.fundingLS.ls < 1)        conf.push(`⚖️${layers.fundingLS.ls.toFixed(2)}`);
+  if (scanCount >= 2)                 conf.push(`🔁${scanCount}scans`);
+  if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
+
+  return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b>
+📊 ${score}/10 ${confBar(score)}
+${conf.join(' · ')}
+━━━━━━━━━━━━━━━
+💰 $${fmtP(price)}  🛑 $${fmtP(sl)}
+🎯 TP1 $${fmtP(tp1)}  TP2 $${fmtP(tp2)}  TP3 $${fmtP(tp3)}
+${FOOTER(btc, symbol)}`.trim();
+};
+
+// BREAKEVEN — after TP1 hit
+const buildBreakevenMsg = (symbol, entryPrice, tp1Price, direction) => {
+  return `✅ <b>${symbol.replace('USDT','')} TP1 HIT</b> — Move SL to entry $${fmtP(entryPrice)}
+🎯 TP1: $${fmtP(tp1Price)} reached · Let TP2 run
+⏰ ${gstNow()} GST`.trim();
+};
+
+// PRIORITY LIST — grouped, no per-coin repetition
 const buildPriorityList = (btc) => {
   const sorted = [...coinTracker.values()].filter(c => c.state !== 'FADING' && c.score >= 4).sort((a, b) => b.score - a.score);
   if (!sorted.length) return null;
-  const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}%` : '';
   const lines = sorted.slice(0, 10).map((s, i) => {
     const rank  = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
-    const dir   = s.direction === 'LONG' ? '📈 LONG' : '📉 SHORT';
-    const label = s.state === 'FIRE' ? '🔥 HIGH CONF' : s.state === 'CONFIRMING' ? '⚡ CONFIRMED' : '👀 WATCHING';
-    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> — ${label} ${s.score}/10\n     ${confBar(s.score)}`;
+    const dir   = s.direction === 'LONG' ? '📈' : '📉';
+    const state = s.state === 'FIRE' ? '🔥' : s.state === 'CONFIRMING' ? '⚡' : '👀';
+    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> ${state} ${s.score}/10`;
   }).join('\n');
-  return `
-📊 <b>NEXIO PRIORITY LIST</b>
-━━━━━━━━━━━━━━━
+  const btcStr = btc ? `${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0?'+':''}${btc.change?.toFixed(1)}%` : '';
+  return `📊 <b>NEXIO WATCHLIST</b>  ${btcStr}  ⏰ ${gstNow()}
 ${lines}
-━━━━━━━━━━━━━━━
-${btcLine}
-⏰ ${gstNow()} GST
-🔥 HIGH CONF = enter | ⚡ CONFIRMED = watch | 👀 WATCHING = building
-${DISCLAIMER}
-  `.trim();
+🔥enter ⚡watch 👀building  <i>DYOR · SL always</i>`.trim();
 };
+
 
 // ── Scanner 1: Full Market ────────────────────────────────────────────────────
 const runFullMarketScan = async () => {
@@ -792,19 +714,15 @@ const runFullMarketScan = async () => {
     const valid = tickers
       .filter(t => {
         if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) return false;
-        if (EXCLUDE.has(t.symbol)) return false;
+        if (EXCLUDE.has(t.symbol) || EXCLUDE_REGEX.test(t.symbol)) return false;
         if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) return false;
         if (Math.abs(parseFloat(t.priceChangePercent)) >= PUMP_EXCLUDE_PCT) return false;
-        if (/^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|BRKB|INTC|UBER|SPY|QQQ|ABNB|TSM|PLTR|SHOP|PYPL|SNAP|LYFT|XAU|XAG|PAX)/.test(t.symbol)) return false;
+        // EXCLUDE_REGEX already handles tokenized stocks/commodities above
         return true;
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
-      .sort((a, b) => {
-        if (a.isMid && !b.isMid) return -1;
-        if (!a.isMid && b.isMid) return 1;
-        return Math.abs(a.change) - Math.abs(b.change);
-      })
-      .slice(0, 80);
+      .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
+      .slice(0, 300); // was 80 — scan full market
 
     const currentWatchlist = await getWatchlist();
     const currentSymbols   = currentWatchlist.map(r => r.symbol);
@@ -1109,12 +1027,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.2`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.3`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.2 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.3 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1164,9 +1082,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v3.2 — Signal Intelligence Engine starting...');
+  log('🚀 Nexio v3.3 — Signal Intelligence Engine starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.2 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.3 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
