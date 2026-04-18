@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.0 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.1 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -121,32 +121,117 @@ const calculateEMA = (klines, period = 50) => {
   const closes = klines.map(k => parseFloat(k[4]));
   const k = 2 / (period + 1);
   let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-  }
+  for (let i = period; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
   return ema;
 };
 
-// ── HTF EMA50 Trend Filter ────────────────────────────────────────────────────
+const calcEMAFromCloses = (closes, period) => {
+  if (closes.length < period) return null;
+  const k = 2 / (period + 1);
+  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
+  return ema;
+};
+
+// ── HTF EMA50 + EMA200 Trend Filter (v3.1) ───────────────────────────────────
+// LONG only if price > EMA50 > EMA200
+// SHORT only if price < EMA50 < EMA200
 const checkHTFTrend = async (symbol) => {
   try {
-    const klines1h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=60`);
-    const ema50    = calculateEMA(klines1h, 50);
-    if (!ema50) return { bullish: true, bearish: true, ema50: null, reason: 'insufficient data' };
-    const price    = parseFloat(klines1h[klines1h.length - 1][4]);
-    const bullish  = price > ema50;
-    const bearish  = price < ema50;
+    const klines1h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=210`);
+    if (klines1h.length < 200) return { bullish: true, bearish: true, ema50: null, ema200: null, reason: 'insufficient data' };
+    const closes = klines1h.map(k => parseFloat(k[4]));
+    const price  = closes[closes.length - 1];
+    const ema50  = calcEMAFromCloses(closes, 50);
+    const ema200 = calcEMAFromCloses(closes, 200);
+    if (!ema50 || !ema200) return { bullish: true, bearish: true, ema50: null, ema200: null, reason: 'calc error' };
+    const bullish  = price > ema50 && ema50 > ema200;
+    const bearish  = price < ema50 && ema50 < ema200;
     const pctAbove = ((price - ema50) / ema50) * 100;
     return {
-      bullish, bearish, ema50,
+      bullish, bearish, ema50, ema200,
       pctAbove: parseFloat(pctAbove.toFixed(2)),
-      reason: bullish
-        ? `${pctAbove.toFixed(1)}% above EMA50`
-        : `${Math.abs(pctAbove).toFixed(1)}% below EMA50`,
+      reason: bullish ? `price > EMA50 > EMA200 ✅` : bearish ? `price < EMA50 < EMA200 ✅` : `EMA50/200 misaligned ❌`,
     };
   } catch {
-    return { bullish: true, bearish: true, ema50: null, reason: 'data error' };
+    return { bullish: true, bearish: true, ema50: null, ema200: null, reason: 'data error' };
   }
+};
+
+// ── Market Regime Classifier (v3.1) ──────────────────────────────────────────
+const classifyRegime = (klines) => {
+  if (klines.length < 20) return { regime: 'unknown', allowFire: true, allowEarly: true };
+  const closes   = klines.map(k => parseFloat(k[4]));
+  const highs    = klines.map(k => parseFloat(k[2]));
+  const lows     = klines.map(k => parseFloat(k[3]));
+  const price    = closes[closes.length - 1];
+  const ema10Now = calcEMAFromCloses(closes, 10);
+  const ema10Prv = calcEMAFromCloses(closes.slice(0, -5), 10);
+  const slope    = ema10Now && ema10Prv ? ((ema10Now - ema10Prv) / ema10Prv) * 100 : 0;
+  const atr      = calculateATR(klines, 10);
+  const atrPct   = price > 0 ? (atr / price) * 100 : 0;
+  const rangePct = price > 0 ? ((Math.max(...highs.slice(-10)) - Math.min(...lows.slice(-10))) / price) * 100 : 0;
+  let regime;
+  if (atrPct > 3.5)                               regime = 'unstable';
+  else if (Math.abs(slope) > 0.3 && rangePct > 4) regime = 'trending';
+  else                                             regime = 'ranging';
+  return { regime, slope: parseFloat(slope.toFixed(2)), atrPct: parseFloat(atrPct.toFixed(2)), allowFire: regime === 'trending', allowEarly: regime !== 'unstable' };
+};
+
+// ── OI Classifier (v3.1) ─────────────────────────────────────────────────────
+const classifyOI = (currentOI, prevOI, price, prevPrice, funding, candle) => {
+  if (!prevOI || prevOI === 0) return { type: 'unknown', bullish: false };
+  const oiChange    = ((currentOI - prevOI) / prevOI) * 100;
+  const priceMove   = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
+  const oiRising    = oiChange > 1;
+  const priceFlat   = Math.abs(priceMove) < 1.5;
+  const pricePumped = priceMove > 3;
+  const wicky       = candle?.verdict === 'FAKE' || candle?.upperWickPct > 40;
+  let type, bullish;
+  if (oiRising && priceFlat && funding < -0.005) { type = 'squeeze';      bullish = true;  }
+  else if (oiRising && priceFlat)                { type = 'buildup';      bullish = true;  }
+  else if (oiRising && !priceFlat && !pricePumped){ type = 'continuation'; bullish = true; }
+  else if (oiRising && pricePumped && wicky)     { type = 'trap';         bullish = false; }
+  else                                            { type = 'neutral';      bullish = false; }
+  return { type, bullish, oiChange: parseFloat(oiChange.toFixed(2)) };
+};
+
+// ── Extension Filter (v3.1) ───────────────────────────────────────────────────
+const checkExtension = (klines, price, atr) => {
+  if (klines.length < 12 || !atr) return { tooExtended: false, reason: '' };
+  const closes       = klines.slice(0, -2).map(k => parseFloat(k[4]));
+  const basePrice    = closes.reduce((a, b) => a + b, 0) / closes.length;
+  const extension    = Math.abs(price - basePrice) / atr;
+  const recentRanges = klines.slice(-11, -1).map(k => parseFloat(k[2]) - parseFloat(k[3]));
+  const avgRange     = recentRanges.reduce((a, b) => a + b, 0) / recentRanges.length;
+  const latestRange  = parseFloat(klines[klines.length-1][2]) - parseFloat(klines[klines.length-1][3]);
+  const candleTooLarge = avgRange > 0 && latestRange > avgRange * 3;
+  const tooExtended  = extension > 2.0 || candleTooLarge;
+  return { tooExtended, extension: parseFloat(extension.toFixed(2)), candleTooLarge, reason: tooExtended ? (candleTooLarge ? `candle ${(latestRange/avgRange).toFixed(1)}x avg` : `${extension.toFixed(1)} ATR from base`) : '' };
+};
+
+// ── Post-Loss Protection (v3.1) ───────────────────────────────────────────────
+const lossTracker   = new Map();
+const dailyLosses   = { count: 0, date: '' };
+const LOSS_COOLDOWN = 90;
+const DAILY_KILL    = 3;
+
+const recordLoss = (symbol) => {
+  const today = new Date().toDateString();
+  if (dailyLosses.date !== today) { dailyLosses.count = 0; dailyLosses.date = today; }
+  dailyLosses.count++;
+  lossTracker.set(symbol, { lossTime: Date.now() });
+  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL}`);
+};
+
+const isBlocked = (symbol) => {
+  if (dailyLosses.count >= DAILY_KILL) return { blocked: true, reason: `Daily kill switch (${dailyLosses.count} losses)` };
+  const rec = lossTracker.get(symbol);
+  if (rec) {
+    const minsAgo = (Date.now() - rec.lossTime) / 60000;
+    if (minsAgo < LOSS_COOLDOWN) return { blocked: true, reason: `Loss cooldown ${Math.ceil(LOSS_COOLDOWN - minsAgo)}min` };
+  }
+  return { blocked: false, reason: '' };
 };
 
 // ── Liquidity Sweep Detector ──────────────────────────────────────────────────
@@ -865,34 +950,47 @@ const runWatchlistScan = async () => {
         if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
       }
 
-      // ── STAGE 2 — FIRE alert (confirmed breakout) ─────────────────────────
+      // ── STAGE 2 — FIRE alert (v3.1 — one-bar confirm + all filters) ─────────
+      // Requires: BTC + trending regime + EMA200 aligned + one-bar confirmation
+      //           + STRONG candle + no extension + not loss-blocked + OI not trap
+
+      const regime    = classifyRegime(klines);
+      const prevPrice = klines.length >= 2 ? parseFloat(klines[klines.length-2][4]) : price;
+      const oiClass   = classifyOI(currentOI, prevOI, price, prevPrice, funding, trap.candle);
+      const ext       = checkExtension(klines, price, atr);
+      const block     = isBlocked(symbol);
+
+      // ONE-BAR CONFIRMATION: breakout happened on candle n-1, current candle n confirms
       const breakoutConfirmed = (() => {
         if (klines.length < 3) return false;
-        const latest = klines[klines.length - 1];
-        const prev   = klines[klines.length - 2];
-        const o = parseFloat(latest[1]);
-        const c = parseFloat(latest[4]);
-        const h = parseFloat(latest[2]);
-        const l = parseFloat(latest[3]);
-        const movePct = Math.abs((c - o) / o) * 100;
-        const range = h - Math.min(l, parseFloat(prev[3]));
-        const strongBody = range > 0 ? (Math.abs(c - o) / range) * 100 >= 55 : false;
-        const volumeSpikeOnBreak = parseFloat(latest[5]) > parseFloat(prev[5]) * 1.8;
-        const brokeResistance = isLong
-          ? (c > resistance.resistanceLevel * 0.999)
-          : (c < resistance.resistanceLevel * 1.001);
-        return (
-          (isLong ? (c > o) : (c < o)) &&
-          movePct >= 0.8 &&
-          strongBody &&
-          volumeSpikeOnBreak &&
-          brokeResistance
-        );
+        const breakoutCandle = klines[klines.length - 2]; // the breakout bar
+        const confirmCandle  = klines[klines.length - 1]; // confirmation bar
+        const breakO  = parseFloat(breakoutCandle[1]);
+        const breakC  = parseFloat(breakoutCandle[4]);
+        const breakH  = parseFloat(breakoutCandle[2]);
+        const breakL  = parseFloat(breakoutCandle[3]);
+        const confC   = parseFloat(confirmCandle[4]);
+        const confL   = parseFloat(confirmCandle[3]);
+        const confH   = parseFloat(confirmCandle[2]);
+        const breakMove  = Math.abs((breakC - breakO) / breakO) * 100;
+        const breakRange = breakH - breakL;
+        const breakBody  = breakRange > 0 ? (Math.abs(breakC - breakO) / breakRange) * 100 : 0;
+        const volSpike   = parseFloat(breakoutCandle[5]) > parseFloat(klines[klines.length-3][5]) * 1.8;
+        // Valid breakout candle: direction + move + body + volume
+        const validBreak = (isLong ? breakC > breakO : breakC < breakO) && breakMove >= 0.8 && breakBody >= 55 && volSpike;
+        // Confirmation candle holds above/below breakout close
+        const holds = isLong ? confL >= breakC * 0.997 : confH <= breakC * 1.003;
+        return validBreak && holds;
       })();
 
       const candleOk = trap.candle?.verdict === 'STRONG';
+      const regimeOk = regime.allowFire;
+      const oiOk     = oiClass.type !== 'trap';
+      const extOk    = !ext.tooExtended;
 
-      if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
+      if (block.blocked) {
+        log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
+      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && regimeOk && oiOk && extOk && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -903,10 +1001,17 @@ const runWatchlistScan = async () => {
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
-          log(`🚀 FIRED: ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict}`);
+          log(`🚀 FIRED: ${symbol} ${direction} score:${score} regime:${regime.regime} OI:${oiClass.type} candle:${trap.candle?.verdict}`);
         }
-      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && !candleOk) {
-        log(`⚠️ SKIP: ${symbol} — candle ${trap.candle?.verdict} (${trap.candle?.details})`);
+      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2) {
+        const reasons = [];
+        if (!breakoutConfirmed) reasons.push('no 1-bar confirm');
+        if (!candleOk)          reasons.push(`candle:${trap.candle?.verdict}`);
+        if (!regimeOk)          reasons.push(`regime:${regime.regime}`);
+        if (!oiOk)              reasons.push(`OI:${oiClass.type}`);
+        if (!extOk)             reasons.push(`extended:${ext.reason}`);
+        if (reasons.length)     log(`⚠️ SKIP: ${symbol} — ${reasons.join(' | ')}`);
+      }
       }
 
       if (score < 2.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
@@ -932,11 +1037,16 @@ const runWatchlistScan = async () => {
           ? ((sig.price - price) / sig.price) * 100
           : ((price - sig.price) / sig.price) * 100;
 
+        // ATR-based fade threshold — adapts to each coin's volatility
+        const fadeThreshold = sig.atr ? (sig.atr / sig.price) * 100 * 1.2 : FADE_THRESHOLD_PCT;
+
         if (!btc.pass && Date.now() - sig.firedAt < 3600000) {
           await postSignal(`🚨 <b>NEXIO — EMERGENCY EXIT</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n⚠️ BTC momentum reversed!\n${btc.reason}\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n⚡ <b>Exit immediately</b>\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
+          recordLoss(symbol);
           signalPrices.delete(symbol);
-        } else if (chg >= FADE_THRESHOLD_PCT && !sig.breakevenSent) {
-          await postSignal(`⚠️ <b>NEXIO — MOMENTUM FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n📉 Down ${chg.toFixed(1)}% from entry\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n⚡ Tighten stop or exit\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
+        } else if (chg >= fadeThreshold && !sig.breakevenSent) {
+          await postSignal(`⚠️ <b>NEXIO — SL HIT</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n📉 Down ${chg.toFixed(1)}% from entry (${fadeThreshold.toFixed(1)}% threshold)\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n🛑 Stop triggered — ${symbol.replace('USDT','')} blocked ${LOSS_COOLDOWN}min\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
+          recordLoss(symbol);
           signalPrices.delete(symbol);
         }
       }
@@ -995,12 +1105,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.0`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.1`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.0 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1050,9 +1160,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v3.0 — 9-Layer Intelligence Scanner + Candle Wick Detector starting...');
+  log('🚀 Nexio v3.1 — Signal Intelligence Engine starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.0 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n⚡ EARLY entry mode (pre-breakout)\n📈 HTF EMA50 trend filter\n💧 Liquidity sweep detector\n🕯 Candle wick — STRONG only\n📐 ATR SL/TP (R:R ≥ 1.5)\n🔄 Position manager (breakeven)\n🛡 Trap filter (depth:50)\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n⚡ EARLY entry mode (pre-breakout)\n📈 HTF EMA50 trend filter\n💧 Liquidity sweep detector\n🕯 Candle wick — STRONG only\n📐 ATR SL/TP (R:R ≥ 1.5)\n🔄 Position manager (breakeven)\n🛡 Trap filter (depth:50)\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
