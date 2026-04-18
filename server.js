@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.1 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.2 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -38,7 +38,7 @@ const MIN_VOLUME_USD          = 500000;
 const MAX_WATCHLIST           = 60;
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 7.5;
+const MIN_ALERT_SCORE         = 6.5;
 const PUMP_EXCLUDE_PCT        = 15.0;
 
 const EXCLUDE = new Set([
@@ -145,13 +145,17 @@ const checkHTFTrend = async (symbol) => {
     const ema50  = calcEMAFromCloses(closes, 50);
     const ema200 = calcEMAFromCloses(closes, 200);
     if (!ema50 || !ema200) return { bullish: true, bearish: true, ema50: null, ema200: null, reason: 'calc error' };
-    const bullish  = price > ema50 && ema50 > ema200;
-    const bearish  = price < ema50 && ema50 < ema200;
-    const pctAbove = ((price - ema50) / ema50) * 100;
+    // EMA50 is the gate. EMA200 adds confidence but does NOT block.
+    const bullish   = price > ema50;
+    const bearish   = price < ema50;
+    const ema200ok  = ema200 ? (bullish ? ema50 > ema200 : ema50 < ema200) : true;
+    const pctAbove  = ((price - ema50) / ema50) * 100;
     return {
-      bullish, bearish, ema50, ema200,
+      bullish, bearish, ema50, ema200, ema200ok,
       pctAbove: parseFloat(pctAbove.toFixed(2)),
-      reason: bullish ? `price > EMA50 > EMA200 ✅` : bearish ? `price < EMA50 < EMA200 ✅` : `EMA50/200 misaligned ❌`,
+      reason: bullish
+        ? `above EMA50${ema200ok ? ' + EMA200 ✅' : ' (EMA200 pending ⚡)'}`
+        : `below EMA50${ema200ok ? ' + EMA200 ✅' : ' (EMA200 pending ⚡)'}`,
     };
   } catch {
     return { bullish: true, bearish: true, ema50: null, ema200: null, reason: 'data error' };
@@ -975,22 +979,26 @@ const runWatchlistScan = async () => {
         const breakMove  = Math.abs((breakC - breakO) / breakO) * 100;
         const breakRange = breakH - breakL;
         const breakBody  = breakRange > 0 ? (Math.abs(breakC - breakO) / breakRange) * 100 : 0;
-        const volSpike   = parseFloat(breakoutCandle[5]) > parseFloat(klines[klines.length-3][5]) * 1.8;
-        // Valid breakout candle: direction + move + body + volume
-        const validBreak = (isLong ? breakC > breakO : breakC < breakO) && breakMove >= 0.8 && breakBody >= 55 && volSpike;
+        const volSpike   = parseFloat(breakoutCandle[5]) > parseFloat(klines[klines.length-3][5]) * 1.3;
+        // Valid breakout candle: direction + 0.5% move + 45% body + vol spike
+        const validBreak = (isLong ? breakC > breakO : breakC < breakO) && breakMove >= 0.5 && breakBody >= 45 && volSpike;
         // Confirmation candle holds above/below breakout close
         const holds = isLong ? confL >= breakC * 0.997 : confH <= breakC * 1.003;
         return validBreak && holds;
       })();
 
       const candleOk = trap.candle?.verdict === 'STRONG';
-      const regimeOk = regime.allowFire;
-      const oiOk     = oiClass.type !== 'trap';
-      const extOk    = !ext.tooExtended;
+      // Regime, OI, extension — log as warnings but do NOT block
+      // Current market: most alts below EMA200, regime shows ranging — but can still 3x
+      const regimeWarn = !regime.allowFire ? `regime:${regime.regime}` : '';
+      const oiWarn     = oiClass.type === 'trap' ? 'OI:trap' : '';
+      const extWarn    = ext.tooExtended ? `ext:${ext.reason}` : '';
+      const warnings   = [regimeWarn, oiWarn, extWarn].filter(Boolean).join(' | ');
+      if (warnings) log(`⚠️ WARN: ${symbol} — ${warnings} (not blocking)`);
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && regimeOk && oiOk && extOk && alertsFired < 2) {
+      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -1001,17 +1009,13 @@ const runWatchlistScan = async () => {
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
-          log(`🚀 FIRED: ${symbol} ${direction} score:${score} regime:${regime.regime} OI:${oiClass.type} candle:${trap.candle?.verdict}`);
+          log(`🚀 FIRED: ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict} ${warnings ? '⚠️'+warnings : ''}`);
         }
       } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2) {
         const reasons = [];
         if (!breakoutConfirmed) reasons.push('no 1-bar confirm');
         if (!candleOk)          reasons.push(`candle:${trap.candle?.verdict}`);
-        if (!regimeOk)          reasons.push(`regime:${regime.regime}`);
-        if (!oiOk)              reasons.push(`OI:${oiClass.type}`);
-        if (!extOk)             reasons.push(`extended:${ext.reason}`);
         if (reasons.length)     log(`⚠️ SKIP: ${symbol} — ${reasons.join(' | ')}`);
-      }
       }
 
       if (score < 2.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
@@ -1105,12 +1109,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.1`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.2`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.2 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1160,9 +1164,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v3.1 — Signal Intelligence Engine starting...');
+  log('🚀 Nexio v3.2 — Signal Intelligence Engine starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n⚡ EARLY entry mode (pre-breakout)\n📈 HTF EMA50 trend filter\n💧 Liquidity sweep detector\n🕯 Candle wick — STRONG only\n📐 ATR SL/TP (R:R ≥ 1.5)\n🔄 Position manager (breakeven)\n🛡 Trap filter (depth:50)\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.2 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
