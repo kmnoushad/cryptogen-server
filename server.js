@@ -38,7 +38,7 @@ const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pu
 const MAX_WATCHLIST           = 60;
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5;
+const MIN_ALERT_SCORE         = 5.5; // lowered — scores typically 4-7 in real market
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
@@ -410,10 +410,10 @@ const checkCompression = (klines, currentOI, prevOI) => {
   const ranges      = recent.map(k => parseFloat(k[2]) - parseFloat(k[3]));
   const tightening  = ranges[ranges.length-1] < ranges[0] * 0.7;
   let score = 0;
-  if (compressed && oiBuilding) score += 3;
-  else if (compressed)          score += 1.5;
-  else if (oiBuilding)          score += 1;
-  if (tightening)               score += 0.5;
+  if (compressed && oiBuilding) score += 4;
+  else if (compressed)          score += 2.5;
+  else if (oiBuilding)          score += 1.5;
+  if (tightening)               score += 1;
   return { score, compressed, oiBuilding, tightening, range: parseFloat(range.toFixed(2)) };
 };
 
@@ -430,10 +430,10 @@ const checkVolumeBuild = (klines) => {
   const priceChange = closes[0] > 0 ? Math.abs((closes[closes.length-1] - closes[0]) / closes[0]) * 100 : 0;
   const quietAccum = latestSpike >= 1.5 && priceChange < 3;
   let score = 0;
-  if (quietAccum)              score += 2;
-  else if (latestSpike >= 2)   score += 1.5;
-  else if (latestSpike >= 1.5) score += 1;
-  if (gradual) score += 0.5;
+  if (quietAccum)              score += 3;
+  else if (latestSpike >= 2)   score += 2;
+  else if (latestSpike >= 1.5) score += 1.5;
+  if (gradual) score += 1;
   return { score, building: quietAccum, spike: parseFloat(latestSpike.toFixed(1)), gradual };
 };
 
@@ -455,9 +455,9 @@ const checkResistanceTesting = (symbol, price, klines) => {
   const totalTests = resistanceMap.get(symbol).tests;
   const pressure   = totalTests >= 3 && volInc;
   let score = 0;
-  if (pressure)             score += 2;
-  else if (totalTests >= 3) score += 1;
-  else if (totalTests >= 2) score += 0.5;
+  if (pressure)             score += 3;
+  else if (totalTests >= 3) score += 2;
+  else if (totalTests >= 2) score += 1;
   return { score, tests: totalTests, pressure, resistanceLevel: parseFloat(maxH.toFixed(5)) };
 };
 
@@ -477,7 +477,7 @@ const checkFundingLS = (funding, ls, direction) => {
     if (ls > 1.3)             score += 2;
     else if (ls > 1.15)       score += 1;
   }
-  return { score: Math.min(score, 2), funding, ls };
+  return { score: Math.min(score, 3), funding, ls };
 };
 
 // ── LAYER 7a: Candle Wick Detector (NEW v3.0) ─────────────────────────────────
@@ -694,14 +694,19 @@ const buildPriorityList = (btc) => {
   if (!sorted.length) return null;
   const lines = sorted.slice(0, 10).map((s, i) => {
     const rank  = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
-    const dir   = s.direction === 'LONG' ? '📈' : '📉';
-    const state = s.state === 'FIRE' ? '🔥' : s.state === 'CONFIRMING' ? '⚡' : '👀';
-    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> ${state} ${s.score}/10`;
+    const dir   = s.direction === 'LONG' ? '📈 LONG' : '📉 SHORT';
+    const state = s.state === 'FIRE' ? '🔥 HIGH CONF' : s.state === 'CONFIRMING' ? '⚡ CONFIRMED' : '👀 WATCHING';
+    const bar   = confBar(s.score);
+    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> — ${state} ${s.score}/10\n     ${bar}`;
   }).join('\n');
   const btcStr = btc ? `${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0?'+':''}${btc.change?.toFixed(1)}%` : '';
-  return `📊 <b>NEXIO WATCHLIST</b>  ${btcStr}  ⏰ ${gstNow()}
+  return `📊 <b>NEXIO PRIORITY LIST</b>
+━━━━━━━━━━━━━━━
 ${lines}
-🔥enter ⚡watch 👀building  <i>DYOR · SL always</i>`.trim();
+━━━━━━━━━━━━━━━
+${btcStr}  ⏰ ${gstNow()} GST
+🔥 HIGH CONF = enter | ⚡ CONFIRMED = watch | 👀 WATCHING = building
+<i>DYOR · SL always set</i>`.trim();
 };
 
 
@@ -867,7 +872,7 @@ const runWatchlistScan = async () => {
       }
 
       // ── STAGE 1 — WATCH alert ─────────────────────────────────────────────
-      if (state.scanCount === 2 && score >= 5) {
+      if (state.scanCount === 2 && score >= 4) {
         const watchKey = `watch_${symbol}`;
         if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
       }
