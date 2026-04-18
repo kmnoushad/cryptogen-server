@@ -383,7 +383,7 @@ const checkFundingLS = (funding, ls, direction) => {
   return { score: Math.min(score, 2), funding, ls };
 };
 
-// ── LAYER 7a: Candle Wick Detector (NEW v2.2) ─────────────────────────────────
+// ── LAYER 7a: Candle Wick Detector (NEW v3.0) ─────────────────────────────────
 // Analyses last 3 candles for wick patterns
 // STRONG  body>=60% wick<=25% → real move, enter
 // WEAK    body 30-60%         → reduce size, caution
@@ -483,7 +483,7 @@ const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, kli
     }
   } catch { }
 
-  // NEW v2.2: Candle wick quality check
+  // NEW v3.0: Candle wick quality check
   const candle = checkCandleQuality(klines, direction);
   if (candle.verdict === 'FAKE') {
     trapScore += 2;
@@ -995,12 +995,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v2.2`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.0`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v2.2 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.0 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1050,9 +1050,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v2.2 — 9-Layer Intelligence Scanner + Candle Wick Detector starting...');
+  log('🚀 Nexio v3.0 — 9-Layer Intelligence Scanner + Candle Wick Detector starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v2.2 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📦 Compression + OI detection\n🧱 Resistance pressure tracker\n🔊 Volume buildup detector\n🛡 Trap risk filter (depth:50)\n🕯 Candle wick detector — STRONG only\n📐 ATR-based SL/TP\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.0 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n⚡ EARLY entry mode (pre-breakout)\n📈 HTF EMA50 trend filter\n💧 Liquidity sweep detector\n🕯 Candle wick — STRONG only\n📐 ATR SL/TP (R:R ≥ 1.5)\n🔄 Position manager (breakeven)\n🛡 Trap filter (depth:50)\n🚦 BTC momentum gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n📈 Pump filter: ${PUMP_EXCLUDE_PCT}%\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
