@@ -1,23 +1,25 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v2.2 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.0 — 9-Layer Intelligence Scanner
 //
-// LAYER 1  — BTC Momentum Gate (must pass before any alert)
+// LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
 // LAYER 3  — Price Compression + OI Buildup (MOST IMPORTANT)
 // LAYER 4  — Volume Buildup BEFORE Breakout
 // LAYER 5  — Repeated Resistance Testing (Breakout Pressure)
 // LAYER 6  — Funding + L/S Confirmation
-// LAYER 7  — Trap Risk Filter + Candle Wick Detector (NEW v2.2)
-// LAYER 8  — Two-Stage Alert System (WATCH → FIRE)
-// LAYER 9  — Momentum Guard (fade/exit detection post-alert)
+// LAYER 7  — Trap Risk Filter + Candle Wick + Liquidity Sweep Detector
+// LAYER 8  — THREE-Stage Alert: EARLY → WATCH → FIRE
+// LAYER 9  — Position Manager (breakeven + partial TP)
 //
-// Min score to alert: 6.5/10
-//
-// v2.2 NEW: Candle Wick Detector in Layer 7
-//   STRONG  body>=60% wick<=25% → VALID SETUP ✅
-//   WEAK    body 30-60%         → CAUTION ⚠️
-//   FAKE    body<30% wick>60%   → SKIP ❌
+// v3.0 NEW:
+//   1. EARLY ENTRY MODE — compression+OI before breakout (best R:R)
+//   2. Fixed R:R — SL=1.2 ATR, TP1=1.5 ATR, TP2=3 ATR (R:R >= 1.5)
+//   3. HTF EMA50 filter — LONG above EMA50 only, SHORT below only
+//   4. Liquidity sweep detector — enter AFTER sweep not before
+//   5. Two setup types — EARLY (pre-breakout) + FIRE (confirmed breakout)
+//   6. Position manager — move SL to breakeven after TP1 hit
 // ─────────────────────────────────────────────────────────────────────────────
+
 
 const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
 const FREE_CHANNEL    = '-1003900595640';
@@ -112,6 +114,78 @@ const calculateATR = (klines, period = 14) => {
   }
   return trSum / period;
 };
+
+// ── EMA Calculator ────────────────────────────────────────────────────────────
+const calculateEMA = (klines, period = 50) => {
+  if (klines.length < period) return null;
+  const closes = klines.map(k => parseFloat(k[4]));
+  const k = 2 / (period + 1);
+  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < closes.length; i++) {
+    ema = closes[i] * k + ema * (1 - k);
+  }
+  return ema;
+};
+
+// ── HTF EMA50 Trend Filter ────────────────────────────────────────────────────
+const checkHTFTrend = async (symbol) => {
+  try {
+    const klines1h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=60`);
+    const ema50    = calculateEMA(klines1h, 50);
+    if (!ema50) return { bullish: true, bearish: true, ema50: null, reason: 'insufficient data' };
+    const price    = parseFloat(klines1h[klines1h.length - 1][4]);
+    const bullish  = price > ema50;
+    const bearish  = price < ema50;
+    const pctAbove = ((price - ema50) / ema50) * 100;
+    return {
+      bullish, bearish, ema50,
+      pctAbove: parseFloat(pctAbove.toFixed(2)),
+      reason: bullish
+        ? `${pctAbove.toFixed(1)}% above EMA50`
+        : `${Math.abs(pctAbove).toFixed(1)}% below EMA50`,
+    };
+  } catch {
+    return { bullish: true, bearish: true, ema50: null, reason: 'data error' };
+  }
+};
+
+// ── Liquidity Sweep Detector ──────────────────────────────────────────────────
+const checkLiquiditySweep = (klines, direction) => {
+  if (klines.length < 4) return { swept: false, sweepLevel: null, recovery: false };
+  const recent      = klines.slice(-4);
+  const closes      = recent.map(k => parseFloat(k[4]));
+  const lows        = recent.map(k => parseFloat(k[3]));
+  const highs       = recent.map(k => parseFloat(k[2]));
+  const latestClose = closes[closes.length - 1];
+  const latestOpen  = parseFloat(recent[recent.length - 1][1]);
+  if (direction === 'LONG') {
+    const recentLow = Math.min(...lows.slice(0, -1));
+    const latestLow = lows[lows.length - 1];
+    const swept     = latestLow < recentLow * 0.998;
+    const recovery  = latestClose > latestOpen && latestClose > recentLow;
+    return { swept, sweepLevel: recentLow, recovery };
+  } else {
+    const recentHigh = Math.max(...highs.slice(0, -1));
+    const latestHigh = highs[highs.length - 1];
+    const swept      = latestHigh > recentHigh * 1.002;
+    const recovery   = latestClose < latestOpen && latestClose < recentHigh;
+    return { swept, sweepLevel: recentHigh, recovery };
+  }
+};
+
+// ── Early Entry Checker ───────────────────────────────────────────────────────
+const checkEarlyEntry = (compression, volume, fundingLS) => {
+  const quietAccum   = compression.compressed && compression.oiBuilding;
+  const notBrokenOut = volume.spike < 1.5;
+  const fundingReady = fundingLS.funding < 0 || fundingLS.ls < 1.0;
+  const isEarly      = quietAccum && notBrokenOut && fundingReady;
+  let earlyScore = 0;
+  if (quietAccum)         earlyScore += 3;
+  if (compression.tightening) earlyScore += 1;
+  if (fundingReady)       earlyScore += 1;
+  return { isEarly, earlyScore, quietAccum, notBrokenOut, fundingReady };
+};
+
 
 const fetchJSON = async (url, timeout = 8000) => {
   const ctrl  = new AbortController();
@@ -433,6 +507,68 @@ const calcMasterScore = ({ compression, volume, resistance, fundingLS, trap }) =
 // ── Alert Messages ────────────────────────────────────────────────────────────
 const DISCLAIMER = `━━━━━━━━━━━━━━━\n⚠️ <i>DYOR — Not financial advice. Always use a stop loss. Trade at your own risk.</i>`;
 
+// EARLY ENTRY alert — pre-breakout, best R:R
+const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc) => {
+  const isLong = direction === 'LONG';
+  const sl     = isLong ? price - atr * 1.2 : price + atr * 1.2;
+  const tp1    = isLong ? price + atr * 1.5 : price - atr * 1.5;
+  const tp2    = isLong ? price + atr * 3.0 : price - atr * 3.0;
+  const rr     = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
+
+  const signals = [];
+  if (layers.compression.compressed && layers.compression.oiBuilding) signals.push('📦 Price coiling + OI building — spring loaded');
+  if (layers.compression.tightening)  signals.push('🎯 Range tightening — breakout imminent');
+  if (layers.fundingLS.funding < 0)   signals.push(`💸 Funding ${layers.fundingLS.funding.toFixed(3)}% — shorts paying`);
+  if (layers.fundingLS.ls < 1)        signals.push(`⚖️ L/S ${layers.fundingLS.ls.toFixed(2)} — shorts dominating`);
+  if (sweep?.swept && sweep?.recovery) signals.push(`🌊 Liquidity sweep detected — stop hunt complete`);
+  const htfLine = htf?.ema50
+    ? `📈 HTF EMA50: $${fmtP(htf.ema50)} — ${htf.reason}`
+    : '';
+  const btcLine = btc ? `${btc.emoji} BTC: $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(2)}%` : '';
+
+  return `
+⚡ <b>NEXIO — EARLY ENTRY</b>
+━━━━━━━━━━━━━━━
+${isLong ? '🟢' : '🔴'} <b>${symbol.replace('USDT','')} — ${isLong ? 'LONG' : 'SHORT'} (PRE-BREAKOUT)</b>
+📊 Score: <b>${score}/10</b>  ${confBar(score)}
+━━━━━━━━━━━━━━━
+<b>Why enter now:</b>
+${signals.map(s => `• ${s}`).join('\n')}
+━━━━━━━━━━━━━━━
+💰 Entry:  <b>$${fmtP(price)}</b>
+🛑 SL:     <b>$${fmtP(sl)}</b> (1.2×ATR)
+🎯 TP1:    <b>$${fmtP(tp1)}</b> (1.5×ATR)
+🎯 TP2:    <b>$${fmtP(tp2)}</b> (3.0×ATR)
+📐 R:R     <b>1:${rr}</b>
+━━━━━━━━━━━━━━━
+${htfLine}
+⚠️ <b>Small size — breakout not confirmed yet</b>
+${btcLine}
+⏰ ${gstNow()} GST
+📊 bybit.com/trade/usdt/${symbol}
+${DISCLAIMER}
+  `.trim();
+};
+
+// BREAKEVEN alert — sent after TP1 hit
+const buildBreakevenMsg = (symbol, entryPrice, tp1Price, direction) => {
+  const isLong = direction === 'LONG';
+  return `
+✅ <b>NEXIO — TP1 HIT</b>
+━━━━━━━━━━━━━━━
+🪙 <b>${symbol.replace('USDT','')}</b>
+🎯 TP1 reached: <b>$${fmtP(tp1Price)}</b>
+━━━━━━━━━━━━━━━
+⚡ <b>ACTION: Move SL to breakeven</b>
+📍 Move SL to entry: <b>$${fmtP(entryPrice)}</b>
+💰 Partial profit secured
+🎯 Let remainder run to TP2
+⏰ ${gstNow()} GST
+${DISCLAIMER}
+  `.trim();
+};
+
+
 // WATCH alert — shows candle quality warning if wicky
 const buildWatchMsg = (symbol, score, direction, layers, btc) => {
   const isLong  = direction === 'LONG';
@@ -473,10 +609,10 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   const isLong = direction === 'LONG';
   const atrValue = calculateATR(klines) || (price * 0.018);
   const atr = atrValue;
-  const sl  = isLong ? price - atr * 1.8 : price + atr * 1.8;
-  const tp1 = isLong ? price + atr * 1.2 : price - atr * 1.2;
-  const tp2 = isLong ? price + atr * 2.4 : price - atr * 2.4;
-  const tp3 = isLong ? price + atr * 4.0 : price - atr * 4.0;
+  const sl  = isLong ? price - atr * 1.2 : price + atr * 1.2;
+  const tp1 = isLong ? price + atr * 1.5 : price - atr * 1.5;
+  const tp2 = isLong ? price + atr * 3.0 : price - atr * 3.0;
+  const tp3 = isLong ? price + atr * 4.5 : price - atr * 4.5;
 
   const confirmations = [];
   if (layers.compression.compressed && layers.compression.oiBuilding) confirmations.push('✅ OI + Price compression confirmed');
@@ -524,10 +660,10 @@ ${isLong ? '🟢' : '🔴'} <b>NEXIO SIGNAL — ${isLong ? '📈 LONG' : '📉 S
 ${confirmations.join('\n')}
 ━━━━━━━━━━━━━━━
 💰 Entry:  <b>$${fmtP(price)}</b>
-🛑 SL:     <b>$${fmtP(sl)}</b> (~1.8×ATR)
-🎯 TP1:    <b>$${fmtP(tp1)}</b> (~1.2×ATR)
-🎯 TP2:    <b>$${fmtP(tp2)}</b> (~2.4×ATR)
-🎯 TP3:    <b>$${fmtP(tp3)}</b> (~4.0×ATR)${candleBlock}
+🛑 SL:     <b>$${fmtP(sl)}</b> (1.2×ATR)
+🎯 TP1:    <b>$${fmtP(tp1)}</b> (1.5×ATR)
+🎯 TP2:    <b>$${fmtP(tp2)}</b> (3.0×ATR)
+🎯 TP3:    <b>$${fmtP(tp3)}</b> (4.5×ATR)${candleBlock}
 ━━━━━━━━━━━━━━━
 ${btcLine}
 ⏰ ${gstNow()} GST
@@ -640,7 +776,7 @@ const runWatchlistScan = async () => {
       if (!price) continue;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
-      try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=12`); } catch { }
+      try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=20`); } catch { }
       try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
       const isLong  = funding < 0.005 && ls < 1.1;
@@ -648,22 +784,40 @@ const runWatchlistScan = async () => {
       if (!isLong && !isShort) { await removeFromWatchlist(symbol); coinTracker.delete(symbol); continue; }
       const direction = isLong ? 'LONG' : 'SHORT';
 
+      // ── HTF EMA50 Filter (Fix 3) ──────────────────────────────────────────
+      const htf = await checkHTFTrend(symbol);
+      if (direction === 'LONG' && !htf.bullish) {
+        log(`🚫 ${symbol} LONG blocked — price below EMA50 (${htf.reason})`);
+        continue;
+      }
+      if (direction === 'SHORT' && !htf.bearish) {
+        log(`🚫 ${symbol} SHORT blocked — price above EMA50 (${htf.reason})`);
+        continue;
+      }
+
       const compression = checkCompression(klines, currentOI, prevOI);
       const volume      = checkVolumeBuild(klines);
       const resistance  = checkResistanceTesting(symbol, price, klines);
       const fundingLS   = checkFundingLS(funding, ls, direction);
-      // UPDATED: pass klines as 6th argument for candle wick analysis
       const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
       const score       = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
       const layers      = { compression, volume, resistance, fundingLS, trap };
 
-      log(`📊 ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict || 'N/A'}`);
+      // ── Liquidity sweep check (Fix 4) ─────────────────────────────────────
+      const sweep = checkLiquiditySweep(klines, direction);
+
+      // ── Early entry check (Fix 1) ─────────────────────────────────────────
+      const early = checkEarlyEntry(compression, volume, fundingLS);
+
+      const atr = calculateATR(klines) || (price * 0.018);
+
+      log(`📊 ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict || 'N/A'} htf:${htf.reason} early:${early.isEarly}`);
 
       const existing = coinTracker.get(symbol);
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
 
       if (!existing) {
-        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score, layers, firstSeen: Date.now(), history: [snap], entryPrice: null });
+        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score, layers, firstSeen: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
       } else {
         if (direction !== existing.direction) {
           if (existing.entryPrice) await postSignal(`⚠️ <b>NEXIO — SIGNAL FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n❌ Direction reversed — exit now\n📍 Entry: $${fmtP(existing.entryPrice)} → Now: $${fmtP(price)}\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
@@ -681,14 +835,37 @@ const runWatchlistScan = async () => {
       const state = coinTracker.get(symbol);
       if (!state) continue;
 
-      // STAGE 1 — WATCH alert
+      // ── STAGE 0 — EARLY ENTRY alert (Fix 1 + Fix 5) ───────────────────────
+      // Pre-breakout: compression + OI building + low volume + HTF aligned
+      // Best R:R — enter before the crowd
+      if (
+        btc.pass &&
+        early.isEarly &&
+        early.earlyScore >= 4 &&
+        score >= 5 &&
+        state.scanCount >= 1 &&
+        alertsFired < 2
+      ) {
+        const earlyKey = `early_${symbol}`;
+        if (canAlert(earlyKey)) {
+          state.earlyEntry = price;
+          const tp1e = isLong ? price + atr * 1.5 : price - atr * 1.5;
+          state.tp1Price = tp1e;
+          await postSignal(buildEarlyMsg(symbol, price, score, direction, layers, htf, sweep, atr, btc));
+          markAlert(earlyKey);
+          signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
+          alertsFired++;
+          log(`⚡ EARLY: ${symbol} ${direction} score:${score} earlyScore:${early.earlyScore}`);
+        }
+      }
+
+      // ── STAGE 1 — WATCH alert ─────────────────────────────────────────────
       if (state.scanCount === 2 && score >= 5) {
         const watchKey = `watch_${symbol}`;
         if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
       }
 
-      // STAGE 2 — FIRE alert
-      // Only fires on STRONG or WEAK candle — FAKE candle blocks the alert
+      // ── STAGE 2 — FIRE alert (confirmed breakout) ─────────────────────────
       const breakoutConfirmed = (() => {
         if (klines.length < 3) return false;
         const latest = klines[klines.length - 1];
@@ -713,34 +890,52 @@ const runWatchlistScan = async () => {
         );
       })();
 
-      const candleOk = trap.candle?.verdict === 'STRONG'; // only STRONG candles fire
+      const candleOk = trap.candle?.verdict === 'STRONG';
 
       if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
           state.state = 'FIRE';
+          const tp1f = isLong ? price + atr * 1.5 : price - atr * 1.5;
+          state.tp1Price = tp1f;
           await postSignal(buildFireMsg(symbol, price, score, direction, layers, state.scanCount, btc, klines));
           markAlert(fireKey);
-          signalPrices.set(symbol, { price, direction, firedAt: Date.now() });
+          signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
           log(`🚀 FIRED: ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict}`);
         }
       } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && !candleOk) {
-        // Log that we skipped due to fake candle
-        log(`⚠️ SKIP: ${symbol} — fake candle detected (${trap.candle?.details})`);
+        log(`⚠️ SKIP: ${symbol} — candle ${trap.candle?.verdict} (${trap.candle?.details})`);
       }
 
       if (score < 2.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
 
-      // LAYER 9 — Momentum guard
+      // ── LAYER 9 — Position Manager (Fix 6) ───────────────────────────────
+      // Momentum guard + breakeven alert after TP1 hit
       const sig = signalPrices.get(symbol);
       if (sig) {
-        const chg = sig.direction === 'LONG' ? ((sig.price - price) / sig.price) * 100 : ((price - sig.price) / sig.price) * 100;
+        const tp1Hit = sig.direction === 'LONG'
+          ? price >= sig.tp1
+          : price <= sig.tp1;
+
+        // Breakeven alert after TP1
+        if (tp1Hit && !sig.breakevenSent) {
+          sig.breakevenSent = true;
+          signalPrices.set(symbol, sig);
+          await postSignal(buildBreakevenMsg(symbol, sig.price, sig.tp1, sig.direction));
+          log(`✅ TP1 HIT: ${symbol} — sending breakeven alert`);
+        }
+
+        // Emergency exit if BTC reverses
+        const chg = sig.direction === 'LONG'
+          ? ((sig.price - price) / sig.price) * 100
+          : ((price - sig.price) / sig.price) * 100;
+
         if (!btc.pass && Date.now() - sig.firedAt < 3600000) {
           await postSignal(`🚨 <b>NEXIO — EMERGENCY EXIT</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n⚠️ BTC momentum reversed!\n${btc.reason}\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n⚡ <b>Exit immediately</b>\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
           signalPrices.delete(symbol);
-        } else if (chg >= FADE_THRESHOLD_PCT) {
+        } else if (chg >= FADE_THRESHOLD_PCT && !sig.breakevenSent) {
           await postSignal(`⚠️ <b>NEXIO — MOMENTUM FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n📉 Down ${chg.toFixed(1)}% from entry\n📍 Entry: $${fmtP(sig.price)} → Now: $${fmtP(price)}\n⚡ Tighten stop or exit\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
           signalPrices.delete(symbol);
         }
