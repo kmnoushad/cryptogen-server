@@ -736,7 +736,7 @@ const runFullMarketScan = async () => {
       try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=12`); } catch { }
       try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${coin.symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
-      const direction = funding < 0 && ls < 1.1 ? 'LONG' : funding > 0.015 && ls > 1.15 ? 'SHORT' : null;
+      const direction = funding < 0.01 && ls < 1.2 ? 'LONG' : funding > 0.01 && ls > 1.1 ? 'SHORT' : null;
       if (!direction) continue;
 
       const score = calcMasterScore({
@@ -747,13 +747,13 @@ const runFullMarketScan = async () => {
         trap:        { safe: true, trapScore: 0 },
       });
 
-      if (score >= 3.5 && !currentSymbols.includes(coin.symbol) && currentSymbols.length + added < MAX_WATCHLIST) {
+      if (score >= 2.5 && !currentSymbols.includes(coin.symbol) && currentSymbols.length + added < MAX_WATCHLIST) {
         await addToWatchlist(coin.symbol, score, direction);
         currentSymbols.push(coin.symbol);
         added++;
         log(`✅ ${coin.symbol} score:${score} ${direction} ${coin.isMid ? '[MID]' : '[LOW]'}`);
       }
-      if (score < 2.5 && currentSymbols.includes(coin.symbol)) {
+      if (score < 1.5 && currentSymbols.includes(coin.symbol)) {
         await removeFromWatchlist(coin.symbol);
         coinTracker.delete(coin.symbol);
       }
@@ -786,8 +786,8 @@ const runWatchlistScan = async () => {
       try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=20`); } catch { }
       try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
-      const isLong  = funding < 0.005 && ls < 1.1;
-      const isShort = funding > 0.015 && ls > 1.15;
+      const isLong  = funding < 0.01 && ls < 1.2;
+      const isShort = funding > 0.01 && ls > 1.1;
       if (!isLong && !isShort) { await removeFromWatchlist(symbol); coinTracker.delete(symbol); continue; }
       const direction = isLong ? 'LONG' : 'SHORT';
 
@@ -848,8 +848,8 @@ const runWatchlistScan = async () => {
       if (
         btc.pass &&
         early.isEarly &&
-        early.earlyScore >= 4 &&
-        score >= 5 &&
+        early.earlyScore >= 2 &&
+        score >= 4 &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -936,7 +936,7 @@ const runWatchlistScan = async () => {
         if (reasons.length)     log(`⚠️ SKIP: ${symbol} — ${reasons.join(' | ')}`);
       }
 
-      if (score < 2.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
+      if (score < 1.5 && state.scanCount >= 3) { coinTracker.delete(symbol); await removeFromWatchlist(symbol); }
 
       // ── LAYER 9 — Position Manager (Fix 6) ───────────────────────────────
       // Momentum guard + breakeven alert after TP1 hit
