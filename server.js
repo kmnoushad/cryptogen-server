@@ -35,7 +35,7 @@ const WATCHLIST_SCAN_INTERVAL = 180000;
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
-const MAX_WATCHLIST           = 60;
+const MAX_WATCHLIST           = 80;
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5; // v3.5 — balanced quality
@@ -801,7 +801,22 @@ const runFullMarketScan = async () => {
         trap:        { safe: true, trapScore: 0 },
       });
 
-      if (score >= 2.5 && !currentSymbols.includes(coin.symbol) && currentSymbols.length + added < MAX_WATCHLIST) {
+      // Auto-rotate: if full, only add if this coin scores higher than any existing low scorer
+      if (score >= 2.5 && !currentSymbols.includes(coin.symbol)) {
+        // If at capacity, remove lowest scorer to make room
+        if (currentSymbols.length + added >= MAX_WATCHLIST) {
+          const currentWl = await getWatchlist();
+          const lowest = currentWl.filter(r => r.score !== null).sort((a,b) => (a.score||0) - (b.score||0))[0];
+          if (lowest && (lowest.score || 0) < score - 0.5) {
+            await removeFromWatchlist(lowest.symbol);
+            coinTracker.delete(lowest.symbol);
+            const idx = currentSymbols.indexOf(lowest.symbol);
+            if (idx > -1) currentSymbols.splice(idx, 1);
+            log(`🔄 Rotated out ${lowest.symbol} (${lowest.score}) for ${coin.symbol} (${score})`);
+          } else {
+            continue; // no room and this coin isn't clearly better
+          }
+        }
         await addToWatchlist(coin.symbol, score, direction);
         currentSymbols.push(coin.symbol);
         added++;
