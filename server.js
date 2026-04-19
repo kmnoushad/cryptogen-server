@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.4 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.5 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -38,7 +38,7 @@ const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pu
 const MAX_WATCHLIST           = 60;
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 7.0; // v3.4 — quality over quantity
+const MIN_ALERT_SCORE         = 6.5; // v3.5 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
@@ -707,7 +707,7 @@ const buildBreakevenMsg = (symbol, entryPrice, tp1Price, direction) => {
 
 // PRIORITY LIST — grouped, no per-coin repetition
 const buildPriorityList = (btc) => {
-  const sorted = [...coinTracker.values()].filter(c => c.state !== 'FADING' && c.score >= 4).sort((a, b) => b.score - a.score);
+  const sorted = [...coinTracker.values()].filter(c => c.state !== 'FADING' && c.score >= 6).sort((a, b) => b.score - a.score);
   if (!sorted.length) return null;
   const lines = sorted.slice(0, 10).map((s, i) => {
     const rank  = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
@@ -906,8 +906,8 @@ const runWatchlistScan = async () => {
         btc.pass &&
         earlyBtcOk &&
         early.isEarly &&
-        early.earlyScore >= 2 &&
-        score >= 4 &&
+        early.earlyScore >= 3 &&
+        score >= 6 &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -925,7 +925,7 @@ const runWatchlistScan = async () => {
       }
 
       // ── STAGE 1 — WATCH alert ─────────────────────────────────────────────
-      if (state.scanCount === 2 && score >= 4) {
+      if (state.scanCount === 2 && score >= 6) {
         const watchKey = `watch_${symbol}`;
         if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
       }
@@ -1089,12 +1089,12 @@ const handleCommand = async msg => {
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.4`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.5`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.4 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.5 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1144,9 +1144,9 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v3.4 — Signal Intelligence Engine starting...');
+  log('🚀 Nexio v3.5 — Signal Intelligence Engine starting...');
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.4 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.5 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
