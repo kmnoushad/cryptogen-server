@@ -25,6 +25,11 @@ const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
 const FREE_CHANNEL    = '-1003900595640';
 const PREMIUM_CHANNEL = '-1003913881352';
 const OWNER_CHAT_ID   = '6896387082';
+
+// ── PAPER TRADING MODE ───────────────────────────────────────────────────────
+// When true: alerts go ONLY to owner (no channels), every signal logged to Supabase
+// Bot researches silently, outcomes tracked, real stats after 1-2 weeks
+const PAPER_MODE = true;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
@@ -361,8 +366,72 @@ const tg = async (chatId, text) => {
   } catch { }
 };
 
+// ── PAPER TRADE LOGGER ───────────────────────────────────────────────────────
+// Logs every signal to Supabase 'paper_trades' table for outcome tracking
+const logPaperTrade = async (signal) => {
+  try {
+    await sb('paper_trades', {
+      method: 'POST',
+      body: JSON.stringify({
+        symbol:      signal.symbol,
+        direction:   signal.direction,
+        signal_type: signal.type,        // 'EARLY' | 'FIRE' | 'WATCH'
+        entry:       signal.price,
+        sl:          signal.sl,
+        tp1:         signal.tp1,
+        tp2:         signal.tp2,
+        score:       signal.score,
+        candle:      signal.candle,
+        btc_change:  signal.btcChange,
+        status:      'OPEN',             // will be updated by outcome checker
+        created_at:  new Date().toISOString(),
+      }),
+    });
+  } catch (err) { log('Paper log error:', err.message); }
+};
+
+// ── PAPER TRADE OUTCOME CHECKER ──────────────────────────────────────────────
+// Every 10 min: check open paper trades, see if SL or TP was hit, update status
+const checkPaperOutcomes = async () => {
+  try {
+    const open = (await sb('paper_trades?status=eq.OPEN&select=*')) || [];
+    if (!open.length) return;
+    log(`📒 Checking ${open.length} open paper trades...`);
+    for (const trade of open) {
+      await sleep(200);
+      try {
+        const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${trade.symbol}`);
+        const price = parseFloat(t.price);
+        const isLong = trade.direction === 'LONG';
+        let status = 'OPEN', outcome = null;
+        // Check SL hit
+        if (isLong && price <= trade.sl) { status = 'SL_HIT'; outcome = 'LOSS'; }
+        else if (!isLong && price >= trade.sl) { status = 'SL_HIT'; outcome = 'LOSS'; }
+        // Check TP1 hit (partial win)
+        else if (isLong && price >= trade.tp1) { status = 'TP1_HIT'; outcome = 'WIN'; }
+        else if (!isLong && price <= trade.tp1) { status = 'TP1_HIT'; outcome = 'WIN'; }
+        // Timeout after 4h
+        else if (Date.now() - new Date(trade.created_at).getTime() > 4 * 3600000) {
+          status = 'TIMEOUT';
+          const chg = isLong ? ((price - trade.entry) / trade.entry) * 100 : ((trade.entry - price) / trade.entry) * 100;
+          outcome = chg > 0 ? 'WIN' : 'LOSS';
+        }
+        if (status !== 'OPEN') {
+          await sb(`paper_trades?id=eq.${trade.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ status, outcome, closed_price: price, closed_at: new Date().toISOString() }),
+          });
+          log(`📒 ${trade.symbol} ${trade.direction} → ${status} (${outcome})`);
+        }
+      } catch { }
+    }
+  } catch (err) { log('Paper outcome error:', err.message); }
+};
+
 const postSignal = async text => {
-  for (const chatId of [FREE_CHANNEL, PREMIUM_CHANNEL, OWNER_CHAT_ID]) {
+  // In PAPER_MODE, only owner gets alerts — no channel posts
+  const targets = PAPER_MODE ? [OWNER_CHAT_ID] : [FREE_CHANNEL, PREMIUM_CHANNEL, OWNER_CHAT_ID];
+  for (const chatId of targets) {
     try {
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -778,6 +847,19 @@ const runFullMarketScan = async () => {
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
       .slice(0, 300); // was 80 — scan full market
 
+    // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
+    const currentWatchlistRaw = await getWatchlist();
+    let staleRemoved = 0;
+    for (const r of currentWatchlistRaw) {
+      const ageMin = r.updated_at ? (Date.now() - new Date(r.updated_at).getTime()) / 60000 : 0;
+      if (ageMin > 30 || (r.score || 0) < 3) {
+        await removeFromWatchlist(r.symbol);
+        coinTracker.delete(r.symbol);
+        staleRemoved++;
+      }
+    }
+    if (staleRemoved > 0) log(`🧹 Cleaned ${staleRemoved} stale coins from watchlist`);
+
     const currentWatchlist = await getWatchlist();
     const currentSymbols   = currentWatchlist.map(r => r.symbol);
     let added = 0;
@@ -936,6 +1018,10 @@ const runWatchlistScan = async () => {
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
           log(`⚡ EARLY: ${symbol} ${direction} score:${score} earlyScore:${early.earlyScore}`);
+          // Paper trade log
+          const slEarly = isLong ? price - atr * 1.2 : price + atr * 1.2;
+          const tp2Early = isLong ? price + atr * 3.0 : price - atr * 3.0;
+          await logPaperTrade({ symbol, direction, type: 'EARLY', price, sl: slEarly, tp1: tp1e, tp2: tp2Early, score, candle: trap.candle?.verdict, btcChange: btc.change });
         }
       }
 
@@ -1103,8 +1189,22 @@ const handleCommand = async msg => {
     const btc = await checkBTCGate();
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
+  else if (text === '/stats') {
+    const all = (await sb('paper_trades?select=*')) || [];
+    const closed = all.filter(t => t.status !== 'OPEN');
+    const wins = closed.filter(t => t.outcome === 'WIN').length;
+    const losses = closed.filter(t => t.outcome === 'LOSS').length;
+    const open = all.filter(t => t.status === 'OPEN').length;
+    const total = closed.length;
+    const winRate = total > 0 ? ((wins / total) * 100).toFixed(1) : '0.0';
+    const longs = closed.filter(t => t.direction === 'LONG');
+    const shorts = closed.filter(t => t.direction === 'SHORT');
+    const longWR = longs.length > 0 ? ((longs.filter(t => t.outcome === 'WIN').length / longs.length) * 100).toFixed(1) : '0';
+    const shortWR = shorts.length > 0 ? ((shorts.filter(t => t.outcome === 'WIN').length / shorts.length) * 100).toFixed(1) : '0';
+    await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
+  }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /subscribe /txid /status /watchlist /tracking /btc /test /help\n🐆 Nexio v3.5`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v3.5`);
   }
 
   if (text === '/test') {
@@ -1159,7 +1259,8 @@ const pollUsers = async () => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log('🚀 Nexio v3.5 — Signal Intelligence Engine starting...');
+  const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
+  log(`🚀 Nexio v3.5 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
   await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.5 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
@@ -1170,6 +1271,9 @@ const start = async () => {
   await sleep(60000);
   await runWatchlistScan();
   setInterval(runWatchlistScan, WATCHLIST_SCAN_INTERVAL);
+
+  // Paper trade outcome checker — every 10 min
+  setInterval(checkPaperOutcomes, 600000);
 };
 
 start();
