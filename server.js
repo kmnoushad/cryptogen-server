@@ -66,7 +66,22 @@ const EXCLUDE = new Set([
 ]);
 
 // Regex catches any tokenized asset not in the list above
-const EXCLUDE_REGEX = /^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|BRKB|INTC|UBER|SPY|QQQ|ABNB|TSM|PLTR|SHOP|PYPL|SNAP|LYFT|XAU|XAG|PAX|CL1|MSTR|RKLB|IONQ)/;
+// Tokenized stocks / ETFs / commodities — blacklist by symbol prefix
+const EXCLUDE_REGEX = /^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|BRKB|BRKA|INTC|UBER|SPY|QQQ|ABNB|TSM|PLTR|SHOP|PYPL|SNAP|LYFT|XAU|XAG|PAX|CL1|MSTR|RKLB|IONQ|HOOD|GME|AMC|NIO|BIDU|JD|PDD|ARKK|IWM|DIA|GLD|SLV|USO|UNG|DXY|VIX|SPX|NDX|DJI|RUT|FTSE|DAX|NIKKEI|SP500|NSDQ|DOW|CRUDE|BRENT|WTI|GAS|COPPER|PLATINUM|PALLADIUM|WHEAT|CORN|SOYBEAN|COTTON|COFFEE|SUGAR|COCOA|CATTLE|HOGS|LUMBER|ORANGE|RUBBER|OILF|PYT|MSTR|EGLD\d|USTC|CFX|LUNC|UST|XEC|BTT|ELON|BITCOIN|ETHEREUM|XPTUSD|PALA|FOREX|EURUSD|GBPUSD|USDJPY|USDCHF|AUDUSD|NZDUSD|USDCAD)/;
+
+// Additional patterns — tokens ending in specific suffixes that indicate non-crypto
+const STOCK_SUFFIX_REGEX = /(STOCK|SHARE|SHARES|EQUITY|ETF|COMMODITY)USDT$/;
+
+// Real crypto coin pattern — typically 2-10 alpha chars + USDT
+// Reject if symbol contains digits after letters (usually tokenized versions like TSLA1, NVDA2)
+const isLikelyStock = (symbol) => {
+  const base = symbol.replace('USDT', '');
+  // Real crypto is usually all-letters, 2-10 chars
+  // Stocks often have numbers mid-symbol or weird patterns
+  if (/^[A-Z]{2,10}$/.test(base)) return false; // pure letters = likely crypto
+  if (/\d/.test(base) && base.length <= 5) return true; // short with numbers = stock ticker
+  return false;
+};
 
 const MID_CAP = new Set([
   'LINKUSDT','AVAXUSDT','DOTUSDT','ATOMUSDT','NEARUSDT',
@@ -712,19 +727,51 @@ ${btcStr}  ⏰ ${gstNow()} GST
 };
 
 
+// ── Contract Info Cache — only fetch once per hour ────────────────────────────
+let contractInfoCache = { data: null, ts: 0 };
+const getContractInfo = async () => {
+  const now = Date.now();
+  if (contractInfoCache.data && now - contractInfoCache.ts < 3600000) return contractInfoCache.data;
+  try {
+    const info = await fetchJSON('https://fapi.binance.com/fapi/v1/exchangeInfo');
+    const cryptoSymbols = new Set();
+    for (const s of info.symbols || []) {
+      // Only keep PERPETUAL contracts with crypto underlying
+      // Binance categorizes tokenized stocks with contractType that differs or status
+      if (s.status !== 'TRADING') continue;
+      if (s.contractType !== 'PERPETUAL') continue;
+      if (s.quoteAsset !== 'USDT') continue;
+      // Underlying type check — CRYPTO is what we want
+      if (s.underlyingType && s.underlyingType !== 'COIN') continue;
+      cryptoSymbols.add(s.symbol);
+    }
+    contractInfoCache = { data: cryptoSymbols, ts: now };
+    log(`📋 Contract info refreshed: ${cryptoSymbols.size} crypto perpetuals found`);
+    return cryptoSymbols;
+  } catch (err) {
+    log('⚠️ exchangeInfo fetch failed:', err.message);
+    return contractInfoCache.data || new Set();
+  }
+};
+
 // ── Scanner 1: Full Market ────────────────────────────────────────────────────
 const runFullMarketScan = async () => {
   fullScanCount++;
   log(`🌍 Full Market Scan #${fullScanCount}`);
   try {
+    const cryptoSet = await getContractInfo();
     const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
     const valid = tickers
       .filter(t => {
         if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) return false;
+        // WHITELIST: must be in Binance's crypto perpetuals list
+        if (cryptoSet.size > 0 && !cryptoSet.has(t.symbol)) return false;
+        // Blacklist fallback
         if (EXCLUDE.has(t.symbol) || EXCLUDE_REGEX.test(t.symbol)) return false;
+        if (STOCK_SUFFIX_REGEX.test(t.symbol)) return false;
+        if (isLikelyStock(t.symbol)) return false;
         if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) return false;
         if (Math.abs(parseFloat(t.priceChangePercent)) >= PUMP_EXCLUDE_PCT) return false;
-        // EXCLUDE_REGEX already handles tokenized stocks/commodities above
         return true;
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
