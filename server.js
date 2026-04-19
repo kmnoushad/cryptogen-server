@@ -940,7 +940,7 @@ const runWatchlistScan = async () => {
       }
 
       // ── STAGE 1 — WATCH alert ─────────────────────────────────────────────
-      if (state.scanCount === 2 && score >= 6) {
+      if ((state.scanCount === 2 && score >= 6) || (state.scanCount === 1 && score >= 7.5)) {
         const watchKey = `watch_${symbol}`;
         if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
       }
@@ -993,7 +993,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && score >= MIN_ALERT_SCORE && state.scanCount >= 2 && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && score >= MIN_ALERT_SCORE && (state.scanCount >= 2 || score >= 8.5) && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
