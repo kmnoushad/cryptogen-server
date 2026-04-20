@@ -29,7 +29,7 @@ const OWNER_CHAT_ID   = '6896387082';
 // ── PAPER TRADING MODE ───────────────────────────────────────────────────────
 // When true: alerts go ONLY to owner (no channels), every signal logged to Supabase
 // Bot researches silently, outcomes tracked, real stats after 1-2 weeks
-const PAPER_MODE = false;
+const PAPER_MODE = true;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
@@ -240,6 +240,50 @@ const checkExtension = (klines, price, atr) => {
   const candleTooLarge = avgRange > 0 && latestRange > avgRange * 3;
   const tooExtended  = extension > 2.0 || candleTooLarge;
   return { tooExtended, extension: parseFloat(extension.toFixed(2)), candleTooLarge, reason: tooExtended ? (candleTooLarge ? `candle ${(latestRange/avgRange).toFixed(1)}x avg` : `${extension.toFixed(1)} ATR from base`) : '' };
+};
+
+// ── Social Hype Check — CoinGecko Trending (FREE) ─────────────────────────────
+// Cross-checks if a coin is trending on CoinGecko (social + search volume)
+// Cached for 5 min to avoid rate limits
+let trendingCache = { data: null, ts: 0 };
+
+const getTrendingCoins = async () => {
+  const now = Date.now();
+  if (trendingCache.data && now - trendingCache.ts < 300000) return trendingCache.data;
+  try {
+    const resp = await fetchJSON('https://api.coingecko.com/api/v3/search/trending');
+    const coins = resp?.coins || [];
+    const map = new Map();
+    coins.forEach((c, idx) => {
+      const sym = c.item?.symbol?.toUpperCase();
+      if (sym) map.set(sym, { rank: idx + 1, name: c.item?.name, score: c.item?.score || 0 });
+    });
+    trendingCache = { data: map, ts: now };
+    log(`🌊 Trending refreshed: ${map.size} coins`);
+    return map;
+  } catch (err) {
+    log('Trending fetch error:', err.message);
+    return trendingCache.data || new Map();
+  }
+};
+
+const checkSocialHype = async (symbol) => {
+  const coin = symbol.replace('USDT', '').toUpperCase();
+  try {
+    const trending = await getTrendingCoins();
+    const match = trending.get(coin);
+    if (match) {
+      return {
+        isTrending: true,
+        trendingRank: match.rank,
+        hypeBonus: match.rank <= 5 ? 2 : match.rank <= 10 ? 1.5 : 1,
+        tag: `🌊 TRENDING #${match.rank}`,
+      };
+    }
+    return { isTrending: false, trendingRank: null, hypeBonus: 0, tag: '' };
+  } catch {
+    return { isTrending: false, trendingRank: null, hypeBonus: 0, tag: '' };
+  }
 };
 
 // ── Post-Loss Protection (v3.1) ───────────────────────────────────────────────
@@ -696,7 +740,7 @@ const FOOTER = (btc, symbol) => {
 };
 
 // WATCH — compact single block per coin
-const buildWatchMsg = (symbol, score, direction, layers, btc) => {
+const buildWatchMsg = (symbol, score, direction, layers, btc, hype = null) => {
   const isLong = direction === 'LONG';
   const tag    = isLong ? '🟢 LONG' : '🔴 SHORT';
   const candle = layers.trap?.candle;
@@ -710,6 +754,7 @@ const buildWatchMsg = (symbol, score, direction, layers, btc) => {
   if (layers.resistance.pressure)     tags.push(`🧱Resist×${layers.resistance.tests}`);
   if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
   if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
+  if (hype?.isTrending)               tags.push(hype.tag);
 
   return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
 ${tags.join(' · ')}
@@ -718,7 +763,7 @@ ${FOOTER(btc, symbol)}`.trim();
 };
 
 // EARLY — compact pre-breakout
-const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc) => {
+const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null) => {
   const isLong = direction === 'LONG';
   const sl  = isLong ? price - atr * 1.2 : price + atr * 1.2;
   const tp1 = isLong ? price + atr * 1.5 : price - atr * 1.5;
@@ -731,6 +776,7 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
   if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
   if (sweep?.swept && sweep?.recovery) tags.push('🌊Swept');
+  if (hype?.isTrending)                tags.push(hype.tag);
 
   return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
 ${tags.join(' · ')}
@@ -740,7 +786,7 @@ ${FOOTER(btc, symbol)}`.trim();
 };
 
 // FIRE — full signal with SL/TP
-const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = []) => {
+const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null) => {
   const isLong   = direction === 'LONG';
   const atr      = calculateATR(klines) || (price * 0.018);
   const sl       = isLong ? price - atr * 1.2 : price + atr * 1.2;
@@ -757,6 +803,7 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   if (layers.fundingLS.ls < 1)        conf.push(`⚖️${layers.fundingLS.ls.toFixed(2)}`);
   if (scanCount >= 2)                 conf.push(`🔁${scanCount}scans`);
   if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
+  if (hype?.isTrending)               conf.push(`🌊TRENDING#${hype.trendingRank}`);
 
   return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b>
 📊 ${score}/10 ${confBar(score)}
@@ -970,13 +1017,18 @@ const runWatchlistScan = async () => {
 
       const atr = calculateATR(klines) || (price * 0.018);
 
-      log(`📊 ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict || 'N/A'} htf:${htf.reason} early:${early.isEarly}`);
+      // Social hype cross-check — bonus score if trending on CoinGecko
+      const hype = await checkSocialHype(symbol);
+      const finalScore = Math.min(10, score + hype.hypeBonus);
+      if (hype.isTrending) log(`🌊 ${symbol} TRENDING #${hype.trendingRank} — bonus +${hype.hypeBonus}`);
+
+      log(`📊 ${symbol} ${direction} score:${score}${hype.hypeBonus > 0 ? '+'+hype.hypeBonus : ''}=${finalScore} candle:${trap.candle?.verdict || 'N/A'} htf:${htf.reason} early:${early.isEarly}${hype.isTrending ? ' 🌊trending#'+hype.trendingRank : ''}`);
 
       const existing = coinTracker.get(symbol);
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
 
       if (!existing) {
-        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score, layers, firstSeen: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
+        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score: finalScore, layers, hype, firstSeen: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
       } else {
         if (direction !== existing.direction) {
           if (existing.entryPrice) await postSignal(`⚠️ <b>NEXIO — SIGNAL FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n❌ Direction reversed — exit now\n📍 Entry: $${fmtP(existing.entryPrice)} → Now: $${fmtP(price)}\n⏰ ${gstNow()} GST\n${DISCLAIMER}`);
@@ -985,9 +1037,10 @@ const runWatchlistScan = async () => {
         }
         existing.history.push(snap);
         existing.scanCount++;
-        existing.score  = score;
+        existing.score  = finalScore;
         existing.layers = layers;
-        existing.state  = score >= 8 ? 'FIRE' : score >= 6 ? 'CONFIRMING' : 'WATCHING';
+        existing.hype   = hype;
+        existing.state  = finalScore >= 8 ? 'FIRE' : finalScore >= 6 ? 'CONFIRMING' : 'WATCHING';
         coinTracker.set(symbol, existing);
       }
 
@@ -1004,7 +1057,7 @@ const runWatchlistScan = async () => {
         earlyBtcOk &&
         early.isEarly &&
         early.earlyScore >= 3 &&
-        score >= 6 &&
+        finalScore >= 6 &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -1013,7 +1066,7 @@ const runWatchlistScan = async () => {
           state.earlyEntry = price;
           const tp1e = isLong ? price + atr * 1.5 : price - atr * 1.5;
           state.tp1Price = tp1e;
-          await postSignal(buildEarlyMsg(symbol, price, score, direction, layers, htf, sweep, atr, btc));
+          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype));
           markAlert(earlyKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
@@ -1026,9 +1079,9 @@ const runWatchlistScan = async () => {
       }
 
       // ── STAGE 1 — WATCH alert ─────────────────────────────────────────────
-      if ((state.scanCount === 2 && score >= 6) || (state.scanCount === 1 && score >= 7.5)) {
+      if ((state.scanCount === 2 && finalScore >= 6) || (state.scanCount === 1 && finalScore >= 7.5)) {
         const watchKey = `watch_${symbol}`;
-        if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, score, direction, layers, btc)); markAlert(watchKey); }
+        if (canAlert(watchKey)) { await postSignal(buildWatchMsg(symbol, finalScore, direction, layers, btc, hype)); markAlert(watchKey); }
       }
 
       // ── STAGE 2 — FIRE alert (v3.1 — one-bar confirm + all filters) ─────────
@@ -1079,14 +1132,14 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && score >= MIN_ALERT_SCORE && (state.scanCount >= 2 || score >= 8.5) && trap.safe && candleOk && (breakoutConfirmed || score >= 9) && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && (breakoutConfirmed || finalScore >= 9) && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
           state.state = 'FIRE';
           const tp1f = isLong ? price + atr * 1.5 : price - atr * 1.5;
           state.tp1Price = tp1f;
-          await postSignal(buildFireMsg(symbol, price, score, direction, layers, state.scanCount, btc, klines));
+          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype));
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
