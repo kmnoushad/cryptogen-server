@@ -242,47 +242,108 @@ const checkExtension = (klines, price, atr) => {
   return { tooExtended, extension: parseFloat(extension.toFixed(2)), candleTooLarge, reason: tooExtended ? (candleTooLarge ? `candle ${(latestRange/avgRange).toFixed(1)}x avg` : `${extension.toFixed(1)} ATR from base`) : '' };
 };
 
-// ── Social Hype Check — CoinGecko Trending (FREE) ─────────────────────────────
-// Cross-checks if a coin is trending on CoinGecko (social + search volume)
-// Cached for 5 min to avoid rate limits
-let trendingCache = { data: null, ts: 0 };
+// ── Social Hype Check — PER-COIN analysis via CoinGecko (FREE) ───────────────
+// For each scanned coin, checks its actual Twitter/Reddit/Telegram community metrics
+// Cached per-coin for 30 min to respect rate limits (30 req/min free tier)
 
-const getTrendingCoins = async () => {
+// Symbol → CoinGecko ID mapping (fetched once, cached for 24h)
+let coinIdCache = { data: null, ts: 0 };
+
+const buildCoinIdMap = async () => {
   const now = Date.now();
-  if (trendingCache.data && now - trendingCache.ts < 300000) return trendingCache.data;
+  if (coinIdCache.data && now - coinIdCache.ts < 86400000) return coinIdCache.data;
   try {
-    const resp = await fetchJSON('https://api.coingecko.com/api/v3/search/trending');
-    const coins = resp?.coins || [];
+    const list = await fetchJSON('https://api.coingecko.com/api/v3/coins/list');
     const map = new Map();
-    coins.forEach((c, idx) => {
-      const sym = c.item?.symbol?.toUpperCase();
-      if (sym) map.set(sym, { rank: idx + 1, name: c.item?.name, score: c.item?.score || 0 });
-    });
-    trendingCache = { data: map, ts: now };
-    log(`🌊 Trending refreshed: ${map.size} coins`);
+    // Prefer exact symbol match — pick first match (usually the main coin)
+    for (const coin of list || []) {
+      const sym = coin.symbol?.toUpperCase();
+      if (sym && !map.has(sym)) map.set(sym, coin.id);
+    }
+    coinIdCache = { data: map, ts: now };
+    log(`📖 CoinGecko ID map: ${map.size} coins indexed`);
     return map;
   } catch (err) {
-    log('Trending fetch error:', err.message);
-    return trendingCache.data || new Map();
+    log('CG id map error:', err.message);
+    return coinIdCache.data || new Map();
   }
 };
 
+// Per-coin hype cache — avoids hammering API
+const hypeCache = new Map();  // symbol → { data, ts }
+const HYPE_CACHE_MS = 1800000; // 30 min per coin
+
 const checkSocialHype = async (symbol) => {
-  const coin = symbol.replace('USDT', '').toUpperCase();
+  const sym = symbol.replace('USDT', '').toUpperCase();
+
+  // Return cached if fresh
+  const cached = hypeCache.get(sym);
+  if (cached && Date.now() - cached.ts < HYPE_CACHE_MS) return cached.data;
+
   try {
-    const trending = await getTrendingCoins();
-    const match = trending.get(coin);
-    if (match) {
-      return {
-        isTrending: true,
-        trendingRank: match.rank,
-        hypeBonus: match.rank <= 5 ? 2 : match.rank <= 10 ? 1.5 : 1,
-        tag: `🌊 TRENDING #${match.rank}`,
-      };
+    const idMap = await buildCoinIdMap();
+    const coinId = idMap.get(sym);
+    if (!coinId) {
+      const result = { hasData: false, hypeBonus: 0, tag: '', reason: 'not on CG' };
+      hypeCache.set(sym, { data: result, ts: Date.now() });
+      return result;
     }
-    return { isTrending: false, trendingRank: null, hypeBonus: 0, tag: '' };
-  } catch {
-    return { isTrending: false, trendingRank: null, hypeBonus: 0, tag: '' };
+
+    // Fetch coin data — community + sentiment only (lean response)
+    const url = `https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&market_data=false&community_data=true&developer_data=false&sparkline=false`;
+    const data = await fetchJSON(url);
+    if (!data) throw new Error('no data');
+
+    const community = data.community_data || {};
+    const twitter   = community.twitter_followers || 0;
+    const reddit    = community.reddit_subscribers || 0;
+    const telegram  = community.telegram_channel_user_count || 0;
+    const sentiment = data.sentiment_votes_up_percentage || 0; // 0-100
+    const watchlist = data.watchlist_portfolio_users || 0;
+    const cgRank    = data.coingecko_rank || 9999;
+    const mcRank    = data.market_cap_rank || 9999;
+
+    // Calculate hype score
+    let hypeBonus = 0;
+    const tags = [];
+
+    // Sentiment bonus (bullish community)
+    if (sentiment >= 80)       { hypeBonus += 1.5; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
+    else if (sentiment >= 65)  { hypeBonus += 1.0; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
+    else if (sentiment >= 50)  { hypeBonus += 0.5; }
+    else if (sentiment > 0 && sentiment < 40) { hypeBonus -= 1; tags.push(`😟${sentiment.toFixed(0)}%bear`); }
+
+    // Watchlist users bonus (active interest)
+    if (watchlist > 100000)     { hypeBonus += 1.0; tags.push(`⭐${Math.round(watchlist/1000)}k`); }
+    else if (watchlist > 30000) { hypeBonus += 0.5; tags.push(`⭐${Math.round(watchlist/1000)}k`); }
+    else if (watchlist > 10000) { hypeBonus += 0.3; }
+
+    // Twitter community bonus
+    if (twitter > 500000)       { hypeBonus += 0.5; tags.push(`🐦${Math.round(twitter/1000)}k`); }
+    else if (twitter > 100000)  { hypeBonus += 0.3; }
+    else if (twitter < 5000 && twitter > 0) { hypeBonus -= 0.5; tags.push('🪦dead'); }
+
+    // Cap bonus at +3, floor at -1.5
+    hypeBonus = Math.max(-1.5, Math.min(3, hypeBonus));
+
+    const result = {
+      hasData:   true,
+      hypeBonus,
+      sentiment,
+      watchlist,
+      twitter,
+      reddit,
+      telegram,
+      cgRank,
+      mcRank,
+      tag: tags.length > 0 ? tags.join(' ') : '',
+    };
+    hypeCache.set(sym, { data: result, ts: Date.now() });
+    return result;
+  } catch (err) {
+    const result = { hasData: false, hypeBonus: 0, tag: '', reason: err.message };
+    hypeCache.set(sym, { data: result, ts: Date.now() });
+    return result;
   }
 };
 
@@ -754,7 +815,7 @@ const buildWatchMsg = (symbol, score, direction, layers, btc, hype = null) => {
   if (layers.resistance.pressure)     tags.push(`🧱Resist×${layers.resistance.tests}`);
   if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
   if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
-  if (hype?.isTrending)               tags.push(hype.tag);
+  if (hype?.tag)                      tags.push(hype.tag);
 
   return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
 ${tags.join(' · ')}
@@ -803,7 +864,7 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   if (layers.fundingLS.ls < 1)        conf.push(`⚖️${layers.fundingLS.ls.toFixed(2)}`);
   if (scanCount >= 2)                 conf.push(`🔁${scanCount}scans`);
   if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
-  if (hype?.isTrending)               conf.push(`🌊TRENDING#${hype.trendingRank}`);
+  if (hype?.tag)                      conf.push(hype.tag);
 
   return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b>
 📊 ${score}/10 ${confBar(score)}
@@ -1019,10 +1080,10 @@ const runWatchlistScan = async () => {
 
       // Social hype cross-check — bonus score if trending on CoinGecko
       const hype = await checkSocialHype(symbol);
-      const finalScore = Math.min(10, score + hype.hypeBonus);
-      if (hype.isTrending) log(`🌊 ${symbol} TRENDING #${hype.trendingRank} — bonus +${hype.hypeBonus}`);
+      const finalScore = Math.max(0, Math.min(10, score + (hype.hypeBonus || 0)));
+      if (hype.hasData && hype.hypeBonus !== 0) log(`🌊 ${symbol} hype ${hype.hypeBonus > 0 ? '+' : ''}${hype.hypeBonus} (${hype.tag})`);
 
-      log(`📊 ${symbol} ${direction} score:${score}${hype.hypeBonus > 0 ? '+'+hype.hypeBonus : ''}=${finalScore} candle:${trap.candle?.verdict || 'N/A'} htf:${htf.reason} early:${early.isEarly}${hype.isTrending ? ' 🌊trending#'+hype.trendingRank : ''}`);
+      log(`📊 ${symbol} ${direction} score:${score}${hype.hypeBonus !== 0 ? (hype.hypeBonus > 0 ? '+' : '') + hype.hypeBonus : ''}=${finalScore} candle:${trap.candle?.verdict || 'N/A'} ${hype.tag ? '['+hype.tag+']' : ''}`);
 
       const existing = coinTracker.get(symbol);
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
