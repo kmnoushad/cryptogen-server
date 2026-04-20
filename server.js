@@ -1064,7 +1064,7 @@ const runWatchlistScan = async () => {
         return validBreak && holds;
       })();
 
-      const candleOk = trap.candle?.verdict === 'STRONG';
+      const candleOk = trap.candle?.verdict === 'STRONG' || (trap.candle?.verdict === 'WEAK' && score >= 8);
       // Regime, OI, extension — log as warnings but do NOT block
       // Current market: most alts below EMA200, regime shows ranging — but can still 3x
       const regimeWarn = !regime.allowFire ? `regime:${regime.regime}` : '';
@@ -1074,12 +1074,12 @@ const runWatchlistScan = async () => {
       if (warnings) log(`⚠️ WARN: ${symbol} — ${warnings} (not blocking)`);
 
       // Require BTC not dumping for LONG, not pumping for SHORT
-      const btcSupportive = isLong ? (btc.change1H > -0.2) : (btc.change1H < 0.2);
+      const btcSupportive = isLong ? (btc.change1H > -0.5) : (btc.change1H < 0.5); // loosened
       if (!btcSupportive) log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && score >= MIN_ALERT_SCORE && (state.scanCount >= 2 || score >= 8.5) && trap.safe && breakoutConfirmed && candleOk && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && score >= MIN_ALERT_SCORE && (state.scanCount >= 2 || score >= 8.5) && trap.safe && candleOk && (breakoutConfirmed || score >= 9) && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
