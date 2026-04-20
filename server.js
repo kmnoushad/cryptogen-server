@@ -29,7 +29,7 @@ const OWNER_CHAT_ID   = '6896387082';
 // ── PAPER TRADING MODE ───────────────────────────────────────────────────────
 // When true: alerts go ONLY to owner (no channels), every signal logged to Supabase
 // Bot researches silently, outcomes tracked, real stats after 1-2 weeks
-const PAPER_MODE = true;
+const PAPER_MODE = false;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
