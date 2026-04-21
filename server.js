@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.7 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.8 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -35,15 +35,15 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 120000; // v3.7 — 2 min
-const WATCHLIST_SCAN_INTERVAL = 45000; // v3.7 — 45 sec
+const FULL_MARKET_INTERVAL_MS = 120000; // v3.8 — 2 min
+const WATCHLIST_SCAN_INTERVAL = 45000; // v3.8 — 45 sec
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5; // v3.7 — balanced quality
+const MIN_ALERT_SCORE         = 6.5; // v3.8 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
@@ -803,7 +803,68 @@ const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, kli
   return { safe: trapScore === 0, trapScore, reasons, candle };
 };
 
-// ── Bullish Absorption Detector (v3.7) ────────────────────────────────────────
+// ── Anti-Dump Trap Detector (v3.8) ────────────────────────────────────────────
+// Blocks LONG signals after a recent dump even if volume/OI suggests buying
+// This catches "falling knife" fakeouts — bounces that fail and dump more
+// Checks:
+//   1. Price dropped 3-5%+ recently (last ~2 hours)
+//   2. Short-term MA below mid-term MA (MA7 < MA25)
+//   3. Price still in lower third of recent range
+// If ALL bearish → block LONG, this is a trap not accumulation
+const checkAntiDumpTrap = (klines, direction) => {
+  if (direction !== 'LONG' || !klines || klines.length < 25) {
+    return { isTrap: false, reasons: [] };
+  }
+
+  const closes = klines.map(k => parseFloat(k[4]));
+  const highs  = klines.map(k => parseFloat(k[2]));
+  const lows   = klines.map(k => parseFloat(k[3]));
+  const price  = closes[closes.length - 1];
+  const reasons = [];
+
+  // 1. Recent dump check — price dropped 3%+ in last 8 candles (~2h on 15m)
+  const priceAgo = closes[closes.length - 9] || closes[0];
+  const pctDrop = ((priceAgo - price) / priceAgo) * 100;
+  const recentDump = pctDrop >= 3;
+
+  // 2. MA structure — MA7 below MA25 = bearish short-term
+  const ma7  = closes.slice(-7).reduce((a,b) => a+b, 0) / 7;
+  const ma25 = closes.slice(-25).reduce((a,b) => a+b, 0) / 25;
+  const bearishStructure = ma7 < ma25;
+
+  // 3. Price in lower third of recent 25-candle range
+  const rangeHigh = Math.max(...highs.slice(-25));
+  const rangeLow  = Math.min(...lows.slice(-25));
+  const rangeSize = rangeHigh - rangeLow;
+  const pricePosition = rangeSize > 0 ? (price - rangeLow) / rangeSize : 0.5;
+  const inLowerThird = pricePosition < 0.33;
+
+  // 4. Lower highs pattern — recent highs declining (extra confirmation)
+  const recentHighs = highs.slice(-6);
+  const firstHalfHigh = Math.max(...recentHighs.slice(0, 3));
+  const secondHalfHigh = Math.max(...recentHighs.slice(3));
+  const lowerHighs = secondHalfHigh < firstHalfHigh * 0.98;
+
+  // Collect bearish signals
+  if (recentDump) reasons.push(`💥 dumped ${pctDrop.toFixed(1)}% recently`);
+  if (bearishStructure) reasons.push(`📉 MA7<MA25`);
+  if (inLowerThird) reasons.push(`⬇️ lower ${(pricePosition*100).toFixed(0)}% of range`);
+  if (lowerHighs) reasons.push(`📉 lower highs`);
+
+  // TRAP = recent dump + (bearish MA OR lower third position)
+  const isTrap = recentDump && (bearishStructure || inLowerThird);
+
+  return {
+    isTrap,
+    reasons,
+    pctDrop: parseFloat(pctDrop.toFixed(2)),
+    ma7: parseFloat(ma7.toFixed(6)),
+    ma25: parseFloat(ma25.toFixed(6)),
+    pricePosition: parseFloat(pricePosition.toFixed(2)),
+  };
+};
+
+// ── Bullish Absorption Detector (v3.8) ────────────────────────────────────────
 // Detects stealth accumulation pattern — smart money buying quietly
 // Signals:
 //   1. Price flat/compressed (not moving much)
@@ -1042,7 +1103,7 @@ const runFullMarketScan = async () => {
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
-      .slice(0, 100); // v3.7 — 100 highest quality coins only
+      .slice(0, 100); // v3.8 — 100 highest quality coins only
 
     // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
     const currentWatchlistRaw = await getWatchlist();
@@ -1062,7 +1123,7 @@ const runFullMarketScan = async () => {
     let added = 0;
 
     for (const coin of valid) {
-      await sleep(250); // v3.7 faster — 350→250ms
+      await sleep(250); // v3.8 faster — 350→250ms
       let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
@@ -1130,7 +1191,7 @@ const runWatchlistScan = async () => {
     let alertsFired = 0;
 
     for (const symbol of symbols) {
-      await sleep(200); // v3.7 faster — 400→200ms
+      await sleep(200); // v3.8 faster — 400→200ms
       let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
       try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
       if (!price) continue;
@@ -1162,9 +1223,16 @@ const runWatchlistScan = async () => {
       const fundingLS   = checkFundingLS(funding, ls, direction);
       const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
 
+      // Anti-dump trap check — block LONG after recent dump
+      const dumpTrap = checkAntiDumpTrap(klines, direction);
+      if (dumpTrap.isTrap) {
+        log(`🔪 DUMP-TRAP: ${symbol} LONG blocked — ${dumpTrap.reasons.join(', ')}`);
+      }
+
       // Bullish absorption check — only for LONG (stealth accumulation)
+      // Skipped if dump trap detected
       let absorption = { absorbing: false, score: 0, reasons: [] };
-      if (direction === 'LONG') {
+      if (direction === 'LONG' && !dumpTrap.isTrap) {
         absorption = await checkBullishAbsorption(symbol, price, klines, currentOI, prevOI, funding);
         if (absorption.absorbing) log(`🤫 ABSORPTION: ${symbol} score:${absorption.score} [${absorption.reasons.join(', ')}]`);
       }
@@ -1175,7 +1243,7 @@ const runWatchlistScan = async () => {
         const boost = Math.min(2, absorption.score * 0.3);
         score = Math.min(10, score + boost);
       }
-      const layers      = { compression, volume, resistance, fundingLS, trap, absorption };
+      const layers      = { compression, volume, resistance, fundingLS, trap, absorption, dumpTrap };
 
       // ── Liquidity sweep check (Fix 4) ─────────────────────────────────────
       const sweep = checkLiquiditySweep(klines, direction);
@@ -1229,6 +1297,7 @@ const runWatchlistScan = async () => {
         finalScore >= 5 &&
         !ext.tooExtended &&
         !pumpCheck.pumped &&
+        !dumpTrap.isTrap &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -1311,7 +1380,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !lowLiq && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !lowLiq && !dumpTrap.isTrap && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -1436,12 +1505,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v3.7`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v3.8`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.7 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.8 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1492,9 +1561,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v3.7 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v3.8 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.7 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.8 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
