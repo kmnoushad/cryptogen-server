@@ -35,12 +35,12 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 300000; // 5 min — was 10 min
-const WATCHLIST_SCAN_INTERVAL = 180000;
+const FULL_MARKET_INTERVAL_MS = 180000; // 3 min — faster but safe
+const WATCHLIST_SCAN_INTERVAL = 90000; // 90 sec — faster reaction
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
-const MAX_WATCHLIST           = 80;
+const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5; // v3.5 — balanced quality
@@ -308,9 +308,8 @@ const checkSocialHype = async (symbol) => {
     const tags = [];
 
     // Sentiment bonus (bullish community)
-    if (sentiment >= 80)       { hypeBonus += 1.5; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
-    else if (sentiment >= 65)  { hypeBonus += 1.0; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
-    else if (sentiment >= 50)  { hypeBonus += 0.5; }
+    if (sentiment >= 80)       { hypeBonus += 0.8; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
+    else if (sentiment >= 65)  { hypeBonus += 0.5; tags.push(`😊${sentiment.toFixed(0)}%bull`); }
     else if (sentiment > 0 && sentiment < 40) { hypeBonus -= 1; tags.push(`😟${sentiment.toFixed(0)}%bear`); }
 
     // Watchlist users bonus (active interest)
@@ -324,7 +323,7 @@ const checkSocialHype = async (symbol) => {
     else if (twitter < 5000 && twitter > 0) { hypeBonus -= 0.5; tags.push('🪦dead'); }
 
     // Cap bonus at +3, floor at -1.5
-    hypeBonus = Math.max(-1.5, Math.min(3, hypeBonus));
+    hypeBonus = Math.max(-1.5, Math.min(1.5, hypeBonus)); // reduced influence — crowded = late
 
     const result = {
       hasData:   true,
@@ -850,10 +849,11 @@ ${FOOTER(btc, symbol)}`.trim();
 const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null) => {
   const isLong   = direction === 'LONG';
   const atr      = calculateATR(klines) || (price * 0.018);
-  const sl       = isLong ? price - atr * 1.2 : price + atr * 1.2;
-  const tp1      = isLong ? price + atr * 1.5 : price - atr * 1.5;
-  const tp2      = isLong ? price + atr * 3.0 : price - atr * 3.0;
-  const tp3      = isLong ? price + atr * 4.5 : price - atr * 4.5;
+  // Wider SL for FIRE — breakout trades need breathing room
+  const sl       = isLong ? price - atr * 1.8 : price + atr * 1.8;
+  const tp1      = isLong ? price + atr * 2.0 : price - atr * 2.0;
+  const tp2      = isLong ? price + atr * 3.5 : price - atr * 3.5;
+  const tp3      = isLong ? price + atr * 5.0 : price - atr * 5.0;
   const candle   = layers.trap?.candle;
 
   const conf = [];
@@ -953,7 +953,7 @@ const runFullMarketScan = async () => {
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
-      .slice(0, 300); // was 80 — scan full market
+      .slice(0, 120); // focused — mid cap + clean charts only
 
     // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
     const currentWatchlistRaw = await getWatchlist();
@@ -1122,8 +1122,9 @@ const runWatchlistScan = async () => {
         btc.pass &&
         earlyBtcOk &&
         early.isEarly &&
-        early.earlyScore >= 3 &&
-        finalScore >= 6 &&
+        early.earlyScore >= 2 &&
+        finalScore >= 5 &&
+        !ext.tooExtended &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -1198,7 +1199,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && (breakoutConfirmed || finalScore >= 9) && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
