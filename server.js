@@ -1,16 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v4.0 — FIXED VERSION
+// NEXIO SERVER v5.0 — COMPLETE REVISION
 // 
-// FIXES IMPLEMENTED:
-// ✅ Direction logic rewritten (multi-factor confirmation)
-// ✅ EMA50 with 3-candle confirmation + slope check
-// ✅ Stop loss: 2.0 ATR (normal), 1.5 ATR (high confidence)
-// ✅ Take profit: 2.0 / 4.0 / 6.0 ATR
-// ✅ Early entry: requires 2 of 3 additional triggers
-// ✅ Breakout volume confirmation (1.8x + follow-through)
-// ✅ Event risk filter (token unlocks, delistings)
-// ✅ Backtesting system
-// ✅ Daily loss limits & cooldowns
+// FIX #1: DIRECTION LOGIC (was causing 40%+ of losses)
+// FIX #2: ENTRY TIMING (entering too early/too late)
+// FIX #3: RISK MANAGEMENT (no position sizing, no loss limits)
+// FIX #4: CONFIRMATION LAYERS (entering on false signals)
+// FIX #5: MARKET REGIME (trading in all conditions equally)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
@@ -18,405 +13,1001 @@ const FREE_CHANNEL    = '-1003900595640';
 const PREMIUM_CHANNEL = '-1003913881352';
 const OWNER_CHAT_ID   = '6896387082';
 
-// ── CONFIGURATION ───────────────────────────────────────────────────────────
-const PAPER_MODE = true;  // KEEP TRUE for 2 weeks after fixes
+// ⚠️ CRITICAL: KEEP THIS TRUE FOR MINIMUM 4 WEEKS
+const PAPER_MODE = true;  // ← DO NOT CHANGE until 100 paper trades with >55% win rate
+
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-// ── RISK MANAGEMENT (NEW) ───────────────────────────────────────────────────
-const MAX_DAILY_LOSS_PCT = 5;           // Stop all if down 5% in a day
-const MAX_CONSECUTIVE_LOSSES = 3;       // Pause 4h after 3 losses
-const COOLDOWN_AFTER_LOSS_HOURS = 4;    // Per-coin cooldown
-const NORMAL_SL_ATR = 2.0;              // 2.0× ATR for normal entries
-const HIGH_CONF_SL_ATR = 1.5;           // 1.5× ATR for score >= 8
-const TP1_ATR = 2.0;                    // Minimum 2.0× ATR
-const TP2_ATR = 4.0;                    // Standard 4.0× ATR
-const TP3_ATR = 6.0;                    // Runner 6.0× ATR
-
-// ── ENTRY REQUIREMENTS (NEW) ────────────────────────────────────────────────
-const MIN_CONFIRMATION_FACTORS = 3;     // Need 3 independent signals to align
-const MIN_BREAKOUT_VOLUME_RATIO = 1.8;  // Breakout volume vs 20-period avg
-const MIN_FOLLOW_VOLUME_RATIO = 1.2;    // Next candle confirmation
-const MIN_RSI_DIVERGENCE = true;        // Require RSI divergence for EARLY
-
-// ── SCANNER SETTINGS ────────────────────────────────────────────────────────
-const FULL_MARKET_INTERVAL_MS = 120000;
-const WATCHLIST_SCAN_INTERVAL = 45000;
-const POLL_INTERVAL_MS        = 30000;
-const ALERT_COOLDOWN_MS       = 1800000;
-const MIN_VOLUME_USD          = 200000;
-const MAX_WATCHLIST           = 50;
-const MIN_ALERT_SCORE         = 6.5;
-const PUMP_EXCLUDE_PCT        = 25.0;
-
-// ── EXCLUDE LIST (unchanged) ────────────────────────────────────────────────
-const EXCLUDE = new Set([
-  'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
-  'ADAUSDT','DOGEUSDT','TRXUSDT','LTCUSDT','MATICUSDT',
-  'HBARUSDT','WBTCUSDT','AVAXUSDT','DOTUSDT','LINKUSDT',
-  'ATOMUSDT','NEARUSDT','UNIUSDT','APTUSDT','LDOUSDT',
-  'XAUUSDT','XAUTUSDT','PAXGUSDT','XAGUUSDT','CLUSDT',
-  'USDCUSDT','USDTUSDT','BUSDUSDT','DAIUSDT','FRAXUSDT',
-  'TSLAUSDT','AAPLUSDT','GOOGLUSDT','AMZNUSDT','MSFTUSDT',
-]);
-
-const EXCLUDE_REGEX = /^(TSLA|AAPL|GOOGL|AMZN|MSFT|NVDA|META|NFLX|AMD|COIN|BABA|XAU|XAG|SPY|QQQ|GLD|SLV)/;
-const MID_CAP = new Set([
-  'LINKUSDT','AVAXUSDT','DOTUSDT','ATOMUSDT','NEARUSDT',
-  'INJUSDT','LDOUSDT','APTUSDT','AAVEUSDT','MKRUSDT',
-]);
-
-// ── GLOBALS ──────────────────────────────────────────────────────────────────
-const alertHistory  = new Map();
-const coinTracker   = new Map();
-const signalPrices  = new Map();
-const resistanceMap = new Map();
-let   lastUpdateId  = 0;
-let   fullScanCount = 0;
-let   btcGateStatus = { pass: true, reason: 'Starting up', price: 0, change: 0 };
-let   dailyLosses   = { count: 0, date: '', pnl: 0 };
-let   emergencyStop = false;
-let   consecutiveLosses = 0;
-let   lastLossTime = 0;
-
-// ── UTILITIES ────────────────────────────────────────────────────────────────
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const gstNow = () => new Date().toLocaleTimeString('en-US', {
-  hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Dubai'
-});
-const log = (...a) => console.log(`[${gstNow()}]`, ...a);
-
-const isLowLiquiditySession = () => {
-  const hour = parseInt(new Date().toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Dubai' }));
-  return hour >= 1 && hour < 5;
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #3: COMPLETE RISK MANAGEMENT SYSTEM (NEW)
+// ─────────────────────────────────────────────────────────────────────────────
+const RISK_CONFIG = {
+  // Position sizing
+  max_risk_per_trade_pct: 1.0,        // Max 1% of account per trade
+  max_position_size_pct: 10,           // Max 10% of account per position
+  max_concurrent_positions: 3,         // Max 3 positions at once
+  min_risk_reward: 2.0,                // Minimum 1:2 risk/reward
+  
+  // Loss limits
+  max_daily_loss_pct: 3.0,             // Stop trading at 3% daily loss
+  max_weekly_loss_pct: 8.0,            // Stop trading at 8% weekly loss
+  max_consecutive_losses: 3,           // Pause after 3 losses
+  cooldown_after_loss_minutes: 120,    // 2 hour cooldown per coin
+  
+  // Correlation
+  max_correlation_threshold: 0.7,      // Don't trade correlated pairs
+  require_btc_alignment: true,         // BTC must agree with direction
+  
+  // Entry filters
+  min_confirmation_candles: 2,         // Wait for 2 confirmation candles
+  min_volume_ratio: 1.8,               // Breakout volume must be 1.8x average
+  max_spread_pct: 0.1,                 // Max 0.1% spread
+  
+  // Exit rules
+  trailing_activation_pct: 1.0,        // Start trailing after 1% profit
+  trailing_distance_pct: 0.5,          // Trail by 0.5%
+  max_hold_hours: 24,                  // Force exit after 24 hours
 };
 
-const canAlert = k => !alertHistory.has(k) || Date.now() - alertHistory.get(k) > ALERT_COOLDOWN_MS;
-const markAlert = k => alertHistory.set(k, Date.now());
-
-const fmtP = p => p >= 1000 ? p.toLocaleString('en-US', { minimumFractionDigits: 2 }) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
-
-const confBar = score => {
-  const n = Math.min(Math.round(score), 10);
-  let b = '';
-  for (let i = 0; i < n; i++) b += i < 3 ? '🟥' : i < 5 ? '🟧' : i < 7 ? '🟨' : '🟩';
-  return b + '⬛'.repeat(10 - n);
+// Account tracking
+let account = {
+  balance: 10000,                      // Starting balance
+  peak_balance: 10000,
+  daily_pnl: 0,
+  weekly_pnl: 0,
+  daily_date: new Date().toDateString(),
+  weekly_date: getWeekStart(),
+  consecutive_losses: 0,
+  open_positions: [],
+  trade_history: [],
 };
 
-// ── ATR CALCULATOR ──────────────────────────────────────────────────────────
-const calculateATR = (klines, period = 14) => {
-  if (!klines || klines.length < period + 1) return 0;
-  let trSum = 0;
-  for (let i = klines.length - period; i < klines.length; i++) {
-    const high = parseFloat(klines[i][2]);
-    const low = parseFloat(klines[i][3]);
-    const prevClose = i > 0 ? parseFloat(klines[i-1][4]) : high;
-    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
-    trSum += tr;
-  }
-  return trSum / period;
-};
+function getWeekStart() {
+  const d = new Date();
+  d.setDate(d.getDate() - d.getDay());
+  return d.toDateString();
+}
 
-// ── EMA CALCULATOR ──────────────────────────────────────────────────────────
-const calculateEMA = (klines, period = 50) => {
-  if (!klines || klines.length < period) return null;
-  const closes = klines.map(k => parseFloat(k[4]));
-  const k = 2 / (period + 1);
-  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
-  return ema;
-};
-
-const calcEMAFromCloses = (closes, period) => {
-  if (!closes || closes.length < period) return null;
-  const k = 2 / (period + 1);
-  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  for (let i = period; i < closes.length; i++) ema = closes[i] * k + ema * (1 - k);
-  return ema;
-};
-
-// ── FIXED: HTF TREND WITH CONFIRMATION (Issue #2) ───────────────────────────
-const checkHTFTrendConfirmed = async (symbol) => {
-  try {
-    const klines1h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=210`);
-    if (!klines1h || klines1h.length < 200) return { bullish: false, bearish: false, ema50: null, confirmed: false };
-    
-    const closes = klines1h.map(k => parseFloat(k[4]));
-    const price = closes[closes.length - 1];
-    const ema50 = calcEMAFromCloses(closes, 50);
-    const ema50Prev = calcEMAFromCloses(closes.slice(0, -1), 50);
-    
-    if (!ema50 || !ema50Prev) return { bullish: false, bearish: false, ema50: null, confirmed: false };
-    
-    // REQUIRE: 3 consecutive closes above/below EMA50 for confirmation
-    const closesAbove = closes.slice(-3).every(c => c > ema50);
-    const closesBelow = closes.slice(-3).every(c => c < ema50);
-    
-    // REQUIRE: EMA slope confirmation (not flat/declining for longs)
-    const emaSlope = ((ema50 - ema50Prev) / ema50Prev) * 100;
-    const slopeOkForLong = emaSlope > -0.1;  // Not falling
-    const slopeOkForShort = emaSlope < 0.1;  // Not rising
-    
-    const bullish = closesAbove && slopeOkForLong;
-    const bearish = closesBelow && slopeOkForShort;
-    
-    return {
-      bullish,
-      bearish,
-      ema50,
-      emaSlope: parseFloat(emaSlope.toFixed(2)),
-      confirmed: bullish || bearish,
-      reason: bullish ? `✅ above EMA50 (${closes.slice(-3).length}/3 candles, slope ${emaSlope.toFixed(1)}%)` :
-               bearish ? `✅ below EMA50 (${closes.slice(-3).length}/3 candles, slope ${emaSlope.toFixed(1)}%)` :
-               `❌ EMA50 not confirmed`
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #1: NEW DIRECTION LOGIC (Multi-Timeframe + Order Flow)
+// ─────────────────────────────────────────────────────────────────────────────
+class DirectionAnalyzer {
+  constructor() {
+    this.timeframes = ['15m', '1h', '4h'];
+    this.weight = {
+      htf_trend: 0.35,      // Higher timeframe trend
+      price_action: 0.25,   // Current price structure
+      order_flow: 0.20,     // Order book imbalance
+      momentum: 0.10,       // Rate of change
+      sentiment: 0.10,      // Funding + L/S ratio
     };
-  } catch (err) {
-    return { bullish: false, bearish: false, ema50: null, confirmed: false, reason: 'data error' };
   }
-};
 
-// ── NEW: BREAKOUT VOLUME CONFIRMATION (Issue #5) ────────────────────────────
-const checkBreakoutVolume = (klines, direction) => {
-  if (!klines || klines.length < 22) return { validBreakout: false, breakVolRatio: 0, followVolRatio: 0 };
-  
-  const volumes = klines.map(k => parseFloat(k[5]));
-  const avgVol = volumes.slice(-22, -2).reduce((a, b) => a + b, 0) / 20;
-  const breakoutVol = parseFloat(klines[klines.length - 2][5]);
-  const followVol = parseFloat(klines[klines.length - 1][5]);
-  
-  const breakVolRatio = breakoutVol / avgVol;
-  const followVolRatio = followVol / avgVol;
-  
-  // REAL breakout requires volume spike on breakout AND follow-through
-  const validBreakout = breakVolRatio >= MIN_BREAKOUT_VOLUME_RATIO && followVolRatio >= MIN_FOLLOW_VOLUME_RATIO;
-  
-  return {
-    validBreakout,
-    breakVolRatio: parseFloat(breakVolRatio.toFixed(1)),
-    followVolRatio: parseFloat(followVolRatio.toFixed(1)),
-    avgVol: parseInt(avgVol)
-  };
-};
+  async analyze(symbol, price, klines, funding, lsRatio) {
+    const scores = {
+      long: 0,
+      short: 0,
+      reasons: { long: [], short: [] }
+    };
 
-// ── NEW: RSI DIVERGENCE DETECTOR (For Early Entry) ──────────────────────────
-const calculateRSI = (klines, period = 14) => {
-  if (!klines || klines.length < period + 1) return null;
-  const closes = klines.map(k => parseFloat(k[4]));
-  let gains = 0, losses = 0;
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i-1];
-    if (diff >= 0) gains += diff;
-    else losses -= diff;
-  }
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
-};
+    // 1. Higher Timeframe Trend (35% weight)
+    const htf = await this.checkHTFTrend(symbol);
+    if (htf.bullish) {
+      scores.long += this.weight.htf_trend;
+      scores.reasons.long.push('HTF bullish');
+    } else if (htf.bearish) {
+      scores.short += this.weight.htf_trend;
+      scores.reasons.short.push('HTF bearish');
+    }
 
-const checkRSIDivergence = (klines, direction) => {
-  if (!klines || klines.length < 20) return false;
-  const closes = klines.map(k => parseFloat(k[4]));
-  const rsiValues = [];
-  for (let i = 10; i < closes.length; i++) {
-    const slice = klines.slice(0, i+1);
-    rsiValues.push(calculateRSI(slice));
-  }
-  if (rsiValues.length < 10) return false;
-  
-  const recentPrices = closes.slice(-5);
-  const recentRSI = rsiValues.slice(-5);
-  
-  if (direction === 'LONG') {
-    // Hidden bullish divergence: lower lows in price, higher lows in RSI
-    const priceLowerLow = recentPrices[recentPrices.length-1] < Math.min(...recentPrices.slice(0, -1));
-    const rsiHigherLow = recentRSI[recentRSI.length-1] > Math.min(...recentRSI.slice(0, -1));
-    return priceLowerLow && rsiHigherLow;
-  } else {
-    // Hidden bearish divergence: higher highs in price, lower highs in RSI
-    const priceHigherHigh = recentPrices[recentPrices.length-1] > Math.max(...recentPrices.slice(0, -1));
-    const rsiLowerHigh = recentRSI[recentRSI.length-1] < Math.max(...recentRSI.slice(0, -1));
-    return priceHigherHigh && rsiLowerHigh;
-  }
-};
+    // 2. Price Action (25% weight)
+    const pa = this.checkPriceAction(klines, price);
+    if (pa.bullish) {
+      scores.long += this.weight.price_action;
+      scores.reasons.long.push('bullish structure');
+    } else if (pa.bearish) {
+      scores.short += this.weight.price_action;
+      scores.reasons.short.push('bearish structure');
+    }
 
-// ── NEW: EVENT RISK FILTER (Issue #6) ───────────────────────────────────────
-const checkEventRisk = async (symbol) => {
-  const base = symbol.replace('USDT', '').toLowerCase();
-  const riskyEvents = [];
-  
-  // Check for upcoming token unlocks (simplified - would call API in production)
-  // In production: fetch from https://token.unlocks.app/api/unlocks
-  const unlockKeywords = ['unlock', 'vesting', 'cliff'];
-  
-  // Check for Binance delisting warnings
-  // In production: monitor Binance announcement channel
-  const delistedTokens = ['', '']; // Populate from API
-  
-  if (delistedTokens.includes(base)) {
-    riskyEvents.push(`⚠️ DELISTING WARNING for ${base}`);
-  }
-  
-  // Check for extreme social sentiment (simplified)
-  // In production: use LunarCrush or similar API
-  
-  return {
-    safe: riskyEvents.length === 0,
-    risks: riskyEvents,
-    shouldBlock: riskyEvents.length > 0
-  };
-};
+    // 3. Order Flow (20% weight)
+    const orderFlow = await this.checkOrderFlow(symbol, price);
+    if (orderFlow.bullish) {
+      scores.long += this.weight.order_flow;
+      scores.reasons.long.push('buying pressure');
+    } else if (orderFlow.bearish) {
+      scores.short += this.weight.order_flow;
+      scores.reasons.short.push('selling pressure');
+    }
 
-// ── IMPROVED: EARLY ENTRY WITH TRIGGERS (Issue #3) ──────────────────────────
-const checkEarlyEntry = (compression, volume, fundingLS, klines, direction) => {
-  let triggers = 0;
-  const triggerDetails = [];
-  
-  // Trigger 1: RSI divergence
-  const hasRSIDivergence = checkRSIDivergence(klines, direction);
-  if (hasRSIDivergence) {
-    triggers++;
-    triggerDetails.push('RSI divergence');
-  }
-  
-  // Trigger 2: Volume climax on opposite candles (selling/buying exhaustion)
-  const volumes = klines.map(k => parseFloat(k[5]));
-  const avgVol = volumes.slice(-10, -2).reduce((a, b) => a + b, 0) / 8;
-  const lastVol = volumes[volumes.length - 1];
-  const volSpike = lastVol / avgVol;
-  const lastCandleRed = parseFloat(klines[klines.length-1][4]) < parseFloat(klines[klines.length-1][1]);
-  
-  if (direction === 'LONG' && lastCandleRed && volSpike > 1.8) {
-    triggers++;
-    triggerDetails.push(`selling climax ${volSpike.toFixed(1)}x`);
-  } else if (direction === 'SHORT' && !lastCandleRed && volSpike > 1.8) {
-    triggers++;
-    triggerDetails.push(`buying climax ${volSpike.toFixed(1)}x`);
-  }
-  
-  // Trigger 3: Compression + OI building (original)
-  const quietAccum = compression.compressed && compression.oiBuilding;
-  if (quietAccum) {
-    triggers++;
-    triggerDetails.push('coiling+OI');
-  }
-  
-  const isEarly = triggers >= 2;  // Need at least 2 triggers
-  
-  return {
-    isEarly,
-    earlyScore: triggers,
-    triggers: triggerDetails,
-    quietAccum
-  };
-};
+    // 4. Momentum (10% weight)
+    const momentum = this.checkMomentum(klines);
+    if (momentum > 0.3) {
+      scores.long += this.weight.momentum;
+      scores.reasons.long.push(`momentum +${momentum.toFixed(1)}%`);
+    } else if (momentum < -0.3) {
+      scores.short += this.weight.momentum;
+      scores.reasons.short.push(`momentum ${momentum.toFixed(1)}%`);
+    }
 
-// ── FIXED: DIRECTION LOGIC (Issue #1 - MOST CRITICAL) ───────────────────────
-const determineDirection = async (symbol, price, klines, funding, ls, change24h) => {
-  // Factor 1: HTF Trend (40% weight)
-  const htf = await checkHTFTrendConfirmed(symbol);
-  if (!htf.confirmed) return { direction: null, confidence: 0, reasons: ['HTF not confirmed'] };
-  
-  // Factor 2: Price Action / EMA position (30% weight)
-  const ema20 = calculateEMA(klines, 20);
-  const aboveEMA20 = ema20 ? price > ema20 : false;
-  const priceAction = aboveEMA20 ? 'LONG' : 'SHORT';
-  
-  // Factor 3: Momentum (20% weight)
-  const momentum = change24h > 0.5 ? 'LONG' : change24h < -0.5 ? 'SHORT' : 'NEUTRAL';
-  
-  // Factor 4: Funding & L/S (10% weight - confirmation only)
-  const fundingLongFriendly = funding < 0.01;  // Not overheated
-  const fundingShortFriendly = funding > -0.01;
-  const lsLongFriendly = ls < 1.1;
-  const lsShortFriendly = ls > 0.9;
-  
-  // Calculate LONG score
-  let longScore = 0;
-  if (htf.bullish) longScore += 4;
-  if (priceAction === 'LONG') longScore += 3;
-  if (momentum === 'LONG') longScore += 2;
-  if (fundingLongFriendly && lsLongFriendly) longScore += 1;
-  
-  // Calculate SHORT score
-  let shortScore = 0;
-  if (htf.bearish) shortScore += 4;
-  if (priceAction === 'SHORT') shortScore += 3;
-  if (momentum === 'SHORT') shortScore += 2;
-  if (fundingShortFriendly && lsShortFriendly) shortScore += 1;
-  
-  // Decision: Need clear winner with minimum 6 points (out of 10)
-  const longWins = longScore >= 6 && longScore > shortScore + 1.5;
-  const shortWins = shortScore >= 6 && shortScore > longScore + 1.5;
-  
-  const direction = longWins ? 'LONG' : shortWins ? 'SHORT' : null;
-  const confidence = direction === 'LONG' ? longScore : direction === 'SHORT' ? shortScore : 0;
-  
-  const reasons = [];
-  if (htf.bullish) reasons.push('HTF bullish');
-  if (htf.bearish) reasons.push('HTF bearish');
-  if (priceAction === 'LONG') reasons.push('price above EMA20');
-  if (priceAction === 'SHORT') reasons.push('price below EMA20');
-  if (momentum !== 'NEUTRAL') reasons.push(`momentum ${momentum.toLowerCase()}`);
-  
-  return { direction, confidence, reasons, longScore, shortScore };
-};
+    // 5. Sentiment (10% weight)
+    const sentiment = this.checkSentiment(funding, lsRatio);
+    if (sentiment.bullish) {
+      scores.long += this.weight.sentiment;
+      scores.reasons.long.push('favorable funding');
+    } else if (sentiment.bearish) {
+      scores.short += this.weight.sentiment;
+      scores.reasons.short.push('bearish sentiment');
+    }
 
-// ── FIXED: STOP LOSS & TAKE PROFIT (Issues #4 & #7) ─────────────────────────
-const calculateSLTP = (price, atr, score, direction) => {
-  const isLong = direction === 'LONG';
-  const slMultiplier = score >= 8 ? HIGH_CONF_SL_ATR : NORMAL_SL_ATR;
-  
-  const sl = isLong ? price - atr * slMultiplier : price + atr * slMultiplier;
-  const tp1 = isLong ? price + atr * TP1_ATR : price - atr * TP1_ATR;
-  const tp2 = isLong ? price + atr * TP2_ATR : price - atr * TP2_ATR;
-  const tp3 = isLong ? price + atr * TP3_ATR : price - atr * TP3_ATR;
-  const riskReward = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
-  
-  return { sl, tp1, tp2, tp3, riskReward, slMultiplier };
-};
+    // Decision: Need clear winner with minimum 0.6 score (out of 1.0)
+    const totalWeight = Object.values(this.weight).reduce((a, b) => a + b, 0);
+    const longScore = scores.long / totalWeight;
+    const shortScore = scores.short / totalWeight;
+    
+    let direction = null;
+    let confidence = 0;
+    
+    if (longScore >= 0.65 && longScore > shortScore + 0.15) {
+      direction = 'LONG';
+      confidence = longScore;
+    } else if (shortScore >= 0.65 && shortScore > longScore + 0.15) {
+      direction = 'SHORT';
+      confidence = shortScore;
+    }
 
-// ── LOSS MANAGEMENT (NEW) ───────────────────────────────────────────────────
-const recordLoss = (symbol, pnlPercent) => {
-  const today = new Date().toDateString();
-  if (dailyLosses.date !== today) {
-    dailyLosses = { count: 0, date: today, pnl: 0 };
-    consecutiveLosses = 0;
+    return {
+      direction,
+      confidence: parseFloat((confidence * 100).toFixed(1)),
+      longScore: parseFloat((longScore * 100).toFixed(1)),
+      shortScore: parseFloat((shortScore * 100).toFixed(1)),
+      reasons: direction === 'LONG' ? scores.reasons.long : scores.reasons.short,
+      details: scores
+    };
   }
-  dailyLosses.count++;
-  dailyLosses.pnl += Math.abs(pnlPercent);
-  consecutiveLosses++;
-  lastLossTime = Date.now();
-  
-  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count} | Consecutive: ${consecutiveLosses} | PnL: ${dailyLosses.pnl.toFixed(1)}%`);
-};
 
-const isBlocked = (symbol) => {
-  // Emergency stop from command
-  if (emergencyStop) return { blocked: true, reason: 'EMERGENCY STOP - manual override' };
-  
-  // Daily loss limit
-  if (dailyLosses.pnl >= MAX_DAILY_LOSS_PCT) {
-    return { blocked: true, reason: `Daily loss limit reached (${dailyLosses.pnl.toFixed(1)}% / ${MAX_DAILY_LOSS_PCT}%)` };
-  }
-  
-  // Consecutive loss cooldown
-  if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
-    const minsSinceLastLoss = (Date.now() - lastLossTime) / 60000;
-    if (minsSinceLastLoss < COOLDOWN_AFTER_LOSS_HOURS * 60) {
-      return { blocked: true, reason: `${consecutiveLosses} consecutive losses - cooling down ${Math.ceil((COOLDOWN_AFTER_LOSS_HOURS * 60 - minsSinceLastLoss) / 60)}h` };
-    } else {
-      consecutiveLosses = 0; // Reset after cooldown
+  async checkHTFTrend(symbol) {
+    try {
+      const klines4h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=4h&limit=100`);
+      if (!klines4h || klines4h.length < 50) return { bullish: false, bearish: false };
+      
+      const closes = klines4h.map(k => parseFloat(k[4]));
+      const price = closes[closes.length - 1];
+      const ema20 = this.calcEMA(closes, 20);
+      const ema50 = this.calcEMA(closes, 50);
+      const ema200 = this.calcEMA(closes, 200);
+      
+      // Require price above MA's AND MA's in correct order
+      const bullish = price > ema20 && ema20 > ema50 && ema50 > ema200;
+      const bearish = price < ema20 && ema20 < ema50 && ema50 < ema200;
+      
+      // Additional: Check for higher highs / lower lows
+      const last20Highs = closes.slice(-20).reduce((a, b) => Math.max(a, b), 0);
+      const prev20Highs = closes.slice(-40, -20).reduce((a, b) => Math.max(a, b), 0);
+      const makingHigherHighs = last20Highs > prev20Highs;
+      
+      return {
+        bullish: bullish && makingHigherHighs,
+        bearish: bearish && !makingHigherHighs
+      };
+    } catch {
+      return { bullish: false, bearish: false };
     }
   }
-  
-  return { blocked: false, reason: '' };
-};
 
-// ── REST OF ORIGINAL FUNCTIONS (keep as is) ─────────────────────────────────
+  checkPriceAction(klines, currentPrice) {
+    if (!klines || klines.length < 20) return { bullish: false, bearish: false };
+    
+    const closes = klines.map(k => parseFloat(k[4]));
+    const highs = klines.map(k => parseFloat(k[2]));
+    const lows = klines.map(k => parseFloat(k[3]));
+    
+    // Check for higher highs / higher lows
+    const recentHighs = highs.slice(-10);
+    const previousHighs = highs.slice(-20, -10);
+    const higherHighs = Math.max(...recentHighs) > Math.max(...previousHighs);
+    
+    const recentLows = lows.slice(-10);
+    const previousLows = lows.slice(-20, -10);
+    const higherLows = Math.min(...recentLows) > Math.min(...previousLows);
+    
+    // Check EMA position
+    const ema20 = this.calcEMA(closes, 20);
+    const aboveEMA20 = currentPrice > ema20;
+    
+    const bullish = higherHighs && higherLows && aboveEMA20;
+    const bearish = !higherHighs && !higherLows && !aboveEMA20;
+    
+    return { bullish, bearish };
+  }
+
+  async checkOrderFlow(symbol, price) {
+    try {
+      const ob = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=100`);
+      if (!ob) return { bullish: false, bearish: false };
+      
+      // Calculate bid/ask imbalance
+      let bidVolume = 0;
+      let askVolume = 0;
+      
+      for (const bid of ob.bids.slice(0, 50)) {
+        bidVolume += parseFloat(bid[0]) * parseFloat(bid[1]);
+      }
+      for (const ask of ob.asks.slice(0, 50)) {
+        askVolume += parseFloat(ask[0]) * parseFloat(ask[1]);
+      }
+      
+      const imbalance = (bidVolume - askVolume) / (bidVolume + askVolume);
+      const bullish = imbalance > 0.2;
+      const bearish = imbalance < -0.2;
+      
+      return { bullish, bearish, imbalance: parseFloat(imbalance.toFixed(3)) };
+    } catch {
+      return { bullish: false, bearish: false };
+    }
+  }
+
+  checkMomentum(klines) {
+    if (!klines || klines.length < 14) return 0;
+    
+    const closes = klines.map(k => parseFloat(k[4]));
+    const currentPrice = closes[closes.length - 1];
+    const price14ago = closes[closes.length - 14];
+    
+    const momentum = ((currentPrice - price14ago) / price14ago) * 100;
+    return parseFloat(momentum.toFixed(2));
+  }
+
+  checkSentiment(funding, lsRatio) {
+    // For LONG: Want negative funding (shorts paying) and low L/S ratio
+    const bullish = funding < -0.005 && lsRatio < 1.1;
+    const bearish = funding > 0.005 && lsRatio > 1.1;
+    return { bullish, bearish };
+  }
+
+  calcEMA(data, period) {
+    if (data.length < period) return data[data.length - 1];
+    const k = 2 / (period + 1);
+    let ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    for (let i = period; i < data.length; i++) {
+      ema = data[i] * k + ema * (1 - k);
+    }
+    return ema;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #2: ENTRY TIMING SYSTEM (Prevents early/late entries)
+// ─────────────────────────────────────────────────────────────────────────────
+class EntryTimingAnalyzer {
+  constructor() {
+    this.confirmationPatterns = {
+      breakout_retest: true,      // Wait for retest after breakout
+      volume_confirm: true,       // Volume must confirm
+      candle_closure: true,       // Wait for candle close
+      liquidity_sweep: true,      // Look for liquidity sweeps
+      divergence: true,           // Check for divergence
+    };
+  }
+
+  async analyze(symbol, price, direction, klines, volumeSpike) {
+    const signals = {
+      ready: false,
+      type: null,  // 'BREAKOUT', 'RETEST', 'LIQUIDITY_SWEEP', 'DIVERGENCE'
+      score: 0,
+      waitTime: 0,
+      reasons: []
+    };
+
+    // 1. Check for breakout confirmation
+    const breakout = this.checkBreakoutConfirmation(klines, direction);
+    if (breakout.confirmed && breakout.volumeOk) {
+      signals.score += 3;
+      signals.reasons.push(`breakout confirmed (${breakout.strength})`);
+    }
+
+    // 2. Check for retest opportunity (BETTER than breakout)
+    const retest = this.checkRetestOpportunity(klines, direction, price);
+    if (retest.available) {
+      signals.score += 4;  // Retest is higher quality
+      signals.type = 'RETEST';
+      signals.waitTime = retest.estimatedWait;
+      signals.reasons.push(`retest at ${fmtP(retest.level)}`);
+    }
+
+    // 3. Check for liquidity sweep (HIGHEST quality)
+    const sweep = this.checkLiquiditySweepPattern(klines, direction);
+    if (sweep.detected && sweep.recovery) {
+      signals.score += 5;
+      signals.type = 'LIQUIDITY_SWEEP';
+      signals.reasons.push(`liquidity swept at ${fmtP(sweep.level)} → recovered`);
+    }
+
+    // 4. Check for divergence (reversal signal)
+    const divergence = this.checkDivergence(klines, direction);
+    if (divergence.detected) {
+      signals.score += 2;
+      signals.type = 'DIVERGENCE';
+      signals.reasons.push(`${divergence.type} divergence`);
+    }
+
+    // 5. Volume confirmation
+    if (volumeSpike >= RISK_CONFIG.min_volume_ratio) {
+      signals.score += 2;
+      signals.reasons.push(`volume ${volumeSpike.toFixed(1)}x avg`);
+    }
+
+    // Decision: Ready if score >= 6 AND has clear type
+    signals.ready = signals.score >= 6;
+    
+    // Suggest entry price
+    if (signals.ready) {
+      signals.entryPrice = this.suggestEntryPrice(klines, direction, signals.type);
+    }
+
+    return signals;
+  }
+
+  checkBreakoutConfirmation(klines, direction) {
+    if (!klines || klines.length < 5) return { confirmed: false, volumeOk: false, strength: 'weak' };
+    
+    const breakoutCandle = klines[klines.length - 2];
+    const confirmCandle = klines[klines.length - 1];
+    
+    const breakOpen = parseFloat(breakoutCandle[1]);
+    const breakClose = parseFloat(breakoutCandle[4]);
+    const breakHigh = parseFloat(breakoutCandle[2]);
+    const breakLow = parseFloat(breakoutCandle[3]);
+    const breakVol = parseFloat(breakoutCandle[5]);
+    
+    const confirmClose = parseFloat(confirmCandle[4]);
+    const confirmVol = parseFloat(confirmCandle[5]);
+    
+    // Calculate average volume (last 20 candles)
+    const avgVol = klines.slice(-22, -2).reduce((s, k) => s + parseFloat(k[5]), 0) / 20;
+    
+    const isLong = direction === 'LONG';
+    const breakoutDirection = isLong ? breakClose > breakOpen : breakClose < breakOpen;
+    const breakoutMove = Math.abs((breakClose - breakOpen) / breakOpen) * 100;
+    const confirmationHolds = isLong ? confirmClose > breakClose * 0.998 : confirmClose < breakClose * 1.002;
+    const volumeOk = breakVol > avgVol * 1.5 && confirmVol > avgVol * 1.2;
+    
+    let strength = 'weak';
+    if (breakoutMove > 1.5 && volumeOk && confirmationHolds) strength = 'strong';
+    else if (breakoutMove > 0.8 && volumeOk) strength = 'moderate';
+    
+    return {
+      confirmed: breakoutDirection && confirmationHolds,
+      volumeOk,
+      strength,
+      breakoutPrice: breakClose,
+      movePercent: parseFloat(breakoutMove.toFixed(2))
+    };
+  }
+
+  checkRetestOpportunity(klines, direction, currentPrice) {
+    if (!klines || klines.length < 10) return { available: false };
+    
+    const highs = klines.map(k => parseFloat(k[2]));
+    const lows = klines.map(k => parseFloat(k[3]));
+    const closes = klines.map(k => parseFloat(k[4]));
+    
+    if (direction === 'LONG') {
+      // Find recent resistance level
+      const recentHighs = highs.slice(-10);
+      const resistance = Math.max(...recentHighs);
+      const distanceToResistance = ((resistance - currentPrice) / currentPrice) * 100;
+      
+      // Look for retest of broken resistance (now support)
+      const brokenResistance = highs.slice(-20, -10).reduce((a, b) => Math.max(a, b), 0);
+      const retestLevel = brokenResistance;
+      const distanceToRetest = ((currentPrice - retestLevel) / currentPrice) * 100;
+      
+      if (distanceToRetest < 1.0 && distanceToRetest > -0.5) {
+        return { available: true, level: retestLevel, estimatedWait: 0 };
+      }
+    } else {
+      // For SHORT: Find support turned resistance
+      const recentLows = lows.slice(-10);
+      const support = Math.min(...recentLows);
+      const brokenSupport = lows.slice(-20, -10).reduce((a, b) => Math.min(a, b), 0);
+      const retestLevel = brokenSupport;
+      const distanceToRetest = ((retestLevel - currentPrice) / currentPrice) * 100;
+      
+      if (distanceToRetest < 1.0 && distanceToRetest > -0.5) {
+        return { available: true, level: retestLevel, estimatedWait: 0 };
+      }
+    }
+    
+    return { available: false };
+  }
+
+  checkLiquiditySweepPattern(klines, direction) {
+    if (!klines || klines.length < 6) return { detected: false, recovery: false };
+    
+    const recent = klines.slice(-6);
+    const lows = recent.map(k => parseFloat(k[3]));
+    const highs = recent.map(k => parseFloat(k[2]));
+    const closes = recent.map(k => parseFloat(k[4]));
+    const opens = recent.map(k => parseFloat(k[1]));
+    
+    if (direction === 'LONG') {
+      // Look for: sweep below recent low → immediate recovery
+      const recentLow = Math.min(...lows.slice(0, -2));
+      const sweepLow = lows[lows.length - 2];
+      const recovered = closes[closes.length - 1] > opens[opens.length - 1] && 
+                        closes[closes.length - 1] > recentLow;
+      
+      if (sweepLow < recentLow * 0.998 && recovered) {
+        return { detected: true, recovery: true, level: sweepLow };
+      }
+    } else {
+      // For SHORT: sweep above recent high → immediate drop
+      const recentHigh = Math.max(...highs.slice(0, -2));
+      const sweepHigh = highs[highs.length - 2];
+      const recovered = closes[closes.length - 1] < opens[opens.length - 1] && 
+                        closes[closes.length - 1] < recentHigh;
+      
+      if (sweepHigh > recentHigh * 1.002 && recovered) {
+        return { detected: true, recovery: true, level: sweepHigh };
+      }
+    }
+    
+    return { detected: false, recovery: false };
+  }
+
+  checkDivergence(klines, direction) {
+    if (!klines || klines.length < 30) return { detected: false };
+    
+    const closes = klines.map(k => parseFloat(k[4]));
+    const rsi = this.calculateRSI(closes);
+    
+    // Get last 10 values
+    const recentCloses = closes.slice(-10);
+    const recentRSI = rsi.slice(-10);
+    
+    if (direction === 'LONG') {
+      // Bullish divergence: lower lows in price, higher lows in RSI
+      const priceLow = Math.min(...recentCloses);
+      const prevPriceLow = Math.min(...closes.slice(-20, -10));
+      const rsiLow = Math.min(...recentRSI);
+      const prevRsiLow = Math.min(...rsi.slice(-20, -10));
+      
+      if (priceLow < prevPriceLow && rsiLow > prevRsiLow) {
+        return { detected: true, type: 'bullish' };
+      }
+    } else {
+      // Bearish divergence: higher highs in price, lower highs in RSI
+      const priceHigh = Math.max(...recentCloses);
+      const prevPriceHigh = Math.max(...closes.slice(-20, -10));
+      const rsiHigh = Math.max(...recentRSI);
+      const prevRsiHigh = Math.max(...rsi.slice(-20, -10));
+      
+      if (priceHigh > prevPriceHigh && rsiHigh < prevRsiHigh) {
+        return { detected: true, type: 'bearish' };
+      }
+    }
+    
+    return { detected: false };
+  }
+
+  suggestEntryPrice(klines, direction, entryType) {
+    const lastClose = parseFloat(klines[klines.length - 1][4]);
+    
+    if (entryType === 'RETEST') {
+      // Enter on retest of broken level
+      const highs = klines.map(k => parseFloat(k[2]));
+      const brokenLevel = Math.max(...highs.slice(-20, -10));
+      return brokenLevel;
+    } else if (entryType === 'LIQUIDITY_SWEEP') {
+      // Enter after sweep recovery
+      return lastClose;
+    } else {
+      // Standard breakout entry
+      return lastClose;
+    }
+  }
+
+  calculateRSI(closes, period = 14) {
+    const rsi = [];
+    let gains = 0, losses = 0;
+    
+    for (let i = 1; i < closes.length; i++) {
+      const diff = closes[i] - closes[i-1];
+      if (diff >= 0) gains += diff;
+      else losses -= diff;
+      
+      if (i >= period) {
+        const avgGain = gains / period;
+        const avgLoss = losses / period;
+        const rs = avgGain / avgLoss;
+        const rsiValue = 100 - (100 / (1 + rs));
+        rsi.push(rsiValue);
+        
+        // Slide window
+        const removeDiff = closes[i - period + 1] - closes[i - period];
+        if (removeDiff >= 0) gains -= removeDiff;
+        else losses += removeDiff;
+      }
+    }
+    return rsi;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #4: CONFIRMATION LAYERS (Multi-step verification)
+// ─────────────────────────────────────────────────────────────────────────────
+class ConfirmationLayers {
+  constructor() {
+    this.layers = [
+      { name: 'HTF_TREND', required: true, weight: 25 },
+      { name: 'PRICE_ACTION', required: true, weight: 20 },
+      { name: 'VOLUME_CONFIRMATION', required: true, weight: 15 },
+      { name: 'ORDER_FLOW', required: false, weight: 10 },
+      { name: 'LIQUIDITY', required: false, weight: 10 },
+      { name: 'SENTIMENT', required: false, weight: 10 },
+      { name: 'TIMING', required: true, weight: 10 },
+    ];
+  }
+
+  async verify(symbol, price, direction, klines, funding, lsRatio, volumeSpike) {
+    const results = {};
+    let totalScore = 0;
+    let maxScore = 0;
+    const failedRequired = [];
+
+    // Layer 1: HTF Trend
+    const analyzer = new DirectionAnalyzer();
+    const htf = await analyzer.checkHTFTrend(symbol);
+    results.HTF_TREND = {
+      passed: direction === 'LONG' ? htf.bullish : htf.bearish,
+      score: direction === 'LONG' ? (htf.bullish ? 25 : 0) : (htf.bearish ? 25 : 0)
+    };
+    if (results.HTF_TREND.passed) totalScore += 25;
+    else if (this.layers.find(l => l.name === 'HTF_TREND').required) failedRequired.push('HTF_TREND');
+    maxScore += 25;
+
+    // Layer 2: Price Action
+    const pa = analyzer.checkPriceAction(klines, price);
+    results.PRICE_ACTION = {
+      passed: direction === 'LONG' ? pa.bullish : pa.bearish,
+      score: direction === 'LONG' ? (pa.bullish ? 20 : 0) : (pa.bearish ? 20 : 0)
+    };
+    if (results.PRICE_ACTION.passed) totalScore += 20;
+    else if (this.layers.find(l => l.name === 'PRICE_ACTION').required) failedRequired.push('PRICE_ACTION');
+    maxScore += 20;
+
+    // Layer 3: Volume Confirmation
+    const volumeOk = volumeSpike >= RISK_CONFIG.min_volume_ratio;
+    results.VOLUME_CONFIRMATION = {
+      passed: volumeOk,
+      score: volumeOk ? 15 : 0,
+      details: `${volumeSpike.toFixed(1)}x avg`
+    };
+    if (results.VOLUME_CONFIRMATION.passed) totalScore += 15;
+    else if (this.layers.find(l => l.name === 'VOLUME_CONFIRMATION').required) failedRequired.push('VOLUME_CONFIRMATION');
+    maxScore += 15;
+
+    // Layer 4: Order Flow
+    const orderFlow = await analyzer.checkOrderFlow(symbol, price);
+    results.ORDER_FLOW = {
+      passed: direction === 'LONG' ? orderFlow.bullish : orderFlow.bearish,
+      score: direction === 'LONG' ? (orderFlow.bullish ? 10 : 0) : (orderFlow.bearish ? 10 : 0),
+      details: `imbalance ${orderFlow.imbalance || 0}`
+    };
+    totalScore += results.ORDER_FLOW.score;
+    maxScore += 10;
+
+    // Layer 5: Liquidity
+    const timing = new EntryTimingAnalyzer();
+    const liquidity = timing.checkLiquiditySweepPattern(klines, direction);
+    results.LIQUIDITY = {
+      passed: liquidity.detected && liquidity.recovery,
+      score: (liquidity.detected && liquidity.recovery) ? 10 : 0,
+      details: liquidity.detected ? 'sweep+recovery' : 'none'
+    };
+    totalScore += results.LIQUIDITY.score;
+    maxScore += 10;
+
+    // Layer 6: Sentiment
+    const sentiment = analyzer.checkSentiment(funding, lsRatio);
+    results.SENTIMENT = {
+      passed: direction === 'LONG' ? sentiment.bullish : sentiment.bearish,
+      score: direction === 'LONG' ? (sentiment.bullish ? 10 : 0) : (sentiment.bearish ? 10 : 0),
+      details: `funding ${funding.toFixed(3)}% ls ${lsRatio.toFixed(2)}`
+    };
+    totalScore += results.SENTIMENT.score;
+    maxScore += 10;
+
+    // Layer 7: Timing
+    const entryTiming = await timing.analyze(symbol, price, direction, klines, volumeSpike);
+    results.TIMING = {
+      passed: entryTiming.ready,
+      score: entryTiming.ready ? 10 : 0,
+      details: entryTiming.type || 'waiting',
+      waitTime: entryTiming.waitTime,
+      entryPrice: entryTiming.entryPrice
+    };
+    if (results.TIMING.passed) totalScore += 10;
+    else if (this.layers.find(l => l.name === 'TIMING').required) failedRequired.push('TIMING');
+    maxScore += 10;
+
+    const overallScore = (totalScore / maxScore) * 100;
+    const passed = failedRequired.length === 0 && overallScore >= 70;
+
+    return {
+      passed,
+      score: parseFloat(overallScore.toFixed(1)),
+      layers: results,
+      failedRequired,
+      entryPrice: results.TIMING.entryPrice
+    };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #5: MARKET REGIME CLASSIFIER (Adapts to conditions)
+// ─────────────────────────────────────────────────────────────────────────────
+class MarketRegimeClassifier {
+  constructor() {
+    this.regimes = {
+      TRENDING: { name: 'TRENDING', riskMultiplier: 1.0, minScore: 65 },
+      RANGING: { name: 'RANGING', riskMultiplier: 0.5, minScore: 75 },
+      VOLATILE: { name: 'VOLATILE', riskMultiplier: 0.3, minScore: 80 },
+      SILENT: { name: 'SILENT', riskMultiplier: 0, minScore: 999 }  // No trades
+    };
+  }
+
+  async classify(btcData, altsData) {
+    // Analyze BTC first
+    const btcRegime = await this.analyzeBTC(btcData);
+    
+    // Then analyze overall market
+    const marketRegime = await this.analyzeMarket(altsData);
+    
+    // Combine regimes (most conservative wins)
+    let finalRegime = this.regimes.TRENDING;
+    let regimeScore = 100;
+    
+    for (const regime of Object.values(this.regimes)) {
+      if (btcRegime.riskMultiplier < finalRegime.riskMultiplier) {
+        finalRegime = regime;
+        regimeScore = btcRegime.score;
+      }
+      if (marketRegime.riskMultiplier < finalRegime.riskMultiplier) {
+        finalRegime = regime;
+        regimeScore = Math.min(regimeScore, marketRegime.score);
+      }
+    }
+    
+    return {
+      regime: finalRegime.name,
+      riskMultiplier: finalRegime.riskMultiplier,
+      score: regimeScore,
+      allowTrading: finalRegime.riskMultiplier > 0,
+      positionSizeMultiplier: finalRegime.riskMultiplier,
+      btc: btcRegime,
+      market: marketRegime
+    };
+  }
+
+  async analyzeBTC(btcData) {
+    const { klines, change24h, atr } = btcData;
+    if (!klines || klines.length < 50) return this.regimes.SILENT;
+    
+    const closes = klines.map(k => parseFloat(k[4]));
+    const ranges = klines.map(k => parseFloat(k[2]) - parseFloat(k[3]));
+    const avgRange = ranges.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const atrPct = (avgRange / closes[closes.length - 1]) * 100;
+    
+    // Check if trending (ADX-like calculation simplified)
+    const highs = klines.map(k => parseFloat(k[2]));
+    const lows = klines.map(k => parseFloat(k[3]));
+    let plusDM = 0, minusDM = 0;
+    for (let i = 1; i < 14; i++) {
+      const upMove = highs[i] - highs[i-1];
+      const downMove = lows[i-1] - lows[i];
+      if (upMove > downMove && upMove > 0) plusDM += upMove;
+      else if (downMove > upMove && downMove > 0) minusDM += downMove;
+    }
+    const tr = ranges.slice(-14).reduce((a, b) => a + b, 0) / 14;
+    const plusDI = (plusDM / tr) * 100;
+    const minusDI = (minusDM / tr) * 100;
+    const adx = Math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100;
+    
+    const isTrending = adx > 25;
+    const isVolatile = atrPct > 3.5;
+    const isRanging = !isTrending && atrPct < 2.5;
+    const isSilent = atrPct < 1.0;
+    
+    if (isSilent) return { ...this.regimes.SILENT, score: 30 };
+    if (isVolatile) return { ...this.regimes.VOLATILE, score: 60 };
+    if (isTrending) return { ...this.regimes.TRENDING, score: 85 };
+    if (isRanging) return { ...this.regimes.RANGING, score: 70 };
+    
+    return { ...this.regimes.SILENT, score: 50 };
+  }
+
+  async analyzeMarket(altsData) {
+    if (!altsData || altsData.length === 0) return this.regimes.TRENDING;
+    
+    // Calculate market breadth (how many alts are moving together)
+    let bullishCount = 0;
+    let totalVol = 0;
+    
+    for (const alt of altsData.slice(0, 20)) {
+      if (alt.change24h > 0) bullishCount++;
+      totalVol += alt.volume;
+    }
+    
+    const breadth = (bullishCount / Math.min(20, altsData.length)) * 100;
+    const avgVol = totalVol / Math.min(20, altsData.length);
+    
+    if (breadth > 70) return { ...this.regimes.TRENDING, score: 85 };  // Strong uptrend
+    if (breadth < 30) return { ...this.regimes.TRENDING, score: 80, riskMultiplier: 0.8 };  // Downtrend (short bias)
+    if (breadth > 40 && breadth < 60) return { ...this.regimes.RANGING, score: 70 };
+    if (avgVol < 1000000) return { ...this.regimes.SILENT, score: 40 };
+    
+    return { ...this.regimes.TRENDING, score: 75 };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POSITION MANAGER (With proper risk management)
+// ─────────────────────────────────────────────────────────────────────────────
+class PositionManager {
+  constructor() {
+    this.positions = [];
+  }
+
+  calculatePositionSize(accountBalance, entryPrice, stopLoss, confidence, regimeMultiplier) {
+    // Base risk (1% of account)
+    const riskAmount = accountBalance * (RISK_CONFIG.max_risk_per_trade_pct / 100);
+    
+    // Calculate stop loss percentage
+    const stopPct = Math.abs((stopLoss - entryPrice) / entryPrice) * 100;
+    
+    // Calculate position size based on risk
+    let positionSize = riskAmount / (stopPct / 100);
+    
+    // Adjust for confidence (70-100% confidence scales 0.5x to 1.5x)
+    const confidenceMultiplier = 0.5 + (confidence / 100);
+    
+    // Adjust for market regime
+    const regimeMultiplierValue = regimeMultiplier;
+    
+    // Final size with all adjustments
+    positionSize = positionSize * confidenceMultiplier * regimeMultiplierValue;
+    
+    // Cap at max position size
+    const maxSize = accountBalance * (RISK_CONFIG.max_position_size_pct / 100);
+    positionSize = Math.min(positionSize, maxSize);
+    
+    return parseFloat(positionSize.toFixed(2));
+  }
+
+  async openPosition(symbol, direction, entryPrice, stopLoss, tp1, tp2, confidence, accountBalance, regimeMultiplier) {
+    const positionSize = this.calculatePositionSize(accountBalance, entryPrice, stopLoss, confidence, regimeMultiplier);
+    const riskAmount = Math.abs(entryPrice - stopLoss) * positionSize;
+    
+    const position = {
+      id: `${symbol}_${Date.now()}`,
+      symbol,
+      direction,
+      entryPrice,
+      stopLoss,
+      tp1,
+      tp2,
+      size: positionSize,
+      riskAmount,
+      confidence,
+      openTime: Date.now(),
+      status: 'OPEN',
+      trailingActivated: false,
+      highestPrice: entryPrice,
+      lowestPrice: entryPrice,
+    };
+    
+    this.positions.push(position);
+    account.open_positions.push(position);
+    
+    // Deduct from balance (simulated)
+    account.balance -= (positionSize * entryPrice);
+    
+    return position;
+  }
+
+  async updatePositions(currentPrices) {
+    const closedPositions = [];
+    
+    for (const pos of this.positions) {
+      const currentPrice = currentPrices[pos.symbol];
+      if (!currentPrice) continue;
+      
+      const isLong = pos.direction === 'LONG';
+      let shouldClose = false;
+      let closeReason = '';
+      let exitPrice = currentPrice;
+      
+      // Update highest/lowest for trailing
+      if (isLong && currentPrice > pos.highestPrice) pos.highestPrice = currentPrice;
+      if (!isLong && currentPrice < pos.lowestPrice) pos.lowestPrice = currentPrice;
+      
+      // Check TP1
+      if (isLong && currentPrice >= pos.tp1) {
+        shouldClose = true;
+        closeReason = 'TP1_HIT';
+        exitPrice = pos.tp1;
+      } else if (!isLong && currentPrice <= pos.tp1) {
+        shouldClose = true;
+        closeReason = 'TP1_HIT';
+        exitPrice = pos.tp1;
+      }
+      
+      // Check SL
+      else if (isLong && currentPrice <= pos.stopLoss) {
+        shouldClose = true;
+        closeReason = 'SL_HIT';
+        exitPrice = pos.stopLoss;
+      } else if (!isLong && currentPrice >= pos.stopLoss) {
+        shouldClose = true;
+        closeReason = 'SL_HIT';
+        exitPrice = pos.stopLoss;
+      }
+      
+      // Trailing stop after 1% profit
+      if (!shouldClose && RISK_CONFIG.trailing_activation_pct > 0) {
+        const profitPct = isLong 
+          ? ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100
+          : ((pos.entryPrice - currentPrice) / pos.entryPrice) * 100;
+        
+        if (profitPct >= RISK_CONFIG.trailing_activation_pct) {
+          if (!pos.trailingActivated) {
+            pos.trailingActivated = true;
+          } else {
+            const trailStop = isLong
+              ? pos.highestPrice * (1 - RISK_CONFIG.trailing_distance_pct / 100)
+              : pos.lowestPrice * (1 + RISK_CONFIG.trailing_distance_pct / 100);
+            
+            if (isLong && currentPrice <= trailStop) {
+              shouldClose = true;
+              closeReason = 'TRAILING_STOP';
+              exitPrice = currentPrice;
+            } else if (!isLong && currentPrice >= trailStop) {
+              shouldClose = true;
+              closeReason = 'TRAILING_STOP';
+              exitPrice = currentPrice;
+            }
+          }
+        }
+      }
+      
+      // Timeout after max hold hours
+      const holdHours = (Date.now() - pos.openTime) / 3600000;
+      if (!shouldClose && holdHours >= RISK_CONFIG.max_hold_hours) {
+        shouldClose = true;
+        closeReason = 'TIMEOUT';
+      }
+      
+      if (shouldClose) {
+        // Calculate PnL
+        const pnl = isLong
+          ? (exitPrice - pos.entryPrice) * pos.size
+          : (pos.entryPrice - exitPrice) * pos.size;
+        
+        const pnlPct = isLong
+          ? ((exitPrice - pos.entryPrice) / pos.entryPrice) * 100
+          : ((pos.entryPrice - exitPrice) / pos.entryPrice) * 100;
+        
+        // Update account
+        account.balance += (exitPrice * pos.size);
+        account.daily_pnl += pnl;
+        account.weekly_pnl += pnl;
+        
+        if (pnl > 0) {
+          if (account.balance > account.peak_balance) account.peak_balance = account.balance;
+          account.consecutive_losses = 0;
+        } else {
+          account.consecutive_losses++;
+        }
+        
+        // Record trade
+        const trade = {
+          ...pos,
+          exitPrice,
+          pnl,
+          pnlPct: parseFloat(pnlPct.toFixed(2)),
+          closeReason,
+          closeTime: Date.now(),
+        };
+        account.trade_history.push(trade);
+        closedPositions.push(trade);
+        
+        // Send notification for TP/SL
+        if (closeReason === 'TP1_HIT') {
+          await tg(OWNER_CHAT_ID, `✅ <b>${pos.symbol.replace('USDT', '')} TP1 HIT</b>\nProfit: +${pnlPct.toFixed(1)}% | +$${pnl.toFixed(2)}\nMove SL to entry`);
+        } else if (closeReason === 'SL_HIT') {
+          await tg(OWNER_CHAT_ID, `❌ <b>${pos.symbol.replace('USDT', '')} SL HIT</b>\nLoss: ${pnlPct.toFixed(1)}% | -$${Math.abs(pnl).toFixed(2)}`);
+        }
+      }
+    }
+    
+    // Remove closed positions
+    this.positions = this.positions.filter(p => !closedPositions.find(c => c.id === p.id));
+    account.open_positions = account.open_positions.filter(p => !closedPositions.find(c => c.id === p.id));
+    
+    return closedPositions;
+  }
+
+  getOpenPositions() {
+    return this.positions;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RISK MONITOR (Daily/Weekly loss limits)
+// ─────────────────────────────────────────────────────────────────────────────
+class RiskMonitor {
+  constructor() {
+    this.resetDailyIfNeeded();
+    this.resetWeeklyIfNeeded();
+  }
+
+  resetDailyIfNeeded() {
+    const today = new Date().toDateString();
+    if (account.daily_date !== today) {
+      account.daily_pnl = 0;
+      account.daily_date = today;
+      account.consecutive_losses = 0;
+    }
+  }
+
+  resetWeeklyIfNeeded() {
+    const weekStart = getWeekStart();
+    if (account.weekly_date !== weekStart) {
+      account.weekly_pnl = 0;
+      account.weekly_date = weekStart;
+    }
+  }
+
+  canTrade() {
+    this.resetDailyIfNeeded();
+    this.resetWeeklyIfNeeded();
+    
+    const dailyLossPct = (Math.abs(account.daily_pnl) / account.peak_balance) * 100;
+    const weeklyLossPct = (Math.abs(account.weekly_pnl) / account.peak_balance) * 100;
+    
+    if (dailyLossPct >= RISK_CONFIG.max_daily_loss_pct) {
+      return { allowed: false, reason: `Daily loss limit reached (${dailyLossPct.toFixed(1)}% / ${RISK_CONFIG.max_daily_loss_pct}%)` };
+    }
+    
+    if (weeklyLossPct >= RISK_CONFIG.max_weekly_loss_pct) {
+      return { allowed: false, reason: `Weekly loss limit reached (${weeklyLossPct.toFixed(1)}% / ${RISK_CONFIG.max_weekly_loss_pct}%)` };
+    }
+    
+    if (account.consecutive_losses >= RISK_CONFIG.max_consecutive_losses) {
+      return { allowed: false, reason: `${account.consecutive_losses} consecutive losses - cooling down` };
+    }
+    
+    if (account.open_positions.length >= RISK_CONFIG.max_concurrent_positions) {
+      return { allowed: false, reason: `Max concurrent positions (${RISK_CONFIG.max_concurrent_positions})` };
+    }
+    
+    return { allowed: true, reason: '' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UTILITY FUNCTIONS (Keep existing)
+// ─────────────────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const gstNow = () => new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Dubai' });
+const log = (...a) => console.log(`[${gstNow()}]`, ...a);
+const fmtP = p => p >= 1000 ? p.toLocaleString('en-US', { minimumFractionDigits: 2 }) : p >= 1 ? p.toFixed(3) : p.toFixed(5);
+
 const fetchJSON = async (url, timeout = 8000) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
@@ -433,7 +1024,7 @@ const sb = async (path, options = {}) => {
       ...options,
       headers: {
         'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates',
+        'Content-Type': 'application/json',
         ...options.headers,
       },
     });
@@ -442,25 +1033,6 @@ const sb = async (path, options = {}) => {
     return text ? JSON.parse(text) : null;
   } catch { return null; }
 };
-
-// ── SUPABASE FUNCTIONS (keep as is) ─────────────────────────────────────────
-const getWatchlist = async () => (await sb('watchlist?select=symbol,score,direction,updated_at,added_by')) || [];
-const addToWatchlist = async (symbol, score, direction) => sb('watchlist', {
-  method: 'POST',
-  body: JSON.stringify({ symbol, score, direction, added_by: 'server', updated_at: new Date().toISOString() }),
-});
-const removeFromWatchlist = async symbol => sb(`watchlist?symbol=eq.${symbol}`, { method: 'DELETE' });
-const updateWatchlistScore = async (symbol, score, direction) => sb(`watchlist?symbol=eq.${symbol}`, {
-  method: 'PATCH',
-  body: JSON.stringify({ score, direction, updated_at: new Date().toISOString() }),
-});
-const getAllUsers = async () => (await sb('bot_users?is_active=eq.true&select=chat_id')) || [];
-const getPremiumUsers = async () => (await sb('bot_users?is_premium=eq.true&is_active=eq.true&select=chat_id')) || [];
-const savePayment = async (chatId, username, txid) => sb('subscriptions', {
-  method: 'POST',
-  body: JSON.stringify({ user_id: chatId, email: username, txid, plan: 'premium', status: 'pending', amount_paid: PRICE_USD, currency: 'USDT', created_at: new Date().toISOString() }),
-});
-const getPendingPayments = async () => (await sb('subscriptions?status=eq.pending&select=*')) || [];
 
 const tg = async (chatId, text) => {
   try {
@@ -479,581 +1051,428 @@ const postSignal = async text => {
   }
 };
 
-const logPaperTrade = async (signal) => {
-  try {
-    await sb('paper_trades', {
-      method: 'POST',
-      body: JSON.stringify({
-        symbol: signal.symbol, direction: signal.direction, signal_type: signal.type,
-        entry: signal.price, sl: signal.sl, tp1: signal.tp1, tp2: signal.tp2,
-        score: signal.score, created_at: new Date().toISOString(), status: 'OPEN'
-      }),
-    });
-  } catch (err) { log('Paper log error:', err.message); }
-};
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN SCANNER (Integrates all fixes)
+// ─────────────────────────────────────────────────────────────────────────────
+const directionAnalyzer = new DirectionAnalyzer();
+const entryTiming = new EntryTimingAnalyzer();
+const confirmationLayers = new ConfirmationLayers();
+const regimeClassifier = new MarketRegimeClassifier();
+const positionManager = new PositionManager();
+const riskMonitor = new RiskMonitor();
 
-// ── CHECK BTC GATE (keep as is) ─────────────────────────────────────────────
+let fullScanCount = 0;
+let watchlistScanCount = 0;
+let btcGateStatus = { pass: true, reason: 'Starting up', price: 0, change: 0 };
+const alertHistory = new Map();
+const coinTracker = new Map();
+
+const canAlert = k => !alertHistory.has(k) || Date.now() - alertHistory.get(k) > 1800000;
+const markAlert = k => alertHistory.set(k, Date.now());
+
 const checkBTCGate = async () => {
   try {
     const [klines, ticker, funding] = await Promise.all([
-      fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=8'),
+      fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=50'),
       fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
       fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
     ]);
     const price = parseFloat(ticker.lastPrice);
     const change24h = parseFloat(ticker.priceChangePercent);
     const fundRate = parseFloat(funding.lastFundingRate) * 100;
-    const open1H = parseFloat(klines[klines.length - 4][1]);
-    const close1H = parseFloat(klines[klines.length - 1][4]);
-    const change1H = ((close1H - open1H) / open1H) * 100;
-    const latestOpen = parseFloat(klines[klines.length - 1][1]);
-    const latestClose = parseFloat(klines[klines.length - 1][4]);
-    const candleGreen = latestClose >= latestOpen;
+    const closes = klines.map(k => parseFloat(k[4]));
+    const change1h = ((closes[closes.length-1] - closes[closes.length-5]) / closes[closes.length-5]) * 100;
+    
     let pass = true, reason = '✅ BTC stable';
-    if (change1H < -0.8) { pass = false; reason = `🔴 BTC dumping ${change1H.toFixed(2)}% in 1H`; }
-    else if (change24h < -3) { pass = false; reason = `🔴 BTC down ${change24h.toFixed(2)}% 24h`; }
-    else if (fundRate > 0.02) { pass = false; reason = `⚠️ BTC funding ${fundRate.toFixed(3)}%`; }
-    const emoji = change24h < -2 ? '🔴' : change24h < 0 ? '🟡' : '🟢';
-    btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji };
+    if (change1h < -1.0) { pass = false; reason = `🔴 BTC dumping ${change1h.toFixed(2)}% in 1H`; }
+    else if (change24h < -4) { pass = false; reason = `🔴 BTC down ${change24h.toFixed(2)}% 24h`; }
+    else if (fundRate > 0.03) { pass = false; reason = `⚠️ BTC funding ${fundRate.toFixed(3)}% — overheated`; }
+    
+    const ema20 = directionAnalyzer.calcEMA(closes, 20);
+    const ema50 = directionAnalyzer.calcEMA(closes, 50);
+    const trend = price > ema20 && ema20 > ema50 ? 'bullish' : price < ema20 && ema20 < ema50 ? 'bearish' : 'neutral';
+    
+    const emoji = trend === 'bullish' ? '🟢' : trend === 'bearish' ? '🔴' : '🟡';
+    btcGateStatus = { pass, reason, price, change: change24h, change1h, funding: fundRate, emoji, trend };
     return btcGateStatus;
   } catch {
     return { pass: true, reason: '⚠️ BTC data unavailable', price: 0, change: 0 };
   }
 };
 
-// ── LAYER FUNCTIONS (keep compression, volume, resistance, fundingLS, trap) ──
-const checkCompression = (klines, currentOI, prevOI) => {
-  if (!klines || klines.length < 6) return { score: 0, compressed: false, oiBuilding: false, tightening: false, range: 99 };
-  const recent = klines.slice(-6);
-  const highs = recent.map(k => parseFloat(k[2]));
-  const lows = recent.map(k => parseFloat(k[3]));
-  const mid = (Math.max(...highs) + Math.min(...lows)) / 2;
-  const range = mid > 0 ? ((Math.max(...highs) - Math.min(...lows)) / mid) * 100 : 99;
-  const compressed = range < 4.0;
-  const oiBuilding = prevOI > 0 && currentOI > prevOI * 1.02;
-  const ranges = recent.map(k => parseFloat(k[2]) - parseFloat(k[3]));
-  const tightening = ranges[ranges.length-1] < ranges[0] * 0.7;
-  let score = 0;
-  if (compressed && oiBuilding) score += 4;
-  else if (compressed) score += 2.5;
-  else if (oiBuilding) score += 1.5;
-  if (tightening) score += 1;
-  return { score, compressed, oiBuilding, tightening, range: parseFloat(range.toFixed(2)) };
-};
-
-const checkVolumeBuild = (klines) => {
-  if (!klines || klines.length < 6) return { score: 0, building: false, spike: 0, gradual: false };
-  const vols = klines.map(k => parseFloat(k[5]));
-  const recent = vols.slice(-4);
-  const base = vols.slice(0, -4);
-  const avgBase = base.reduce((a, b) => a + b, 0) / (base.length || 1);
-  const gradual = recent[0] < recent[1] && recent[1] < recent[2];
-  const latestSpike = avgBase > 0 ? recent[recent.length-1] / avgBase : 0;
-  const closes = klines.map(k => parseFloat(k[4]));
-  const priceChange = closes[0] > 0 ? Math.abs((closes[closes.length-1] - closes[0]) / closes[0]) * 100 : 0;
-  const quietAccum = latestSpike >= 1.5 && priceChange < 3;
-  let score = 0;
-  if (quietAccum) score += 3;
-  else if (latestSpike >= 2) score += 2;
-  else if (latestSpike >= 1.5) score += 1.5;
-  if (gradual) score += 1;
-  return { score, building: quietAccum, spike: parseFloat(latestSpike.toFixed(1)), gradual };
-};
-
-const checkResistanceTesting = (symbol, price, klines) => {
-  if (!klines || klines.length < 6) return { score: 0, tests: 0, pressure: false, resistanceLevel: price };
-  const highs = klines.map(k => parseFloat(k[2]));
-  const maxH = Math.max(...highs);
-  const tolerance = maxH * 0.005;
-  const tests = highs.filter(h => Math.abs(h - maxH) <= tolerance).length;
-  const testVols = klines.filter(k => Math.abs(parseFloat(k[2]) - maxH) <= tolerance).map(k => parseFloat(k[5]));
-  const volInc = testVols.length >= 2 && testVols[testVols.length-1] > testVols[0];
-  const prev = resistanceMap.get(symbol) || { level: maxH, tests: 0 };
-  if (Math.abs(maxH - prev.level) / (prev.level || 1) < 0.01) {
-    resistanceMap.set(symbol, { level: maxH, tests: Math.max(tests, prev.tests) });
-  } else {
-    resistanceMap.set(symbol, { level: maxH, tests });
-  }
-  const totalTests = resistanceMap.get(symbol).tests;
-  const pressure = totalTests >= 3 && volInc;
-  let score = 0;
-  if (pressure) score += 3;
-  else if (totalTests >= 3) score += 2;
-  else if (totalTests >= 2) score += 1;
-  return { score, tests: totalTests, pressure, resistanceLevel: parseFloat(maxH.toFixed(5)) };
-};
-
-const checkFundingLS = (funding, ls, direction) => {
-  let score = 0;
-  if (direction === 'LONG') {
-    if (funding < -0.01) score += 2;
-    else if (funding < 0) score += 1;
-    else if (funding < 0.005) score += 0.5;
-    if (ls < 0.85) score += 2;
-    else if (ls < 0.95) score += 1;
-    else if (ls < 1.05) score += 0.5;
-  } else {
-    if (funding > 0.02) score += 2;
-    else if (funding > 0.01) score += 1;
-    if (ls > 1.3) score += 2;
-    else if (ls > 1.15) score += 1;
-  }
-  return { score: Math.min(score, 3), funding, ls };
-};
-
-const checkCandleQuality = (klines, direction) => {
-  if (!klines || klines.length < 2) return { verdict: 'UNKNOWN', bodyPct: 0, upperWickPct: 0, lowerWickPct: 0 };
-  const recent = klines.slice(-3);
-  const results = recent.map(k => {
-    const open = parseFloat(k[1]), high = parseFloat(k[2]), low = parseFloat(k[3]), close = parseFloat(k[4]);
-    const range = high - low;
-    if (range === 0) return { bodyPct: 0, upperWickPct: 0, lowerWickPct: 0, isGreen: false };
-    const body = Math.abs(close - open);
-    const upperWick = high - Math.max(open, close);
-    const lowerWick = Math.min(open, close) - low;
-    return { bodyPct: parseFloat((body / range * 100).toFixed(1)), upperWickPct: parseFloat((upperWick / range * 100).toFixed(1)), lowerWickPct: parseFloat((lowerWick / range * 100).toFixed(1)), isGreen: close >= open };
-  });
-  const latest = results[results.length - 1];
-  let verdict, emoji, details;
-  if (direction === 'LONG') {
-    if (latest.bodyPct >= 60 && latest.upperWickPct <= 25 && latest.isGreen) { verdict = 'STRONG'; emoji = '✅'; details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}%`; }
-    else if (latest.upperWickPct > 60 || latest.bodyPct < 25) { verdict = 'FAKE'; emoji = '❌'; details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}% — rejection`; }
-    else { verdict = 'WEAK'; emoji = '⚠️'; details = `Body ${latest.bodyPct}% • Wick ${latest.upperWickPct}%`; }
-  } else {
-    if (latest.bodyPct >= 60 && latest.lowerWickPct <= 25 && !latest.isGreen) { verdict = 'STRONG'; emoji = '✅'; details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}%`; }
-    else if (latest.lowerWickPct > 60 || latest.bodyPct < 25) { verdict = 'FAKE'; emoji = '❌'; details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}%`; }
-    else { verdict = 'WEAK'; emoji = '⚠️'; details = `Body ${latest.bodyPct}% • Lower wick ${latest.lowerWickPct}%`; }
-  }
-  return { verdict, emoji, details, bodyPct: latest.bodyPct, upperWickPct: latest.upperWickPct, lowerWickPct: latest.lowerWickPct, isGreen: latest.isGreen };
-};
-
-const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, klines = []) => {
-  let trapScore = 0;
-  const reasons = [];
-  if (volSpike >= 2 && !oiBuilding) { trapScore += 2; reasons.push('vol spike no OI'); }
-  try {
-    const ob = await fetchJSON(`https://fapi.binance.com/fapi/v1/depth?symbol=${symbol}&limit=50`);
-    const bids = ob.bids.map(b => ({ p: parseFloat(b[0]), q: parseFloat(b[1]) }));
-    const asks = ob.asks.map(a => ({ p: parseFloat(a[0]), q: parseFloat(a[1]) }));
-    const bidVal = bids.filter(b => b.p >= price * 0.99).reduce((s, b) => s + b.p * b.q, 0);
-    const askVal = asks.filter(a => a.p <= price * 1.01).reduce((s, a) => s + a.p * a.q, 0);
-    if (direction === 'LONG' && askVal > bidVal * 2) { trapScore += 1; reasons.push('asks dominating'); }
-  } catch { }
-  const candle = checkCandleQuality(klines, direction);
-  if (candle.verdict === 'FAKE') { trapScore += 2; reasons.push(`fake candle`); }
-  else if (candle.verdict === 'WEAK') { trapScore += 1; reasons.push(`weak candle`); }
-  return { safe: trapScore === 0, trapScore, reasons, candle };
-};
-
-const checkLiquiditySweep = (klines, direction) => {
-  if (!klines || klines.length < 4) return { swept: false, sweepLevel: null, recovery: false };
-  const recent = klines.slice(-4);
-  const lows = recent.map(k => parseFloat(k[3]));
-  const highs = recent.map(k => parseFloat(k[2]));
-  const latestClose = parseFloat(recent[recent.length - 1][4]);
-  const latestOpen = parseFloat(recent[recent.length - 1][1]);
-  if (direction === 'LONG') {
-    const recentLow = Math.min(...lows.slice(0, -1));
-    const latestLow = lows[lows.length - 1];
-    const swept = latestLow < recentLow * 0.998;
-    const recovery = latestClose > latestOpen && latestClose > recentLow;
-    return { swept, sweepLevel: recentLow, recovery };
-  } else {
-    const recentHigh = Math.max(...highs.slice(0, -1));
-    const latestHigh = highs[highs.length - 1];
-    const swept = latestHigh > recentHigh * 1.002;
-    const recovery = latestClose < latestOpen && latestClose < recentHigh;
-    return { swept, sweepLevel: recentHigh, recovery };
-  }
-};
-
-const checkExtension = (klines, price, atr) => {
-  if (!klines || klines.length < 12 || !atr) return { tooExtended: false, reason: '' };
-  const closes = klines.slice(0, -2).map(k => parseFloat(k[4]));
-  const basePrice = closes.reduce((a, b) => a + b, 0) / closes.length;
-  const extension = Math.abs(price - basePrice) / atr;
-  const recentRanges = klines.slice(-11, -1).map(k => parseFloat(k[2]) - parseFloat(k[3]));
-  const avgRange = recentRanges.reduce((a, b) => a + b, 0) / recentRanges.length;
-  const latestRange = parseFloat(klines[klines.length-1][2]) - parseFloat(klines[klines.length-1][3]);
-  const candleTooLarge = avgRange > 0 && latestRange > avgRange * 3;
-  const tooExtended = extension > 2.0 || candleTooLarge;
-  return { tooExtended, extension: parseFloat(extension.toFixed(2)), candleTooLarge, reason: tooExtended ? (candleTooLarge ? `candle ${(latestRange/avgRange).toFixed(1)}x avg` : `${extension.toFixed(1)} ATR`) : '' };
-};
-
-const checkRecentPump = (klines, price) => {
-  if (!klines || klines.length < 4) return { pumped: false, pct: 0 };
-  const priceAgo = parseFloat(klines[klines.length - 4][4]);
-  const pct = Math.abs((price - priceAgo) / priceAgo) * 100;
-  return { pumped: pct >= 5, pct: parseFloat(pct.toFixed(2)) };
-};
-
-const classifyRegime = (klines) => {
-  if (!klines || klines.length < 20) return { regime: 'unknown', allowFire: true, allowEarly: true };
-  const closes = klines.map(k => parseFloat(k[4]));
-  const price = closes[closes.length - 1];
-  const atr = calculateATR(klines, 10);
-  const atrPct = price > 0 ? (atr / price) * 100 : 0;
-  let regime = atrPct > 3.5 ? 'unstable' : 'ranging';
-  return { regime, atrPct: parseFloat(atrPct.toFixed(2)), allowFire: regime !== 'unstable', allowEarly: regime !== 'unstable' };
-};
-
-const classifyOI = (currentOI, prevOI, price, prevPrice, funding, candle) => {
-  if (!prevOI || prevOI === 0) return { type: 'unknown', bullish: false };
-  const oiChange = ((currentOI - prevOI) / prevOI) * 100;
-  const priceMove = prevPrice > 0 ? ((price - prevPrice) / prevPrice) * 100 : 0;
-  const oiRising = oiChange > 1;
-  const priceFlat = Math.abs(priceMove) < 1.5;
-  const pricePumped = priceMove > 3;
-  const wicky = candle?.verdict === 'FAKE' || candle?.upperWickPct > 40;
-  let type, bullish;
-  if (oiRising && priceFlat && funding < -0.005) { type = 'squeeze'; bullish = true; }
-  else if (oiRising && priceFlat) { type = 'buildup'; bullish = true; }
-  else if (oiRising && !priceFlat && !pricePumped) { type = 'continuation'; bullish = true; }
-  else if (oiRising && pricePumped && wicky) { type = 'trap'; bullish = false; }
-  else { type = 'neutral'; bullish = false; }
-  return { type, bullish, oiChange: parseFloat(oiChange.toFixed(2)) };
-};
-
-// ── MASTER SCORE ────────────────────────────────────────────────────────────
-const calcMasterScore = ({ compression, volume, resistance, fundingLS, trap }) => {
-  const raw = compression.score + volume.score + resistance.score + fundingLS.score - (trap.trapScore * 1.0);
-  return Math.max(0, Math.min(10, parseFloat(raw.toFixed(1))));
-};
-
-// ── ALERT MESSAGES ──────────────────────────────────────────────────────────
-const FOOTER = (btc, symbol) => {
-  const btcStr = btc ? `${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(1)}%` : '';
-  return [btcStr, `⏰ ${gstNow()} GST`, `<i>DYOR · SL always set</i>`].filter(Boolean).join('  |  ');
-};
-
-const buildEarlyMsg = (symbol, price, score, direction, layers, atr, btc, earlyDetails) => {
-  const isLong = direction === 'LONG';
-  const { sl, tp1, tp2, riskReward } = calculateSLTP(price, atr, score, direction);
-  const tags = [];
-  if (layers.compression.compressed && layers.compression.oiBuilding) tags.push('📦Coiling+OI');
-  if (layers.fundingLS.funding < 0) tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
-  if (earlyDetails.triggers.length) tags.push(`🎯${earlyDetails.triggers.join('+')}`);
-  return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
-${tags.join(' · ')}
-💰 $${fmtP(price)}  🛑 $${fmtP(sl)}  🎯 $${fmtP(tp1)} / $${fmtP(tp2)}  R:R 1:${riskReward}
-⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
-${FOOTER(btc, symbol)}`.trim();
-};
-
-const buildFireMsg = (symbol, price, score, direction, layers, btc, klines = []) => {
-  const isLong = direction === 'LONG';
-  const atr = calculateATR(klines) || (price * 0.018);
-  const { sl, tp1, tp2, tp3, riskReward } = calculateSLTP(price, atr, score, direction);
-  const volumeCheck = checkBreakoutVolume(klines, direction);
-  const conf = [];
-  if (layers.compression.compressed && layers.compression.oiBuilding) conf.push('📦OI+Coil');
-  if (volumeCheck.validBreakout) conf.push(`🔊Vol${volumeCheck.breakVolRatio}x→${volumeCheck.followVolRatio}x`);
-  if (layers.resistance.pressure) conf.push(`🧱Res×${layers.resistance.tests}`);
-  if (layers.fundingLS.funding < 0) conf.push(`💸${layers.fundingLS.funding.toFixed(3)}%`);
-  return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} CONFIRMATION — ${symbol.replace('USDT','')}</b>
-📊 ${score}/10 ${confBar(score)}
-${conf.join(' · ')}
-━━━━━━━━━━━━━━━
-💰 $${fmtP(price)}  🛑 $${fmtP(sl)}
-🎯 TP1 $${fmtP(tp1)}  TP2 $${fmtP(tp2)}  TP3 $${fmtP(tp3)}  R:R 1:${riskReward}
-💼 <b>Position size: MEDIUM (50-70% of normal)</b>
-${FOOTER(btc, symbol)}`.trim();
-};
-
-// ── SCANNER: FULL MARKET ────────────────────────────────────────────────────
-let contractInfoCache = { data: null, ts: 0 };
-const getContractInfo = async () => {
-  const now = Date.now();
-  if (contractInfoCache.data && now - contractInfoCache.ts < 3600000) return contractInfoCache.data;
-  try {
-    const info = await fetchJSON('https://fapi.binance.com/fapi/v1/exchangeInfo');
-    const cryptoSymbols = new Set();
-    for (const s of info.symbols || []) {
-      if (s.status !== 'TRADING') continue;
-      if (s.contractType !== 'PERPETUAL') continue;
-      if (s.quoteAsset !== 'USDT') continue;
-      if (s.underlyingType && s.underlyingType !== 'COIN') continue;
-      cryptoSymbols.add(s.symbol);
-    }
-    contractInfoCache = { data: cryptoSymbols, ts: now };
-    return cryptoSymbols;
-  } catch { return contractInfoCache.data || new Set(); }
-};
-
 const runFullMarketScan = async () => {
   fullScanCount++;
   log(`🌍 Full Market Scan #${fullScanCount}`);
   try {
-    const cryptoSet = await getContractInfo();
     const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
     const valid = tickers.filter(t => {
-      if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) return false;
-      if (cryptoSet.size > 0 && !cryptoSet.has(t.symbol)) return false;
-      if (EXCLUDE.has(t.symbol) || EXCLUDE_REGEX.test(t.symbol)) return false;
-      if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) return false;
-      if (Math.abs(parseFloat(t.priceChangePercent)) >= PUMP_EXCLUDE_PCT) return false;
+      if (!t.symbol.endsWith('USDT')) return false;
+      if (parseFloat(t.quoteVolume) < 200000) return false;
+      if (Math.abs(parseFloat(t.priceChangePercent)) > 25) return false;
       return true;
-    }).map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
-      .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)).slice(0, 100);
+    }).slice(0, 200);
     
-    const currentWatchlist = await getWatchlist();
-    const currentSymbols = currentWatchlist.map(r => r.symbol);
-    let added = 0;
+    const altsData = valid.map(t => ({
+      symbol: t.symbol,
+      change24h: parseFloat(t.priceChangePercent),
+      volume: parseFloat(t.quoteVolume)
+    }));
     
-    for (const coin of valid) {
-      await sleep(250);
-      let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
-      try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
-      try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
-      try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=12`); } catch { }
-      try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${coin.symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
-      
-      const directionData = await determineDirection(coin.symbol, coin.price, klines, funding, ls, coin.change);
-      if (!directionData.direction) continue;
-      
-      const compression = checkCompression(klines, currentOI, prevOI);
-      const volume = checkVolumeBuild(klines);
-      const resistance = checkResistanceTesting(coin.symbol, coin.price, klines);
-      const fundingLS = checkFundingLS(funding, ls, directionData.direction);
-      const trap = await checkTrapRisk(coin.symbol, coin.price, directionData.direction, volume.spike, compression.oiBuilding, klines);
-      const score = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
-      
-      if (score >= 2.5 && !currentSymbols.includes(coin.symbol)) {
-        if (currentSymbols.length + added >= MAX_WATCHLIST) {
-          const currentWl = await getWatchlist();
-          const lowest = currentWl.filter(r => r.score !== null).sort((a,b) => (a.score||0) - (b.score||0))[0];
-          if (lowest && (lowest.score || 0) < score - 0.5) {
-            await removeFromWatchlist(lowest.symbol);
-            coinTracker.delete(lowest.symbol);
-            const idx = currentSymbols.indexOf(lowest.symbol);
-            if (idx > -1) currentSymbols.splice(idx, 1);
-          } else continue;
-        }
-        await addToWatchlist(coin.symbol, score, directionData.direction);
-        currentSymbols.push(coin.symbol);
-        added++;
-        log(`✅ ${coin.symbol} score:${score} ${directionData.direction}`);
-      }
-    }
-    log(`🌍 Scan #${fullScanCount} done — +${added} added — Watchlist: ${currentSymbols.length}`);
+    const btcKlines = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=100');
+    const btcRanges = btcKlines.map(k => parseFloat(k[2]) - parseFloat(k[3]));
+    const btcAvgRange = btcRanges.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const btcData = { klines: btcKlines, change24h: btcGateStatus.change, atr: btcAvgRange };
+    
+    const regime = await regimeClassifier.classify(btcData, altsData);
+    log(`📈 Market Regime: ${regime.regime} | Risk: ${regime.riskMultiplier}x | Score: ${regime.score}`);
+    
+    await tg(OWNER_CHAT_ID, `🌍 Scan #${fullScanCount} | Regime: ${regime.regime}\nRisk: ${regime.riskMultiplier}x | Score: ${regime.score}\n${btcGateStatus.emoji} BTC ${btcGateStatus.change > 0 ? '+' : ''}${btcGateStatus.change?.toFixed(1)}%`);
   } catch (err) { log('Full scan error:', err.message); }
 };
 
-// ── SCANNER: WATCHLIST (UPDATED WITH FIXES) ─────────────────────────────────
 const runWatchlistScan = async () => {
-  log(`👁 Watchlist Scan #${++watchlistScanCount}`);
+  watchlistScanCount++;
+  log(`👁 Watchlist Scan #${watchlistScanCount}`);
   try {
     const btc = await checkBTCGate();
-    const watchlist = await getWatchlist();
-    const symbols = watchlist.map(r => r.symbol);
-    if (!symbols.length) return;
+    const riskCheck = riskMonitor.canTrade();
+    if (!riskCheck.allowed) {
+      log(`⛔ ${riskCheck.reason}`);
+      return;
+    }
+    
+    // Get top coins by volume
+    const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
+    const topCoins = tickers.filter(t => {
+      if (!t.symbol.endsWith('USDT')) return false;
+      if (parseFloat(t.quoteVolume) < 500000) return false;
+      return true;
+    }).sort((a, b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume)).slice(0, 30);
     
     let alertsFired = 0;
     
-    for (const symbol of symbols) {
-      await sleep(200);
-      let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
-      try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
-      if (!price) continue;
-      try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
-      try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
-      try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=25`); } catch { }
-      try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
+    for (const coin of topCoins) {
+      if (alertsFired >= 2) break;
+      await sleep(300);
       
-      const ticker24h = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${symbol}`).catch(() => null);
-      const change24h = ticker24h ? parseFloat(ticker24h.priceChangePercent) : 0;
+      const symbol = coin.symbol;
+      const price = parseFloat(coin.lastPrice);
+      const change24h = parseFloat(coin.priceChangePercent);
       
-      // NEW: Determine direction with fixed logic
-      const directionData = await determineDirection(symbol, price, klines, funding, ls, change24h);
-      if (!directionData.direction) {
-        coinTracker.delete(symbol);
+      // Fetch required data
+      let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
+      try {
+        const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`);
+        funding = parseFloat(f.lastFundingRate) * 100;
+      } catch { }
+      try {
+        const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=1h&limit=1`);
+        ls = parseFloat(l[0]?.longShortRatio || 1);
+      } catch { }
+      try {
+        klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=50`);
+      } catch { }
+      try {
+        const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`);
+        currentOI = parseFloat(o.openInterest);
+        const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`);
+        prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI);
+      } catch { }
+      
+      // Get direction using new analyzer
+      const directionResult = await directionAnalyzer.analyze(symbol, price, klines, funding, ls);
+      if (!directionResult.direction) continue;
+      
+      // Calculate volume spike
+      const volumes = klines.map(k => parseFloat(k[5]));
+      const avgVol = volumes.slice(-22, -2).reduce((a, b) => a + b, 0) / 20;
+      const currentVol = volumes[volumes.length - 1];
+      const volumeSpike = currentVol / avgVol;
+      
+      // Verify with confirmation layers
+      const confirmation = await confirmationLayers.verify(
+        symbol, price, directionResult.direction, klines, funding, ls, volumeSpike
+      );
+      
+      if (!confirmation.passed) {
+        log(`⏳ ${symbol} ${directionResult.direction} - confirmation score ${confirmation.score}% (need 70%)`);
         continue;
       }
-      const direction = directionData.direction;
       
-      // NEW: Check event risk
-      const eventRisk = await checkEventRisk(symbol);
-      if (eventRisk.shouldBlock) {
-        log(`🚫 EVENT BLOCK: ${symbol} - ${eventRisk.risks.join(', ')}`);
+      // Check market regime
+      const btcKlines = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=100');
+      const btcRanges = btcKlines.map(k => parseFloat(k[2]) - parseFloat(k[3]));
+      const btcAvgRange = btcRanges.slice(-20).reduce((a, b) => a + b, 0) / 20;
+      const btcData = { klines: btcKlines, change24h: btc.change, atr: btcAvgRange };
+      const regime = await regimeClassifier.classify(btcData, topCoins);
+      
+      if (!regime.allowTrading) {
+        log(`🌙 ${symbol} - market regime ${regime.regime} blocks trading`);
         continue;
       }
       
-      const compression = checkCompression(klines, currentOI, prevOI);
-      const volume = checkVolumeBuild(klines);
-      const resistance = checkResistanceTesting(symbol, price, klines);
-      const fundingLS = checkFundingLS(funding, ls, direction);
-      const trap = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
+      // Calculate ATR for SL/TP
+      const atr = calculateATR(klines) || (price * 0.02);
+      const isLong = directionResult.direction === 'LONG';
       
-      let score = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
+      // Calculate SL and TP
+      const slMultiplier = directionResult.confidence >= 80 ? 1.5 : 2.0;
+      const sl = isLong ? price - atr * slMultiplier : price + atr * slMultiplier;
+      const tp1 = isLong ? price + atr * 2.0 : price - atr * 2.0;
+      const tp2 = isLong ? price + atr * 4.0 : price - atr * 4.0;
       
-      // NEW: Breakout volume confirmation
-      const breakoutVol = checkBreakoutVolume(klines, direction);
-      const volumeBonus = breakoutVol.validBreakout ? 1.5 : 0;
-      score = Math.min(10, score + volumeBonus);
+      const riskReward = Math.abs((tp1 - price) / (price - sl)).toFixed(1);
       
-      const layers = { compression, volume, resistance, fundingLS, trap };
-      const atr = calculateATR(klines) || (price * 0.018);
-      const ext = checkExtension(klines, price, atr);
-      const pumpCheck = checkRecentPump(klines, price);
-      const block = isBlocked(symbol);
-      const regime = classifyRegime(klines);
-      const early = checkEarlyEntry(compression, volume, fundingLS, klines, direction);
-      const sweep = checkLiquiditySweep(klines, direction);
-      
-      // NEW: Candle quality check
-      const candleOk = trap.candle?.verdict === 'STRONG' || (trap.candle?.verdict === 'WEAK' && score >= 8);
-      
-      // Update tracker
-      const existing = coinTracker.get(symbol);
-      if (!existing) {
-        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score, layers, firstSeen: Date.now(), history: [] });
-      } else {
-        if (direction !== existing.direction) {
-          coinTracker.delete(symbol);
-          continue;
-        }
-        existing.scanCount++;
-        existing.score = score;
-        existing.layers = layers;
-        existing.state = score >= 8 ? 'FIRE' : score >= 6 ? 'CONFIRMING' : 'WATCHING';
-        coinTracker.set(symbol, existing);
+      // Check if we already have a position in this symbol
+      const existingPosition = positionManager.getOpenPositions().find(p => p.symbol === symbol);
+      if (existingPosition) {
+        log(`📌 ${symbol} - position already open`);
+        continue;
       }
       
-      const state = coinTracker.get(symbol);
-      if (!state) continue;
+      // Generate signal message
+      const signalMsg = `${isLong ? '🟢' : '🔴'} <b>NEXIO v5.0 ${isLong ? 'LONG' : 'SHORT'} — ${symbol.replace('USDT', '')}</b>
+━━━━━━━━━━━━━━━
+🎯 Confidence: ${directionResult.confidence}%
+✅ Confirmations: ${confirmation.score}%
+📊 Regime: ${regime.regime} (${regime.riskMultiplier}x size)
+💰 Entry: $${fmtP(price)}
+🛑 Stop: $${fmtP(sl)} (${slMultiplier}x ATR)
+🎯 TP1: $${fmtP(tp1)} | TP2: $${fmtP(tp2)}
+📈 R:R 1:${riskReward}
+📊 Score: ${directionResult.longScore}/${directionResult.shortScore}
+${btc.emoji} BTC: ${btc.trend} | ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(1)}%
+⏰ ${gstNow()} GST
+━━━━━━━━━━━━━━━
+<i>Position size: ${(RISK_CONFIG.max_risk_per_trade_pct * regime.riskMultiplier).toFixed(1)}% risk</i>`;
       
-      // EARLY ENTRY (requires 2+ triggers, no extension, no pump)
-      if (btc.pass && early.isEarly && !ext.tooExtended && !pumpCheck.pumped && !block.blocked && score >= 5 && alertsFired < 2) {
-        const earlyKey = `early_${symbol}`;
-        if (canAlert(earlyKey)) {
-          await postSignal(buildEarlyMsg(symbol, price, score, direction, layers, atr, btc, early));
-          markAlert(earlyKey);
-          const { sl, tp1 } = calculateSLTP(price, atr, score, direction);
-          await logPaperTrade({ symbol, direction, type: 'EARLY', price, sl, tp1, score });
-          alertsFired++;
-          log(`⚡ EARLY: ${symbol} ${direction} triggers:${early.triggers.join(',')}`);
-        }
-      }
-      
-      // FIRE ENTRY (requires breakout volume + candle quality + no block)
-      else if (btc.pass && !ext.tooExtended && !pumpCheck.pumped && !block.blocked && 
-               score >= MIN_ALERT_SCORE && breakoutVol.validBreakout && candleOk && 
-               trap.safe && regime.allowFire && alertsFired < 2) {
-        const fireKey = `fire_${symbol}`;
-        if (canAlert(fireKey)) {
-          await postSignal(buildFireMsg(symbol, price, score, direction, layers, btc, klines));
-          markAlert(fireKey);
-          const { sl, tp1, tp2 } = calculateSLTP(price, atr, score, direction);
-          await logPaperTrade({ symbol, direction, type: 'FIRE', price, sl, tp1, tp2, score });
-          alertsFired++;
-          log(`🔥 FIRE: ${symbol} ${direction} score:${score} vol:${breakoutVol.breakVolRatio}x→${breakoutVol.followVolRatio}x`);
-        }
-      }
-      
-      // Cleanup low scorers
-      if (score < 1.5 && state.scanCount >= 3) {
-        coinTracker.delete(symbol);
-        await removeFromWatchlist(symbol);
+      const signalKey = `${symbol}_${directionResult.direction}`;
+      if (canAlert(signalKey)) {
+        await postSignal(signalMsg);
+        markAlert(signalKey);
+        
+        // Open paper position
+        await positionManager.openPosition(
+          symbol, directionResult.direction, price, sl, tp1, tp2,
+          directionResult.confidence, account.balance, regime.riskMultiplier
+        );
+        
+        alertsFired++;
+        log(`🚀 SIGNAL: ${symbol} ${directionResult.direction} | Conf: ${directionResult.confidence}% | Regime: ${regime.regime}`);
       }
     }
     
-    // Send priority list every 3 scans
-    if (watchlistScanCount % 3 === 0 && coinTracker.size > 0) {
-      const sorted = [...coinTracker.values()].filter(c => c.score >= 6).sort((a, b) => b.score - a.score).slice(0, 10);
-      if (sorted.length) {
-        const lines = sorted.map((s, i) => {
-          const rank = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
-          return `${rank} ${s.direction === 'LONG' ? '📈' : '📉'} ${s.symbol.replace('USDT','')} — ${s.state} ${s.score}/10`;
-        }).join('\n');
-        await postSignal(`📊 <b>NEXIO PRIORITY LIST</b>\n━━━━━━━━━━━━━━━\n${lines}\n━━━━━━━━━━━━━━━\n${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(1)}%\n⏰ ${gstNow()} GST`);
-      }
+    // Update all open positions
+    const currentPrices = {};
+    for (const pos of positionManager.getOpenPositions()) {
+      try {
+        const ticker = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${pos.symbol}`);
+        currentPrices[pos.symbol] = parseFloat(ticker.price);
+      } catch { }
     }
+    const closed = await positionManager.updatePositions(currentPrices);
+    if (closed.length) log(`📊 Closed ${closed.length} positions`);
     
-    await tg(OWNER_CHAT_ID, `👁 Scan #${watchlistScanCount} | ${gstNow()}\nTracking: ${coinTracker.size} | Alerts: ${alertsFired}\nBTC: ${btc.pass ? '✅' : '❌'} ${btc.reason}`);
-  } catch (err) { log('Watchlist error:', err.message); }
+    // Send status update
+    const openCount = positionManager.getOpenPositions().length;
+    await tg(OWNER_CHAT_ID, `👁 Scan #${watchlistScanCount} | ${gstNow()}
+Open: ${openCount} | Today: ${account.daily_pnl > 0 ? '+' : ''}$${account.daily_pnl.toFixed(2)}
+Balance: $${account.balance.toFixed(2)} | Peak: $${account.peak_balance.toFixed(2)}
+Regime: ${regime.regime} | ${btc.emoji} BTC ${btc.change > 0 ? '+' : ''}${btc.change?.toFixed(1)}%`);
+    
+  } catch (err) {
+    log('Watchlist error:', err.message);
+    await tg(OWNER_CHAT_ID, `❌ Scan error: ${err.message}`);
+  }
 };
 
-// ── BACKTESTING SYSTEM (NEW) ────────────────────────────────────────────────
-const runBacktest = async (startDate, endDate) => {
-  log(`📊 Running backtest from ${startDate} to ${endDate}`);
-  // This would fetch historical data and simulate trades
-  // Returns { winRate, profitFactor, sharpeRatio, maxDrawdown, totalTrades }
-  return { winRate: 0, profitFactor: 0, sharpeRatio: 0, maxDrawdown: 0, totalTrades: 0 };
+// Helper ATR function
+const calculateATR = (klines, period = 14) => {
+  if (!klines || klines.length < period + 1) return 0;
+  let trSum = 0;
+  for (let i = klines.length - period; i < klines.length; i++) {
+    const high = parseFloat(klines[i][2]);
+    const low = parseFloat(klines[i][3]);
+    const prevClose = i > 0 ? parseFloat(klines[i-1][4]) : high;
+    const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+    trSum += tr;
+  }
+  return trSum / period;
 };
 
-// ── BOT COMMANDS ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// BOT COMMANDS
+// ─────────────────────────────────────────────────────────────────────────────
+let lastUpdateId = 0;
+
 const handleCommand = async msg => {
   const chatId = String(msg.chat?.id);
-  const username = msg.from?.username || '';
-  const firstName = msg.from?.first_name || '';
   const text = (msg.text || '').trim();
   
   if (text === '/start') {
-    await tg(chatId, `👋 <b>Welcome to Nexio v4.0!</b>\n━━━━━━━━━━━━━━━\n✅ Fixed direction logic\n✅ Volume confirmation\n✅ Better risk management\n\n/subscribe — $${PRICE_USD}/mo\n/status — Server status\n/stats — Paper trade stats\n/help — All commands`);
-  }
-  else if (text === '/status') {
-    const all = await getAllUsers(), premium = await getPremiumUsers(), wl = await getWatchlist();
-    await tg(chatId, `📊 <b>Nexio v4.0 Status</b>\n━━━━━━━━━━━━━━━\n✅ Online | PAPER_MODE: ${PAPER_MODE}\n👥 Users: ${all.length} | 👑 Prime: ${premium.length}\n👁 Watchlist: ${wl.length} | Tracking: ${coinTracker.size}\n📉 Daily loss: ${dailyLosses.pnl.toFixed(1)}% / ${MAX_DAILY_LOSS_PCT}%\n🚦 Emergency stop: ${emergencyStop ? 'ACTIVE' : 'OFF'}\n⏰ ${gstNow()} GST`);
-  }
-  else if (text === '/stats') {
-    const all = (await sb('paper_trades?select=*')) || [];
-    const closed = all.filter(t => t.status !== 'OPEN');
-    const wins = closed.filter(t => t.outcome === 'WIN').length;
-    const losses = closed.filter(t => t.outcome === 'LOSS').length;
-    const winRate = closed.length > 0 ? ((wins / closed.length) * 100).toFixed(1) : '0';
-    await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins: ${wins}\n🔴 Losses: ${losses}\n📊 Win Rate: ${winRate}%\n📈 Total trades: ${closed.length}\n\n${closed.length < 50 ? '⏳ Need 50+ trades for reliable data' : winRate >= 55 ? '✅ Strategy working' : '❌ Keep paper trading'}`);
-  }
-  else if (text === '/emergencystop' && chatId === OWNER_CHAT_ID) {
-    emergencyStop = true;
-    await tg(OWNER_CHAT_ID, '🛑 EMERGENCY STOP activated — no signals for 24 hours');
-    setTimeout(() => { emergencyStop = false; tg(OWNER_CHAT_ID, '🟢 Emergency stop released'); }, 86400000);
-  }
-  else if (text === '/resume' && chatId === OWNER_CHAT_ID) {
-    emergencyStop = false;
-    await tg(OWNER_CHAT_ID, '🟢 Signals resumed');
-  }
-  else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /stats /watchlist /tracking /btc /help\n\n👑 Owner only:\n/emergencystop /resume /fullscan /clearwatchlist`);
-  }
-  else if (text === '/test' && chatId === OWNER_CHAT_ID) {
-    await postSignal(`🧪 <b>NEXIO v4.0 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Fixed version online\n✅ Direction logic fixed\n✅ Volume confirmation active\n✅ Risk management active\n⏰ ${gstNow()} GST`);
-  }
-  else if (text === '/fullscan' && chatId === OWNER_CHAT_ID) {
-    await runFullMarketScan();
-  }
-  else if (text === '/clearwatchlist' && chatId === OWNER_CHAT_ID) {
-    const wl = await getWatchlist();
-    for (const r of wl) await removeFromWatchlist(r.symbol);
-    coinTracker.clear();
-    await tg(chatId, `✅ Cleared ${wl.length} coins`);
-  }
-};
+    await tg(chatId, `👋 <b>Nexio v5.0</b>
+━━━━━━━━━━━━━━━
+✅ 5 critical issues fixed:
+1. Multi-factor direction analysis
+2. Smart entry timing (retest/liquidity sweep)
+3. Complete risk management
+4. 7-layer confirmation
+5. Market regime adaptation
 
-// ── POLL USERS ──────────────────────────────────────────────────────────────
-let updateId = 0;
+📊 PAPER MODE: ${PAPER_MODE ? 'ACTIVE' : 'OFF'}
+⚠️ ${PAPER_MODE ? 'Paper trading only - 4 weeks minimum' : 'Live trading active'}
+
+/status - Bot status
+/stats - Trading stats
+/positions - Open positions
+/risk - Risk settings`);
+  }
+  
+  else if (text === '/status') {
+    const regime = await regimeClassifier.classify(
+      { klines: [], change24h: 0, atr: 0 },
+      []
+    );
+    await tg(chatId, `📊 <b>Nexio v5.0 Status</b>
+━━━━━━━━━━━━━━━
+🤖 Status: Online
+📒 Mode: ${PAPER_MODE ? 'PAPER' : 'LIVE'}
+📈 Balance: $${account.balance.toFixed(2)}
+📊 Peak: $${account.peak_balance.toFixed(2)}
+📉 Drawdown: ${((account.peak_balance - account.balance) / account.peak_balance * 100).toFixed(1)}%
+🎯 Win Rate: ${account.trade_history.length ? ((account.trade_history.filter(t => t.pnl > 0).length / account.trade_history.length) * 100).toFixed(1) : '0'}%
+📊 Regime: ${regime.regime}
+⏰ ${gstNow()} GST`);
+  }
+  
+  else if (text === '/stats') {
+    const wins = account.trade_history.filter(t => t.pnl > 0);
+    const losses = account.trade_history.filter(t => t.pnl < 0);
+    const totalPnL = account.trade_history.reduce((s, t) => s + t.pnl, 0);
+    const winRate = account.trade_history.length ? (wins.length / account.trade_history.length * 100).toFixed(1) : 0;
+    
+    await tg(chatId, `📒 <b>Trading Stats</b>
+━━━━━━━━━━━━━━━
+📊 Total Trades: ${account.trade_history.length}
+✅ Wins: ${wins.length}
+❌ Losses: ${losses.length}
+📈 Win Rate: ${winRate}%
+💰 Total PnL: $${totalPnL.toFixed(2)}
+📈 Avg Win: $${wins.length ? (wins.reduce((s, t) => s + t.pnl, 0) / wins.length).toFixed(2) : 0}
+📉 Avg Loss: $${losses.length ? (losses.reduce((s, t) => s + t.pnl, 0) / losses.length).toFixed(2) : 0}
+🏆 Best Trade: $${wins.length ? Math.max(...wins.map(t => t.pnl)).toFixed(2) : 0}
+💀 Worst Trade: $${losses.length ? Math.min(...losses.map(t => t.pnl)).toFixed(2) : 0}
+
+${account.trade_history.length < 50 ? '⚠️ Need 50+ trades for reliable stats' : winRate >= 55 ? '✅ Strategy profitable' : '❌ Keep paper trading'}`);
+  }
+  
+  else if (text === '/positions') {
+    const positions = positionManager.getOpenPositions();
+    if (!positions.length) {
+      await tg(chatId, '📭 No open positions');
+      return;
+    }
+    
+    let msg = `📊 <b>Open Positions (${positions.length})</b>\n━━━━━━━━━━━━━━━\n`;
+    for (const pos of positions) {
+      msg += `\n${pos.direction === 'LONG' ? '🟢' : '🔴'} ${pos.symbol.replace('USDT', '')}\n`;
+      msg += `Entry: $${fmtP(pos.entryPrice)} | SL: $${fmtP(pos.stopLoss)}\n`;
+      msg += `TP1: $${fmtP(pos.tp1)} | TP2: $${fmtP(pos.tp2)}\n`;
+      msg += `Size: ${pos.size.toFixed(4)} | Risk: $${pos.riskAmount.toFixed(2)}\n`;
+    }
+    await tg(chatId, msg);
+  }
+  
+  else if (text === '/risk') {
+    await tg(chatId, `⚠️ <b>Risk Settings</b>
+━━━━━━━━━━━━━━━
+💼 Max risk/trade: ${RISK_CONFIG.max_risk_per_trade_pct}%
+📊 Max position: ${RISK_CONFIG.max_position_size_pct}%
+🔄 Max concurrent: ${RISK_CONFIG.max_concurrent_positions}
+📉 Daily loss limit: ${RISK_CONFIG.max_daily_loss_pct}%
+📅 Weekly loss limit: ${RISK_CONFIG.max_weekly_loss_pct}%
+❌ Max consecutive: ${RISK_CONFIG.max_consecutive_losses}
+⏰ Cooldown: ${RISK_CONFIG.cooldown_after_loss_minutes}min
+📈 Min R:R: 1:${RISK_CONFIG.min_risk_reward}
+🔊 Min volume: ${RISK_CONFIG.min_volume_ratio}x`);
+  }
+  
+  else if (text === '/reset' && chatId === OWNER_CHAT_ID) {
+    account = {
+      balance: 10000,
+      peak_balance: 10000,
+      daily_pnl: 0,
+      weekly_pnl: 0,
+      daily_date: new Date().toDateString(),
+      weekly_date: getWeekStart(),
+      consecutive_losses: 0,
+      open_positions: [],
+      trade_history: [],
+    };
+    await tg(chatId, '✅ Account reset');
+  }
+  
+  else if (text === '/help') {
+    await tg(chatId, `📖 <b>Commands</b>
+━━━━━━━━━━━━━━━
+/start - Welcome
+/status - Bot status
+/stats - Trading statistics
+/positions - Open positions
+/risk - Risk settings
+/help - This message
+
+👑 Owner only:
+/reset - Reset account
+/clearwatchlist - Clear watchlist`);
+  }
+}
+
 const pollUsers = async () => {
   try {
-    const data = await fetchJSON(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${updateId + 1}&limit=20&timeout=0`);
+    const data = await fetchJSON(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&limit=20&timeout=0`);
     if (!data?.ok || !data.result?.length) return;
     for (const u of data.result) {
-      updateId = u.update_id;
+      lastUpdateId = u.update_id;
       if (u.message) await handleCommand(u.message);
     }
   } catch (err) { log('Poll error:', err.message); }
 };
 
-// ── START ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// START
+// ─────────────────────────────────────────────────────────────────────────────
 const start = async () => {
-  log(`🚀 Nexio v4.0 — FIXED VERSION starting... PAPER_MODE: ${PAPER_MODE}`);
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.0 Started (FIXED)</b>\n━━━━━━━━━━━━━━━\n✅ Direction logic: MULTI-FACTOR\n✅ SL: ${NORMAL_SL_ATR} ATR (normal) / ${HIGH_CONF_SL_ATR} ATR (high conf)\n✅ TP: ${TP1_ATR}/${TP2_ATR}/${TP3_ATR} ATR\n✅ Volume confirmation: ${MIN_BREAKOUT_VOLUME_RATIO}x → ${MIN_FOLLOW_VOLUME_RATIO}x\n✅ Daily loss limit: ${MAX_DAILY_LOSS_PCT}%\n📒 PAPER MODE: ${PAPER_MODE ? 'ON (2 weeks minimum)' : 'OFF'}\n⏰ ${gstNow()} GST`);
+  log(`🚀 Nexio v5.0 Starting... PAPER_MODE: ${PAPER_MODE}`);
+  log(`📊 Risk: ${RISK_CONFIG.max_risk_per_trade_pct}% per trade | Max daily: ${RISK_CONFIG.max_daily_loss_pct}%`);
   
-  setInterval(pollUsers, POLL_INTERVAL_MS);
+  await tg(OWNER_CHAT_ID, `🟢 <b>NEXIO v5.0 STARTED</b>
+━━━━━━━━━━━━━━━
+✅ ALL 5 ISSUES FIXED:
+
+1. DIRECTION: Multi-factor analysis (HTF/PA/OrderFlow/Momentum/Sentiment)
+2. TIMING: Smart entry (Retest/Liquidity Sweep/Divergence)
+3. RISK: Complete management (Position sizing/Loss limits/Trailing)
+4. CONFIRMATION: 7-layer verification (70%+ score required)
+5. REGIME: Market adaptation (Risk multiplier 0-1x)
+
+📒 MODE: ${PAPER_MODE ? 'PAPER TRADING' : 'LIVE'}
+⚠️ ${PAPER_MODE ? '4 weeks minimum paper trading required' : 'Monitor carefully'}
+
+/status - Check bot status
+/stats - View performance
+
+⏰ ${gstNow()} GST`);
+  
+  setInterval(pollUsers, 30000);
   pollUsers();
+  
   await runFullMarketScan();
-  setInterval(runFullMarketScan, FULL_MARKET_INTERVAL_MS);
+  setInterval(runFullMarketScan, 120000);
+  
   await sleep(60000);
   await runWatchlistScan();
-  setInterval(runWatchlistScan, WATCHLIST_SCAN_INTERVAL);
+  setInterval(runWatchlistScan, 60000);
 };
 
 start();
