@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v3.5 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v3.6 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -35,15 +35,15 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 180000; // 3 min — faster but safe
-const WATCHLIST_SCAN_INTERVAL = 90000; // 90 sec — faster reaction
+const FULL_MARKET_INTERVAL_MS = 120000; // v3.6 — 2 min
+const WATCHLIST_SCAN_INTERVAL = 45000; // v3.6 — 45 sec
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5; // v3.5 — balanced quality
+const MIN_ALERT_SCORE         = 6.5; // v3.6 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
@@ -110,6 +110,14 @@ const gstNow  = ()  => new Date().toLocaleTimeString('en-US', {
   hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Dubai'
 });
 const log       = (...a) => console.log(`[${gstNow()}]`, ...a);
+
+// ── Session Filter — skip low liquidity windows ──────────────────────────────
+// Dubai time (UAE) used because server/user in UAE
+// Low liquidity windows (GST): 01:00-05:00 (Asia dead zone between close & London open)
+const isLowLiquiditySession = () => {
+  const hour = parseInt(new Date().toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Dubai' }));
+  return hour >= 1 && hour < 5;
+};
 const canAlert  = k => !alertHistory.has(k) || Date.now() - alertHistory.get(k) > ALERT_COOLDOWN_MS;
 const markAlert = k => alertHistory.set(k, Date.now());
 
@@ -348,6 +356,16 @@ const checkSocialHype = async (symbol) => {
 
 // ── Post-Loss Protection (v3.1) ───────────────────────────────────────────────
 const lossTracker   = new Map();
+const pumpTracker   = new Map(); // symbol → { pumpedAt, pctMove }
+const PUMP_COOLDOWN_MIN = 30; // minutes to skip coin after 5%+ move
+
+const checkRecentPump = (klines, price) => {
+  if (klines.length < 4) return { pumped: false, pct: 0 };
+  // Check if coin moved 5%+ in last 4 candles (1h on 15m)
+  const priceAgo = parseFloat(klines[klines.length - 4][4]);
+  const pct = Math.abs((price - priceAgo) / priceAgo) * 100;
+  return { pumped: pct >= 5, pct: parseFloat(pct.toFixed(2)) };
+};
 const dailyLosses   = { count: 0, date: '' };
 const LOSS_COOLDOWN = 90;
 const DAILY_KILL    = 3;
@@ -841,7 +859,7 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
 ${tags.join(' · ')}
 💰 $${fmtP(price)}  🛑 $${fmtP(sl)}  🎯 $${fmtP(tp1)} / $${fmtP(tp2)}  R:R 1:${rr}
-⚠️ Pre-breakout — small size
+⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
 ${FOOTER(btc, symbol)}`.trim();
 };
 
@@ -866,12 +884,12 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
   if (hype?.tag)                      conf.push(hype.tag);
 
-  return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b>
+  return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} CONFIRMATION — ${symbol.replace('USDT','')}</b>\n<i>⚠️ Best entry was EARLY. Skip if you missed it.</i>
 📊 ${score}/10 ${confBar(score)}
 ${conf.join(' · ')}
 ━━━━━━━━━━━━━━━
 💰 $${fmtP(price)}  🛑 $${fmtP(sl)}
-🎯 TP1 $${fmtP(tp1)}  TP2 $${fmtP(tp2)}  TP3 $${fmtP(tp3)}
+🎯 TP1 $${fmtP(tp1)}  TP2 $${fmtP(tp2)}  TP3 $${fmtP(tp3)}\n💼 <b>Position size: MEDIUM (50-70% of normal)</b>
 ${FOOTER(btc, symbol)}`.trim();
 };
 
@@ -953,7 +971,7 @@ const runFullMarketScan = async () => {
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
-      .slice(0, 120); // focused — mid cap + clean charts only
+      .slice(0, 100); // v3.6 — 100 highest quality coins only
 
     // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
     const currentWatchlistRaw = await getWatchlist();
@@ -973,7 +991,7 @@ const runFullMarketScan = async () => {
     let added = 0;
 
     for (const coin of valid) {
-      await sleep(350);
+      await sleep(250); // v3.6 faster — 350→250ms
       let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
@@ -1041,7 +1059,7 @@ const runWatchlistScan = async () => {
     let alertsFired = 0;
 
     for (const symbol of symbols) {
-      await sleep(400);
+      await sleep(200); // v3.6 faster — 400→200ms
       let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
       try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
       if (!price) continue;
@@ -1125,6 +1143,7 @@ const runWatchlistScan = async () => {
         early.earlyScore >= 2 &&
         finalScore >= 5 &&
         !ext.tooExtended &&
+        !pumpCheck.pumped &&
         state.scanCount >= 1 &&
         alertsFired < 2
       ) {
@@ -1197,9 +1216,17 @@ const runWatchlistScan = async () => {
       const btcSupportive = isLong ? (btc.change1H > -0.5) : (btc.change1H < 0.5); // loosened
       if (!btcSupportive) log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
 
+      // NO CHASE: block if already extended
+      const pumpCheck = checkRecentPump(klines, price);
+      if (pumpCheck.pumped) log(`🚫 NO-CHASE: ${symbol} pumped ${pumpCheck.pct}% recently — skip`);
+
+      // Session filter
+      const lowLiq = isLowLiquiditySession();
+      if (lowLiq && state.scanCount === 1) log(`🌙 LOW-LIQ: ${symbol} — Dubai dead hours`);
+
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !lowLiq && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -1324,12 +1351,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v3.5`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v3.6`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v3.5 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v3.6 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1380,9 +1407,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v3.5 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v3.6 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.5 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v3.6 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
