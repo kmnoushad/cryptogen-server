@@ -435,7 +435,7 @@ const sb = async (path, options = {}) => {
   } catch { return null; }
 };
 
-const getWatchlist         = async () => (await sb('watchlist?select=symbol,score,direction')) || [];
+const getWatchlist         = async () => (await sb('watchlist?select=symbol,score,direction,updated_at,added_by')) || [];
 const addToWatchlist       = async (symbol, score, direction) => sb('watchlist', {
   method: 'POST',
   body: JSON.stringify({ symbol, score, direction, added_by: 'server', updated_at: new Date().toISOString() }),
@@ -960,7 +960,7 @@ const runFullMarketScan = async () => {
     let staleRemoved = 0;
     for (const r of currentWatchlistRaw) {
       const ageMin = r.updated_at ? (Date.now() - new Date(r.updated_at).getTime()) / 60000 : 0;
-      if (ageMin > 30 || (r.score || 0) < 3) {
+      if (ageMin > 15 || (r.score || 0) < 3.5) {
         await removeFromWatchlist(r.symbol);
         coinTracker.delete(r.symbol);
         staleRemoved++;
@@ -990,6 +990,11 @@ const runFullMarketScan = async () => {
         fundingLS:   checkFundingLS(funding, ls, direction),
         trap:        { safe: true, trapScore: 0 },
       });
+
+      // Update score for existing coins (keeps watchlist fresh)
+      if (score >= 1.5 && currentSymbols.includes(coin.symbol)) {
+        await updateWatchlistScore(coin.symbol, score, direction);
+      }
 
       // Auto-rotate: if full, only add if this coin scores higher than any existing low scorer
       if (score >= 2.5 && !currentSymbols.includes(coin.symbol)) {
