@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v4.0 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v4.1 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -35,15 +35,15 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 120000; // v4.0 — 2 min
-const WATCHLIST_SCAN_INTERVAL = 45000; // v4.0 — 45 sec
+const FULL_MARKET_INTERVAL_MS = 120000; // v4.1 — 2 min
+const WATCHLIST_SCAN_INTERVAL = 45000; // v4.1 — 45 sec
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5; // v4.0 — balanced quality
+const MIN_ALERT_SCORE         = 6.5; // v4.1 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 const EXCLUDE = new Set([
@@ -100,7 +100,17 @@ const alertHistory  = new Map();
 const coinTracker   = new Map();
 const signalPrices  = new Map();
 
-// ── Correlation Filter (v4.0) ─────────────────────────────────────────────────
+// Cleanup old signal tracking (prevents stale correlation counts)
+const cleanupSignalPrices = () => {
+  const cutoff = Date.now() - 4 * 3600 * 1000; // 4h
+  let cleaned = 0;
+  for (const [k, v] of signalPrices.entries()) {
+    if (v.firedAt < cutoff) { signalPrices.delete(k); cleaned++; }
+  }
+  if (cleaned > 0) log(`🧹 Signal prices cleaned: ${cleaned} expired signals`);
+};
+
+// ── Correlation Filter (v4.1) ─────────────────────────────────────────────────
 // Limits directional exposure — too many same-direction signals = correlated risk
 // When BTC dumps, all LONG alts dump together. Cap at 3 open same-direction signals
 const getOpenDirectionCount = (direction) => {
@@ -119,6 +129,15 @@ let   watchlistScanCount = 0;
 let   btcGateStatus      = { pass: true, reason: 'Starting up', price: 0, change: 0 };
 
 const sleep   = ms => new Promise(r => setTimeout(r, ms));
+
+// Session classifier (UTC)
+const getSession = () => {
+  const utcHour = new Date().getUTCHours();
+  if (utcHour >= 0 && utcHour < 7)   return 'ASIA';
+  if (utcHour >= 7 && utcHour < 12)  return 'LONDON';
+  if (utcHour >= 12 && utcHour < 20) return 'NY';
+  return 'OFF';
+};
 const gstNow  = ()  => new Date().toLocaleTimeString('en-US', {
   hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Dubai'
 });
@@ -374,7 +393,57 @@ const lossTracker   = new Map();
 const pumpTracker   = new Map(); // symbol → { pumpedAt, pctMove }
 const PUMP_COOLDOWN_MIN = 30;
 
+// Periodic cleanup of stale pump records (prevents memory leak)
+const cleanupPumpTracker = () => {
+  const cutoff = Date.now() - (PUMP_COOLDOWN_MIN * 2 * 60000); // 2x cooldown window
+  let cleaned = 0;
+  for (const [k, v] of pumpTracker.entries()) {
+    if (v.pumpedAt < cutoff) { pumpTracker.delete(k); cleaned++; }
+  }
+  if (cleaned > 0) log(`🧹 Pump tracker cleaned: ${cleaned} stale entries`);
+};
+
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
+// ── Funding Mean Reversion (v4.1) ─────────────────────────────────────────────
+// Fetches last 50 funding rates (≈16 hours) and flags extreme readings
+// Extreme negative = shorts heavily paying = squeeze setup
+// Extreme positive = longs heavily paying = short setup primed
+// Cached 1h per coin to limit API load
+const fundingHistCache = new Map();
+const FUNDING_CACHE_MS = 3600000; // 1h
+
+const checkFundingExtreme = async (symbol, currentFunding) => {
+  try {
+    const cached = fundingHistCache.get(symbol);
+    let history;
+    if (cached && Date.now() - cached.ts < FUNDING_CACHE_MS) {
+      history = cached.data;
+    } else {
+      history = await fetchJSON(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${symbol}&limit=50`);
+      fundingHistCache.set(symbol, { data: history, ts: Date.now() });
+    }
+    if (!history || history.length < 20) return { extreme: false };
+
+    const rates = history.map(r => parseFloat(r.fundingRate) * 100);
+    const avg   = rates.reduce((a,b) => a+b, 0) / rates.length;
+    const std   = Math.sqrt(rates.reduce((s,r) => s + Math.pow(r - avg, 2), 0) / rates.length);
+
+    // z-score of current vs history
+    const z = std > 0 ? (currentFunding - avg) / std : 0;
+    const extremeNeg = z < -2;  // 2 std dev below avg = squeeze-ready
+    const extremePos = z > 2;   // 2 std dev above avg = short-ready
+    return {
+      extreme: extremeNeg || extremePos,
+      extremeNeg, extremePos,
+      z: parseFloat(z.toFixed(2)),
+      avg: parseFloat(avg.toFixed(4)),
+      current: currentFunding,
+    };
+  } catch {
+    return { extreme: false };
+  }
+};
+
 const checkRecentPump = (klines, price) => {
   if (klines.length < 8) return { pumped: false, pct: 0, window: null };
 
@@ -400,20 +469,23 @@ const checkRecentPump = (klines, price) => {
 
   return { pumped, pct: parseFloat(pct.toFixed(2)), window, pct30m: +pct30m.toFixed(1), pct1h: +pct1h.toFixed(1), pct2h: +pct2h.toFixed(1) };
 };
-const dailyLosses   = { count: 0, date: '' };
+const dailyLosses   = { count: 0, date: '', totalPnlPct: 0 };
+const DAILY_PNL_KILL = -5.0; // stop all trading if estimated daily PnL drops 5%
 const LOSS_COOLDOWN = 90;
 const DAILY_KILL    = 3;
 const HARD_KILL_24H = 5; // absolute cap across 24h regardless of date
 
 const recordLoss = (symbol) => {
   const today = new Date().toDateString();
-  if (dailyLosses.date !== today) { dailyLosses.count = 0; dailyLosses.date = today; }
+  if (dailyLosses.date !== today) { dailyLosses.count = 0; dailyLosses.totalPnlPct = 0; dailyLosses.date = today; }
   dailyLosses.count++;
+  dailyLosses.totalPnlPct -= 1.8; // each SL hit ≈ -1.5 ATR on 15m ≈ -1.8% estimate
   lossTracker.set(symbol, { lossTime: Date.now() });
-  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL}`);
+  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL} | Est PnL: ${dailyLosses.totalPnlPct.toFixed(1)}%`);
 };
 
 const isBlocked = (symbol) => {
+  if (dailyLosses.totalPnlPct <= DAILY_PNL_KILL) return { blocked: true, reason: `Daily PnL kill (${dailyLosses.totalPnlPct.toFixed(1)}%)` };
   if (dailyLosses.count >= DAILY_KILL) return { blocked: true, reason: `Daily kill switch (${dailyLosses.count} losses)` };
   // Hard 24h kill — count rolling 24h losses from lossTracker
   const cutoff24h = Date.now() - 24 * 3600 * 1000;
@@ -550,6 +622,7 @@ const logPaperTrade = async (signal) => {
         symbol:      signal.symbol,
         direction:   signal.direction,
         signal_type: signal.type,        // 'EARLY' | 'FIRE' | 'WATCH'
+        session:     getSession(),       // ASIA | LONDON | NY | OFF
         entry:       signal.price,
         sl:          signal.sl,
         tp1:         signal.tp1,
@@ -642,14 +715,26 @@ const checkBTCGate = async () => {
     const latestOpen  = parseFloat(klines[klines.length - 1][1]);
     const latestClose = parseFloat(klines[klines.length - 1][4]);
     const candleGreen = latestClose >= latestOpen;
+    // v4.1 — DIRECTION-AWARE BTC GATE
+    // General pass = only blocked when BTC is doing something extreme (flash crash, overheated)
+    // Then per-direction flags check alignment
     let pass = true, reason = '✅ BTC stable';
-    // Tightened v3.4 — block LONG entries when BTC is not actively supporting
-    if (change1H < -0.8)                      { pass = false; reason = `🔴 BTC dumping ${change1H.toFixed(2)}% in 1H`; }
-    else if (change24h < -3)                  { pass = false; reason = `🔴 BTC down ${change24h.toFixed(2)}% 24h — bearish regime`; }
-    else if (fundRate > 0.02)                 { pass = false; reason = `⚠️ BTC funding ${fundRate.toFixed(3)}% — overheated`; }
-    else if (!candleGreen && change1H < -0.3) { pass = false; reason = `🟠 BTC bearish 15m`; }
+
+    // Extreme conditions that block BOTH directions (flash crash / extreme volatility)
+    const extremeMove = Math.abs(change1H) > 2.5 || Math.abs(change24h) > 7;
+    if (extremeMove) {
+      pass = false;
+      reason = `⚡ BTC extreme move (1H ${change1H.toFixed(2)}%) — skip all`;
+    } else if (fundRate > 0.04) {
+      pass = false;
+      reason = `⚠️ BTC funding extreme ${fundRate.toFixed(3)}%`;
+    }
+
+    // Direction-specific flags
+    const bullishOk = change1H > -0.8 && change24h > -3 && !(!candleGreen && change1H < -0.3);
+    const bearishOk = change1H < 0.8 && !(candleGreen && change1H > 0.3);
     const emoji = change24h < -2 ? '🔴' : change24h < 0 ? '🟡' : '🟢';
-    btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji };
+    btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji, bullishOk, bearishOk };
     return btcGateStatus;
   } catch {
     btcGateStatus = { pass: true, reason: '⚠️ BTC data unavailable', price: 0, change: 0 };
@@ -855,7 +940,7 @@ const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, kli
   return { safe: trapScore === 0, trapScore, reasons, candle };
 };
 
-// ── Volume Climax Detector (v4.0) ─────────────────────────────────────────────
+// ── Volume Climax Detector (v4.1) ─────────────────────────────────────────────
 // Detects buying exhaustion — the TOP before reversal
 // Peak volume spike 2-4 candles ago + volume declining + price stalled = climax
 // Blocks LONG entries (we'd be buying at the top)
@@ -880,7 +965,7 @@ const checkVolumeClimax = (klines, direction) => {
   };
 };
 
-// ── Anti-Dump Trap Detector (v4.0) ────────────────────────────────────────────
+// ── Anti-Dump Trap Detector (v4.1) ────────────────────────────────────────────
 // Blocks LONG signals after a recent dump even if volume/OI suggests buying
 // This catches "falling knife" fakeouts — bounces that fail and dump more
 // Checks:
@@ -941,7 +1026,7 @@ const checkAntiDumpTrap = (klines, direction) => {
   };
 };
 
-// ── Bullish Absorption Detector (v4.0) ────────────────────────────────────────
+// ── Bullish Absorption Detector (v4.1) ────────────────────────────────────────
 // Detects stealth accumulation pattern — smart money buying quietly
 // Signals:
 //   1. Price flat/compressed (not moving much)
@@ -1181,7 +1266,7 @@ const runFullMarketScan = async () => {
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
-      .slice(0, 100); // v4.0 — 100 highest quality coins only
+      .slice(0, 100); // v4.1 — 100 highest quality coins only
 
     // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
     const currentWatchlistRaw = await getWatchlist();
@@ -1201,7 +1286,7 @@ const runFullMarketScan = async () => {
     let added = 0;
 
     for (const coin of valid) {
-      await sleep(250); // v4.0 faster — 350→250ms
+      await sleep(250); // v4.1 faster — 350→250ms
       let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
@@ -1274,7 +1359,7 @@ const runWatchlistScan = async () => {
     let alertsFired = 0;
 
     for (const symbol of symbols) {
-      await sleep(200); // v4.0 faster — 400→200ms
+      await sleep(200); // v4.1 faster — 400→200ms
       let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
       try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
       if (!price) continue;
@@ -1314,6 +1399,7 @@ const runWatchlistScan = async () => {
 
       const compression = checkCompression(klines, currentOI, prevOI);
       const volume      = checkVolumeBuild(klines);
+      const fundingZ    = await checkFundingExtreme(symbol, funding);
       const resistance  = checkResistanceTesting(symbol, price, klines);
       const fundingLS   = checkFundingLS(funding, ls, direction);
       const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
@@ -1361,6 +1447,16 @@ const runWatchlistScan = async () => {
         const boost = Math.min(2, absorption.score * 0.3);
         score = Math.min(10, score + boost);
       }
+      // Funding extremeness boost — z-score > 2 = squeeze / short primed
+      if (fundingZ.extreme) {
+        if (direction === 'LONG' && fundingZ.extremeNeg) {
+          score = Math.min(10, score + 1.5);
+          log(`🔥 EXTREME-FUNDING: ${symbol} LONG boost +1.5 (z=${fundingZ.z})`);
+        } else if (direction === 'SHORT' && fundingZ.extremePos) {
+          score = Math.min(10, score + 1.5);
+          log(`🔥 EXTREME-FUNDING: ${symbol} SHORT boost +1.5 (z=${fundingZ.z})`);
+        }
+      }
       const layers      = { compression, volume, resistance, fundingLS, trap, absorption, dumpTrap };
 
       // ── Liquidity sweep check (Fix 4) ─────────────────────────────────────
@@ -1407,7 +1503,7 @@ const runWatchlistScan = async () => {
       const block = isBlocked(symbol);
 
       // BTC direction alignment
-      const btcSupportive = isLong ? (btc.change1H > -0.5) : (btc.change1H < 0.5);
+      const btcSupportive = isLong ? (btc.bullishOk !== false) : (btc.bearishOk !== false);
       if (!btcSupportive) log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
 
       // Recent pump check — no-chase rule (checks 30m/1h/2h windows)
@@ -1646,12 +1742,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v4.0`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v4.1`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v4.0 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v4.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1702,9 +1798,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v4.0 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v4.1 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.0 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
@@ -1713,6 +1809,9 @@ const start = async () => {
   await sleep(60000);
   await runWatchlistScan();
   setInterval(runWatchlistScan, WATCHLIST_SCAN_INTERVAL);
+
+  // Memory cleanup — every 10 min
+  setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); }, 600000);
 
   // Paper trade outcome checker — every 10 min
   setInterval(checkPaperOutcomes, 600000);
