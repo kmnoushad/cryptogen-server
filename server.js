@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v4.1 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v4.2 — 9-Layer Intelligence Scanner
 //
 // LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
 // LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
@@ -35,16 +35,22 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 120000; // v4.1 — 2 min
-const WATCHLIST_SCAN_INTERVAL = 45000; // v4.1 — 45 sec
+const FULL_MARKET_INTERVAL_MS = 120000; // v4.2 — 2 min
+const WATCHLIST_SCAN_INTERVAL = 45000; // v4.2 — 45 sec
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5; // v4.1 — balanced quality
+const MIN_ALERT_SCORE         = 6.5; // v4.2 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
+
+// Unified risk parameters — same SL/TP for both EARLY and FIRE (per user preference)
+const UNIFIED_SL_ATR  = 1.8;
+const UNIFIED_TP1_ATR = 2.0;
+const UNIFIED_TP2_ATR = 3.5;
+const UNIFIED_TP3_ATR = 5.0;
 
 const EXCLUDE = new Set([
   // ── High cap crypto ──────────────────────────────────────────────────────────
@@ -110,7 +116,7 @@ const cleanupSignalPrices = () => {
   if (cleaned > 0) log(`🧹 Signal prices cleaned: ${cleaned} expired signals`);
 };
 
-// ── Correlation Filter (v4.1) ─────────────────────────────────────────────────
+// ── Correlation Filter (v4.2) ─────────────────────────────────────────────────
 // Limits directional exposure — too many same-direction signals = correlated risk
 // When BTC dumps, all LONG alts dump together. Cap at 3 open same-direction signals
 const getOpenDirectionCount = (direction) => {
@@ -126,7 +132,7 @@ const resistanceMap = new Map();
 let   lastUpdateId  = 0;
 let   fullScanCount      = 0;
 let   watchlistScanCount = 0;
-let   btcGateStatus      = { pass: true, reason: 'Starting up', price: 0, change: 0 };
+let   btcGateStatus      = { pass: true, reason: 'Starting up', price: 0, change: 0, change1H: 0, funding: 0, emoji: '⚪', bullishOk: true, bearishOk: true };
 
 const sleep   = ms => new Promise(r => setTimeout(r, ms));
 
@@ -404,7 +410,7 @@ const cleanupPumpTracker = () => {
 };
 
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
-// ── Funding Mean Reversion (v4.1) ─────────────────────────────────────────────
+// ── Funding Mean Reversion (v4.2) ─────────────────────────────────────────────
 // Fetches last 50 funding rates (≈16 hours) and flags extreme readings
 // Extreme negative = shorts heavily paying = squeeze setup
 // Extreme positive = longs heavily paying = short setup primed
@@ -484,7 +490,29 @@ const recordLoss = (symbol) => {
   log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL} | Est PnL: ${dailyLosses.totalPnlPct.toFixed(1)}%`);
 };
 
+// 7-day rolling PnL from paper trades (counts LOSS outcomes, estimates -1.8% each)
+let weeklyDrawdown = 0;
+let weeklyDrawdownCheckedAt = 0;
+const WEEKLY_DD_CACHE_MS = 600000; // 10 min cache
+const WEEKLY_DD_KILL = -15.0;       // -15% = stop all
+
+const checkWeeklyDrawdown = async () => {
+  const now = Date.now();
+  if (now - weeklyDrawdownCheckedAt < WEEKLY_DD_CACHE_MS) return weeklyDrawdown;
+  try {
+    const since = new Date(now - 7 * 24 * 3600 * 1000).toISOString();
+    const trades = await sb(`paper_trades?outcome=eq.LOSS&created_at=gte.${since}&select=id`) || [];
+    weeklyDrawdown = trades.length * -1.8; // each loss ≈ -1.8%
+    weeklyDrawdownCheckedAt = now;
+    if (weeklyDrawdown <= WEEKLY_DD_KILL) log(`🛑 WEEKLY DRAWDOWN: ${weeklyDrawdown.toFixed(1)}% — all trading blocked`);
+    return weeklyDrawdown;
+  } catch {
+    return weeklyDrawdown;
+  }
+};
+
 const isBlocked = (symbol) => {
+  if (weeklyDrawdown <= WEEKLY_DD_KILL) return { blocked: true, reason: `Weekly drawdown ${weeklyDrawdown.toFixed(1)}% — trading halted` };
   if (dailyLosses.totalPnlPct <= DAILY_PNL_KILL) return { blocked: true, reason: `Daily PnL kill (${dailyLosses.totalPnlPct.toFixed(1)}%)` };
   if (dailyLosses.count >= DAILY_KILL) return { blocked: true, reason: `Daily kill switch (${dailyLosses.count} losses)` };
   // Hard 24h kill — count rolling 24h losses from lossTracker
@@ -715,7 +743,7 @@ const checkBTCGate = async () => {
     const latestOpen  = parseFloat(klines[klines.length - 1][1]);
     const latestClose = parseFloat(klines[klines.length - 1][4]);
     const candleGreen = latestClose >= latestOpen;
-    // v4.1 — DIRECTION-AWARE BTC GATE
+    // v4.2 — DIRECTION-AWARE BTC GATE
     // General pass = only blocked when BTC is doing something extreme (flash crash, overheated)
     // Then per-direction flags check alignment
     let pass = true, reason = '✅ BTC stable';
@@ -737,7 +765,8 @@ const checkBTCGate = async () => {
     btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji, bullishOk, bearishOk };
     return btcGateStatus;
   } catch {
-    btcGateStatus = { pass: true, reason: '⚠️ BTC data unavailable', price: 0, change: 0 };
+    // Safe defaults — when BTC API fails, allow both directions (don't block everything)
+    btcGateStatus = { pass: true, reason: '⚠️ BTC data unavailable', price: 0, change: 0, change1H: 0, funding: 0, emoji: '⚪', bullishOk: true, bearishOk: true };
     return btcGateStatus;
   }
 };
@@ -940,7 +969,7 @@ const checkTrapRisk = async (symbol, price, direction, volSpike, oiBuilding, kli
   return { safe: trapScore === 0, trapScore, reasons, candle };
 };
 
-// ── Volume Climax Detector (v4.1) ─────────────────────────────────────────────
+// ── Volume Climax Detector (v4.2) ─────────────────────────────────────────────
 // Detects buying exhaustion — the TOP before reversal
 // Peak volume spike 2-4 candles ago + volume declining + price stalled = climax
 // Blocks LONG entries (we'd be buying at the top)
@@ -965,7 +994,7 @@ const checkVolumeClimax = (klines, direction) => {
   };
 };
 
-// ── Anti-Dump Trap Detector (v4.1) ────────────────────────────────────────────
+// ── Anti-Dump Trap Detector (v4.2) ────────────────────────────────────────────
 // Blocks LONG signals after a recent dump even if volume/OI suggests buying
 // This catches "falling knife" fakeouts — bounces that fail and dump more
 // Checks:
@@ -1026,7 +1055,7 @@ const checkAntiDumpTrap = (klines, direction) => {
   };
 };
 
-// ── Bullish Absorption Detector (v4.1) ────────────────────────────────────────
+// ── Bullish Absorption Detector (v4.2) ────────────────────────────────────────
 // Detects stealth accumulation pattern — smart money buying quietly
 // Signals:
 //   1. Price flat/compressed (not moving much)
@@ -1136,10 +1165,10 @@ ${FOOTER(btc, symbol)}`.trim();
 // EARLY — compact pre-breakout
 const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null) => {
   const isLong = direction === 'LONG';
-  const sl  = isLong ? price - atr * 1.5 : price + atr * 1.5;   // widened from 1.2
-  const tp1 = isLong ? price + atr * 2.0 : price - atr * 2.0;   // FIX 7: 2.0 ATR (was 1.5)
-  const tp2 = isLong ? price + atr * 3.5 : price - atr * 3.5;
-  const tp3 = isLong ? price + atr * 5.0 : price - atr * 5.0;
+  const sl  = isLong ? price - atr * UNIFIED_SL_ATR  : price + atr * UNIFIED_SL_ATR;
+  const tp1 = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
+  const tp2 = isLong ? price + atr * UNIFIED_TP2_ATR : price - atr * UNIFIED_TP2_ATR;
+  const tp3 = isLong ? price + atr * UNIFIED_TP3_ATR : price - atr * UNIFIED_TP3_ATR;
   const rr  = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
 
   const tags = [];
@@ -1152,7 +1181,7 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
 
   return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
 ${tags.join(' · ')}
-💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (1.5ATR)  🎯 $${fmtP(tp1)} (2ATR) / $${fmtP(tp2)} (3.5ATR)  R:R 1:${rr}
+💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (${UNIFIED_SL_ATR}ATR)  🎯 $${fmtP(tp1)} (${UNIFIED_TP1_ATR}ATR) / $${fmtP(tp2)} (${UNIFIED_TP2_ATR}ATR)  R:R 1:${rr}
 ⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
 ${FOOTER(btc, symbol)}`.trim();
 };
@@ -1162,10 +1191,10 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   const isLong   = direction === 'LONG';
   const atr      = calculateATR(klines) || (price * 0.018);
   // Wider SL for FIRE — breakout trades need breathing room
-  const sl       = isLong ? price - atr * 1.8 : price + atr * 1.8;
-  const tp1      = isLong ? price + atr * 2.0 : price - atr * 2.0;
-  const tp2      = isLong ? price + atr * 3.5 : price - atr * 3.5;
-  const tp3      = isLong ? price + atr * 5.0 : price - atr * 5.0;
+  const sl       = isLong ? price - atr * UNIFIED_SL_ATR  : price + atr * UNIFIED_SL_ATR;
+  const tp1      = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
+  const tp2      = isLong ? price + atr * UNIFIED_TP2_ATR : price - atr * UNIFIED_TP2_ATR;
+  const tp3      = isLong ? price + atr * UNIFIED_TP3_ATR : price - atr * UNIFIED_TP3_ATR;
   const candle   = layers.trap?.candle;
 
   const conf = [];
@@ -1266,7 +1295,7 @@ const runFullMarketScan = async () => {
       })
       .map(t => ({ symbol: t.symbol, price: parseFloat(t.lastPrice), change: parseFloat(t.priceChangePercent), volume: parseFloat(t.quoteVolume), isMid: MID_CAP.has(t.symbol) }))
       .sort((a, b) => Math.abs(a.change) - Math.abs(b.change)) // flat price first = early movers
-      .slice(0, 100); // v4.1 — 100 highest quality coins only
+      .slice(0, 100); // v4.2 — 100 highest quality coins only
 
     // Stale cleanup: remove coins older than 30 min OR scored under 3 last check
     const currentWatchlistRaw = await getWatchlist();
@@ -1286,7 +1315,7 @@ const runFullMarketScan = async () => {
     let added = 0;
 
     for (const coin of valid) {
-      await sleep(250); // v4.1 faster — 350→250ms
+      await sleep(250); // v4.2 faster — 350→250ms
       let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
@@ -1351,6 +1380,7 @@ const runWatchlistScan = async () => {
   watchlistScanCount++;
   log(`👁 Watchlist Scan #${watchlistScanCount}`);
   try {
+    await checkWeeklyDrawdown(); // update weekly DD cache
     const btc       = await checkBTCGate();
     const watchlist = await getWatchlist();
     const symbols   = watchlist.map(r => r.symbol);
@@ -1359,7 +1389,7 @@ const runWatchlistScan = async () => {
     let alertsFired = 0;
 
     for (const symbol of symbols) {
-      await sleep(200); // v4.1 faster — 400→200ms
+      await sleep(200); // v4.2 faster — 400→200ms
       let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
       try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
       if (!price) continue;
@@ -1553,16 +1583,16 @@ const runWatchlistScan = async () => {
         const earlyKey = `early_${symbol}`;
         if (canAlert(earlyKey)) {
           state.earlyEntry = price;
-          const tp1e = isLong ? price + atr * 2.0 : price - atr * 2.0;  // FIX 7
+          const tp1e = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1e;
           await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype));
           markAlert(earlyKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
-          log(`⚡ EARLY: ${symbol} ${direction} score:${score} earlyScore:${early.earlyScore}`);
+          log(`⚡ EARLY: ${symbol} ${direction} finalScore:${finalScore} (raw:${score}) earlyScore:${early.earlyScore}`);
           // Paper trade log
-          const slEarly = isLong ? price - atr * 1.2 : price + atr * 1.2;
-          const tp2Early = isLong ? price + atr * 3.0 : price - atr * 3.0;
+          const slEarly = isLong ? price - atr * UNIFIED_SL_ATR : price + atr * UNIFIED_SL_ATR;
+          const tp2Early = isLong ? price + atr * UNIFIED_TP2_ATR : price - atr * UNIFIED_TP2_ATR;
           await logPaperTrade({ symbol, direction, type: 'EARLY', price, sl: slEarly, tp1: tp1e, tp2: tp2Early, score, candle: trap.candle?.verdict, btcChange: btc.change });
         }
       }
@@ -1622,13 +1652,13 @@ const runWatchlistScan = async () => {
         if (canAlert(fireKey)) {
           state.entryPrice = price;
           state.state = 'FIRE';
-          const tp1f = isLong ? price + atr * 2.0 : price - atr * 2.0;  // FIX 7
+          const tp1f = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1f;
           await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype));
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
-          log(`🚀 FIRED: ${symbol} ${direction} score:${score} candle:${trap.candle?.verdict} ${warnings ? '⚠️'+warnings : ''}`);
+          log(`🚀 FIRED: ${symbol} ${direction} finalScore:${finalScore} (raw:${score}) candle:${trap.candle?.verdict}`);
         }
       } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2) {
         const reasons = [];
@@ -1742,12 +1772,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v4.1`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v4.2`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v4.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v4.2 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1798,9 +1828,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v4.1 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v4.2 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.2 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
