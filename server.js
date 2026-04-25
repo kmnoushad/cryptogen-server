@@ -43,7 +43,7 @@ const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pu
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 6.5; // v4.2 — balanced quality
+const MIN_ALERT_SCORE         = 7.0; // v5.0 — quality over quantity // v4.2 — balanced quality
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 // Unified risk parameters — same SL/TP for both EARLY and FIRE (per user preference)
@@ -399,6 +399,13 @@ const lossTracker   = new Map();
 const pumpTracker   = new Map(); // symbol → { pumpedAt, pctMove }
 const PUMP_COOLDOWN_MIN = 30;
 
+// ── v5.0 Recovery System — track consecutive losses and adjust risk ──────────
+const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
+const getPositionSizeHint = () => {
+  if (recoveryState.consecutiveLosses >= 2) return { pct: 50, label: '⚠️ REDUCED 50% (2 losses)' };
+  return { pct: 100, label: 'NORMAL 100%' };
+};
+
 // Periodic cleanup of stale pump records (prevents memory leak)
 const cleanupPumpTracker = () => {
   const cutoff = Date.now() - (PUMP_COOLDOWN_MIN * 2 * 60000); // 2x cooldown window
@@ -410,6 +417,25 @@ const cleanupPumpTracker = () => {
 };
 
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
+// ── ATR Expansion Check (v5.0) ───────────────────────────────────────────────
+// Real moves have EXPANDING volatility (wider candles)
+// Flat/shrinking ATR = sideways chop = fakeouts
+const checkATRExpansion = (klines) => {
+  if (!klines || klines.length < 30) return { expanding: false, reason: 'insufficient data', expansion: 0 };
+  const atr10 = calculateATR(klines.slice(-10), 10);
+  const atr20 = calculateATR(klines.slice(-30, -10), 10);
+  if (atr20 === 0) return { expanding: false, reason: 'zero ATR', expansion: 0 };
+  const expansion = ((atr10 - atr20) / atr20) * 100;
+  const expanding = expansion > 10; // needs 10%+ increase
+  return {
+    expanding,
+    expansion: parseFloat(expansion.toFixed(1)),
+    atr10: parseFloat(atr10.toFixed(6)),
+    atr20: parseFloat(atr20.toFixed(6)),
+    reason: expanding ? `ATR +${expansion.toFixed(1)}%` : `ATR flat ${expansion.toFixed(1)}%`,
+  };
+};
+
 // ── Funding Mean Reversion (v4.2) ─────────────────────────────────────────────
 // Fetches last 50 funding rates (≈16 hours) and flags extreme readings
 // Extreme negative = shorts heavily paying = squeeze setup
@@ -475,19 +501,33 @@ const checkRecentPump = (klines, price) => {
 
   return { pumped, pct: parseFloat(pct.toFixed(2)), window, pct30m: +pct30m.toFixed(1), pct1h: +pct1h.toFixed(1), pct2h: +pct2h.toFixed(1) };
 };
-const dailyLosses   = { count: 0, date: '', totalPnlPct: 0 };
-const DAILY_PNL_KILL = -5.0; // stop all trading if estimated daily PnL drops 5%
+const dailyLosses   = { count: 0, date: '', totalPnlPct: 0, dailyProfitPct: 0, dailyTrades: 0 };
+
+// v5.0 daily limits — stop trading on target OR stop-loss
+const DAILY_PNL_KILL      = -5.0;  // hard kill at -5% estimated daily
+const DAILY_LOSS_STOP_PCT = -1.5;  // stop trading at -1.5% loss
+const DAILY_PROFIT_STOP   = 2.0;   // stop trading at +2% profit (preservation)
+const MAX_TRADES_PER_DAY  = 3;     // hard cap on daily signals
 const LOSS_COOLDOWN = 90;
 const DAILY_KILL    = 3;
 const HARD_KILL_24H = 5; // absolute cap across 24h regardless of date
 
 const recordLoss = (symbol) => {
   const today = new Date().toDateString();
-  if (dailyLosses.date !== today) { dailyLosses.count = 0; dailyLosses.totalPnlPct = 0; dailyLosses.date = today; }
+  if (dailyLosses.date !== today) { dailyLosses.count = 0; dailyLosses.totalPnlPct = 0; dailyLosses.dailyProfitPct = 0; dailyLosses.dailyTrades = 0; dailyLosses.date = today; }
   dailyLosses.count++;
-  dailyLosses.totalPnlPct -= 1.8; // each SL hit ≈ -1.5 ATR on 15m ≈ -1.8% estimate
+  dailyLosses.totalPnlPct -= 1.8;
+  recoveryState.consecutiveLosses++;
+  recoveryState.lastTradeWin = false;
   lossTracker.set(symbol, { lossTime: Date.now() });
-  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL} | Est PnL: ${dailyLosses.totalPnlPct.toFixed(1)}%`);
+  const sizeHint = getPositionSizeHint();
+  log(`❌ Loss: ${symbol} | Daily: ${dailyLosses.count}/${DAILY_KILL} | Est PnL: ${dailyLosses.totalPnlPct.toFixed(1)}% | Consecutive: ${recoveryState.consecutiveLosses} | Next size: ${sizeHint.label}`);
+};
+
+const recordWin = (symbol, pnlPct) => {
+  recoveryState.consecutiveLosses = 0; // reset on win
+  recoveryState.lastTradeWin = true;
+  log(`✅ Win: ${symbol} | +${pnlPct.toFixed(2)}% | Consecutive losses reset`);
 };
 
 // 7-day rolling PnL from paper trades (counts LOSS outcomes, estimates -1.8% each)
@@ -764,8 +804,14 @@ const checkBTCGate = async () => {
     const emoji = change24h < -2 ? '🔴' : change24h < 0 ? '🟡' : '🟢';
     btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji, bullishOk, bearishOk };
     return btcGateStatus;
-  } catch {
-    // Safe defaults — when BTC API fails, allow both directions (don't block everything)
+  } catch (err) {
+    // Log the actual error so we can diagnose
+    log(`⚠️ BTC gate fetch failed: ${err.message || err}`);
+    // Keep last known good status if we have one — better than zeros
+    if (btcGateStatus.price > 0) {
+      btcGateStatus.reason = `⚠️ BTC fetch failed (using cached: ${btcGateStatus.change?.toFixed(2)}%)`;
+      return btcGateStatus;
+    }
     btcGateStatus = { pass: true, reason: '⚠️ BTC data unavailable', price: 0, change: 0, change1H: 0, funding: 0, emoji: '⚪', bullishOk: true, bearishOk: true };
     return btcGateStatus;
   }
@@ -1207,6 +1253,8 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
   if (hype?.tag)                      conf.push(hype.tag);
   if (layers?.absorption?.absorbing)  conf.push('🤫ABSORBED');
+  // v5.0 position size hint based on recovery state
+  const sizeHint = getPositionSizeHint();
 
   return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} CONFIRMATION — ${symbol.replace('USDT','')}</b>\n<i>⚠️ Best entry was EARLY. Skip if you missed it.</i>
 📊 ${score}/10 ${confBar(score)}
@@ -1429,6 +1477,7 @@ const runWatchlistScan = async () => {
 
       const compression = checkCompression(klines, currentOI, prevOI);
       const volume      = checkVolumeBuild(klines);
+      const atrExp      = checkATRExpansion(klines);
       const fundingZ    = await checkFundingExtreme(symbol, funding);
       const resistance  = checkResistanceTesting(symbol, price, klines);
       const fundingLS   = checkFundingLS(funding, ls, direction);
@@ -1647,7 +1696,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && atrExp.expanding && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -1689,6 +1738,48 @@ const runWatchlistScan = async () => {
         const chg = sig.direction === 'LONG'
           ? ((sig.price - price) / sig.price) * 100
           : ((price - sig.price) / sig.price) * 100;
+
+        // v5.0: Breakeven at +0.5% profit — lock in "no loss" early
+        const inProfitPct = sig.direction === 'LONG'
+          ? ((price - sig.price) / sig.price) * 100
+          : ((sig.price - price) / sig.price) * 100;
+
+        if (inProfitPct >= 0.5 && !sig.breakevenEarly) {
+          await postSignal(`✅ <b>${symbol.replace('USDT','')} BREAKEVEN</b> — Move SL to entry $${fmtP(sig.price)}\n💰 +0.5% secured · Risk now zero\n⏰ ${gstNow()} GST`);
+          sig.breakevenEarly = true;
+          signalPrices.set(symbol, sig);
+          log(`✅ BREAKEVEN-EARLY: ${symbol} +${inProfitPct.toFixed(2)}%`);
+        }
+
+        // v5.0: Trailing stop at +1% with 0.3% trail
+        if (inProfitPct >= 1.0) {
+          if (!sig.trailingHigh || inProfitPct > sig.trailingHigh) {
+            sig.trailingHigh = inProfitPct;
+            signalPrices.set(symbol, sig);
+          }
+          // If we retraced 0.3% from peak, alert trailing stop hit
+          if (sig.trailingHigh && sig.trailingHigh - inProfitPct > 0.3 && !sig.trailingExitSent) {
+            await postSignal(`📉 <b>${symbol.replace('USDT','')} TRAILING STOP</b>\n🎯 Peak: +${sig.trailingHigh.toFixed(2)}%  Current: +${inProfitPct.toFixed(2)}%\n💰 Lock in profit — exit position\n⏰ ${gstNow()} GST`);
+            sig.trailingExitSent = true;
+            signalPrices.set(symbol, sig);
+            // Track as win for daily stats
+            const pnl = Math.max(0.5, inProfitPct - 0.3);
+            dailyLosses.dailyProfitPct += pnl;
+            log(`💰 TRAILING-WIN: ${symbol} +${pnl.toFixed(2)}%`);
+          }
+        }
+
+        // v5.0: Force exit after 6 hours
+        const hoursHeld = (Date.now() - sig.firedAt) / 3600000;
+        if (hoursHeld >= 6 && !sig.timeoutSent) {
+          await postSignal(`⏰ <b>${symbol.replace('USDT','')} TIME EXIT</b>\n6 hours held — close position\n📊 Current: ${inProfitPct > 0 ? '+' : ''}${inProfitPct.toFixed(2)}%\n⏰ ${gstNow()} GST`);
+          sig.timeoutSent = true;
+          if (inProfitPct > 0) dailyLosses.dailyProfitPct += inProfitPct;
+          else dailyLosses.totalPnlPct += inProfitPct; // record small loss
+          signalPrices.delete(symbol);
+          log(`⏰ TIME-EXIT: ${symbol} ${inProfitPct.toFixed(2)}% after 6h`);
+          continue;
+        }
 
         // ATR-based fade threshold — adapts to each coin's volatility
         const fadeThreshold = sig.atr ? (sig.atr / sig.price) * 100 * 1.2 : FADE_THRESHOLD_PCT;
