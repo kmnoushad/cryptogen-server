@@ -799,8 +799,8 @@ const checkBTCGate = async () => {
     }
 
     // Direction-specific flags
-    const bullishOk = change1H > -0.8 && change24h > -3 && !(!candleGreen && change1H < -0.3);
-    const bearishOk = change1H < 0.8 && !(candleGreen && change1H > 0.3);
+    const bullishOk = change1H > -1.2 && change24h > -4; // v5.1 loosened
+    const bearishOk = change1H < 1.2 && change24h < 4; // v5.1 loosened
     const emoji = change24h < -2 ? '🔴' : change24h < 0 ? '🟡' : '🟢';
     btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji, bullishOk, bearishOk };
     return btcGateStatus;
