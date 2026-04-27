@@ -1,23 +1,33 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v4.2 — 9-Layer Intelligence Scanner
+// NEXIO SERVER v5.1 — Elite Recovery Edition (Rate-Limit Safe)
 //
-// LAYER 1  — BTC Momentum Gate + HTF EMA50 trend filter
-// LAYER 2  — Full coin universe (low + mid cap, pump filter 15%)
-// LAYER 3  — Price Compression + OI Buildup (MOST IMPORTANT)
-// LAYER 4  — Volume Buildup BEFORE Breakout
+// LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
+// LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
+// LAYER 3  — Price Compression + OI Buildup
+// LAYER 4  — Volume Buildup + Climax Detection
 // LAYER 5  — Repeated Resistance Testing (Breakout Pressure)
-// LAYER 6  — Funding + L/S Confirmation
-// LAYER 7  — Trap Risk Filter + Candle Wick + Liquidity Sweep Detector
+// LAYER 6  — Funding + L/S + Funding z-score (mean reversion)
+// LAYER 7  — Trap Risk + Candle Wick + Liquidity Sweep + Bullish Absorption
 // LAYER 8  — THREE-Stage Alert: EARLY → WATCH → FIRE
-// LAYER 9  — Position Manager (breakeven + partial TP)
+// LAYER 9  — Position Manager (breakeven, trailing, force-exit, recovery)
 //
-// v3.0 NEW:
-//   1. EARLY ENTRY MODE — compression+OI before breakout (best R:R)
-//   2. Fixed R:R — SL=1.2 ATR, TP1=1.5 ATR, TP2=3 ATR (R:R >= 1.5)
-//   3. HTF EMA50 filter — LONG above EMA50 only, SHORT below only
-//   4. Liquidity sweep detector — enter AFTER sweep not before
-//   5. Two setup types — EARLY (pre-breakout) + FIRE (confirmed breakout)
-//   6. Position manager — move SL to breakeven after TP1 hit
+// v5.0 ADDITIONS:
+//   1. Daily caps: +2% profit stop / -1.5% loss stop / 3 trades max
+//   2. Breakeven at +0.5% profit (lock in zero-risk)
+//   3. Trailing stop: activate at +1%, trail 0.3% from peak
+//   4. Force exit after 6 hours (no dead trades)
+//   5. Recovery system: 50% size after 2 consecutive losses
+//   6. ATR expansion required for FIRE (volatility confirmation)
+//   7. MIN_ALERT_SCORE 7.0 (quality over quantity)
+//
+// v5.1 ADJUSTMENTS:
+//   1. Slower scans to avoid Binance HTTP 418 rate limit
+//      - Full scan: 5 min (was 2 min)
+//      - Watchlist scan: 2 min (was 45 sec)
+//      - Per-coin sleep doubled (400-500ms)
+//   2. BTC gate loosened ±0.8% → ±1.2% (was blocking too many signals)
+//   3. BTC fetch error logged + caches last known good status
+//   4. API load: ~462 weight/min (19% of 2400 limit)
 // ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1863,12 +1873,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v4.2`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.1`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v4.2 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online\n✅ Both channels connected\n✅ 9-Layer scanner active\n✅ Candle wick detector active\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.1 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -1919,9 +1929,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v4.2 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.1 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v4.2 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
