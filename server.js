@@ -35,8 +35,8 @@ const PRICE_USD       = 9.99;
 const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
 const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
-const FULL_MARKET_INTERVAL_MS = 120000; // v4.2 — 2 min
-const WATCHLIST_SCAN_INTERVAL = 45000; // v4.2 — 45 sec
+const FULL_MARKET_INTERVAL_MS = 300000; // v5.1 — 5 min (recover from 418)
+const WATCHLIST_SCAN_INTERVAL = 120000; // v5.1 — 2 min (recover from 418)
 const POLL_INTERVAL_MS        = 30000;
 const ALERT_COOLDOWN_MS       = 1800000;
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
@@ -1363,7 +1363,7 @@ const runFullMarketScan = async () => {
     let added = 0;
 
     for (const coin of valid) {
-      await sleep(250); // v4.2 faster — 350→250ms
+      await sleep(500); // v5.1 — 500ms (avoid 418)
       let funding = 0, ls = 1, klines = [], currentOI = 0, prevOI = 0;
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
@@ -1437,7 +1437,7 @@ const runWatchlistScan = async () => {
     let alertsFired = 0;
 
     for (const symbol of symbols) {
-      await sleep(200); // v4.2 faster — 400→200ms
+      await sleep(400); // v5.1 — 400ms (avoid 418)
       let price = 0, funding = 0, ls = 1, currentOI = 0, prevOI = 0, klines = [];
       try { const t = await fetchJSON(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`); price = parseFloat(t.price); } catch { }
       if (!price) continue;
