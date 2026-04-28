@@ -694,13 +694,14 @@ const tg = async (chatId, text) => {
 // Logs every signal to Supabase 'paper_trades' table for outcome tracking
 const logPaperTrade = async (signal) => {
   try {
-    await sb('paper_trades', {
+    log(`📒 Logging paper trade: ${signal.symbol} ${signal.direction} ${signal.type} entry=${signal.price}`);
+    const result = await sb('paper_trades', {
       method: 'POST',
       body: JSON.stringify({
         symbol:      signal.symbol,
         direction:   signal.direction,
-        signal_type: signal.type,        // 'EARLY' | 'FIRE' | 'WATCH'
-        session:     getSession(),       // ASIA | LONDON | NY | OFF
+        signal_type: signal.type,
+        session:     getSession(),
         entry:       signal.price,
         sl:          signal.sl,
         tp1:         signal.tp1,
@@ -708,11 +709,15 @@ const logPaperTrade = async (signal) => {
         score:       signal.score,
         candle:      signal.candle,
         btc_change:  signal.btcChange,
-        status:      'OPEN',             // will be updated by outcome checker
+        status:      'OPEN',
         created_at:  new Date().toISOString(),
       }),
     });
-  } catch (err) { log('Paper log error:', err.message); }
+    log(`✅ Paper trade saved: ${signal.symbol} (response: ${JSON.stringify(result).slice(0,100)})`);
+  } catch (err) {
+    log(`❌ Paper log FAILED for ${signal.symbol}: ${err.message || err}`);
+    log(`   Full error: ${JSON.stringify(err).slice(0, 200)}`);
+  }
 };
 
 // ── PAPER TRADE OUTCOME CHECKER ──────────────────────────────────────────────
