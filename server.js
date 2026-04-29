@@ -1808,6 +1808,12 @@ const runWatchlistScan = async () => {
       try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=20`); } catch { }
       try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
+      // Fix #3: Validate klines — skip if Binance returned bad data
+      if (!klines || !Array.isArray(klines) || klines.length < 10) {
+        log(`⚠️ Bad klines for ${symbol} — skipping this scan`);
+        continue;
+      }
+
       // Direction — PRICE STRUCTURE decides, funding/LS only block bad setups
       // Fetch HTF trend first
       const htfPre = await checkHTFTrend(symbol);
@@ -1891,14 +1897,13 @@ const runWatchlistScan = async () => {
       const rsi = calcRSI(klines);
       const maStack = checkMAStack(klines);
       // RSI extremes block trades in wrong direction (chasing)
+      // Fix #4: Just skip this scan, keep coin tracked for re-evaluation later
       if (direction === 'LONG' && rsi > 75) {
-        log(`🚫 RSI-OVERBOUGHT: ${symbol} LONG blocked (RSI ${rsi.toFixed(1)})`);
-        coinTracker.delete(symbol);
+        log(`🚫 RSI-OVERBOUGHT: ${symbol} LONG skipped (RSI ${rsi.toFixed(1)}) — re-eval next scan`);
         continue;
       }
       if (direction === 'SHORT' && rsi < 25) {
-        log(`🚫 RSI-OVERSOLD: ${symbol} SHORT blocked (RSI ${rsi.toFixed(1)})`);
-        coinTracker.delete(symbol);
+        log(`🚫 RSI-OVERSOLD: ${symbol} SHORT skipped (RSI ${rsi.toFixed(1)}) — re-eval next scan`);
         continue;
       }
       let score = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
@@ -2148,6 +2153,7 @@ const runWatchlistScan = async () => {
             // Track as win for daily stats
             const pnl = Math.max(0.5, inProfitPct - 0.3);
             dailyLosses.dailyProfitPct += pnl;
+            recordWin(symbol, pnl);  // ← FIX: reset consecutive losses counter
             log(`💰 TRAILING-WIN: ${symbol} +${pnl.toFixed(2)}%`);
           }
         }
@@ -2157,8 +2163,12 @@ const runWatchlistScan = async () => {
         if (hoursHeld >= 6 && !sig.timeoutSent) {
           await postSignal(`⏰ <b>${symbol.replace('USDT','')} TIME EXIT</b>\n6 hours held — close position\n📊 Current: ${inProfitPct > 0 ? '+' : ''}${inProfitPct.toFixed(2)}%\n⏰ ${gstNow()} GST`);
           sig.timeoutSent = true;
-          if (inProfitPct > 0) dailyLosses.dailyProfitPct += inProfitPct;
-          else dailyLosses.totalPnlPct += inProfitPct; // record small loss
+          if (inProfitPct > 0) {
+            dailyLosses.dailyProfitPct += inProfitPct;
+            recordWin(symbol, inProfitPct);  // ← FIX: reset consecutive losses
+          } else {
+            dailyLosses.totalPnlPct += inProfitPct;
+          }
           signalPrices.delete(symbol);
           log(`⏰ TIME-EXIT: ${symbol} ${inProfitPct.toFixed(2)}% after 6h`);
           continue;
