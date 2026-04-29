@@ -428,7 +428,7 @@ const PUMP_COOLDOWN_MIN = 30;
 // ── v5.0 Recovery System — track consecutive losses and adjust risk ──────────
 const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
 
-// v5.2 — Block reason counter for diagnostics
+// v5.3 — Block reason counter for diagnostics
 const blockReasons = {
   btcDrag: 0, pumped: 0, pumpCooldown: 0, dumpTrap: 0, newsEvent: 0,
   climax: 0, lowLiq: 0, correlation: 0, atrFlat: 0, weakCandle: 0,
@@ -452,7 +452,7 @@ const cleanupPumpTracker = () => {
 };
 
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
-// ── RSI Helper (v5.2) ────────────────────────────────────────────────────────
+// ── RSI Helper (v5.3) ────────────────────────────────────────────────────────
 const calcRSI = (klines, period = 14) => {
   if (!klines || klines.length < period + 1) return 50;
   const closes = klines.map(k => parseFloat(k[4]));
@@ -467,7 +467,7 @@ const calcRSI = (klines, period = 14) => {
   return 100 - (100 / (1 + rs));
 };
 
-// ── MA Stack Analysis (v5.2) ─────────────────────────────────────────────────
+// ── MA Stack Analysis (v5.3) ─────────────────────────────────────────────────
 const checkMAStack = (klines) => {
   if (!klines || klines.length < 99) return { stack: 'unknown' };
   const closes = klines.map(k => parseFloat(k[4]));
@@ -484,7 +484,7 @@ const checkMAStack = (klines) => {
   return { stack, ma7, ma25, ma99 };
 };
 
-// ── BTC Regime Predictor (v5.2) ───────────────────────────────────────────────
+// ── BTC Regime Predictor (v5.3) ───────────────────────────────────────────────
 // Classifies BTC into BULLISH / BEARISH / CHOPPY based on multiple TF + momentum
 // Blocks all signals during CHOPPY (where most losses happen)
 let btcRegime = { regime: 'UNKNOWN', confidence: 0, reason: 'init', changedAt: 0, lastNotified: 'UNKNOWN' };
@@ -868,9 +868,134 @@ const logPaperTrade = async (signal) => {
       }),
     });
     log(`✅ Paper trade saved: ${signal.symbol} (response: ${JSON.stringify(result).slice(0,100)})`);
+    lastSignalLogTime = Date.now();
   } catch (err) {
     log(`❌ Paper log FAILED for ${signal.symbol}: ${err.message || err}`);
     log(`   Full error: ${JSON.stringify(err).slice(0, 200)}`);
+  }
+};
+
+// ── Daily Summary + Anomaly Alerts (v5.3) ────────────────────────────────────
+// Auto-pushes summary at 21:00 Dubai daily — no need to remember /stats
+// Also pings on critical anomalies (paper logger broken, BTC fetch dead, etc)
+
+let lastSummaryDate = '';
+let lastAnomalyCheck = 0;
+let lastSignalLogTime = Date.now();
+let btcFetchFails = 0;
+
+const sendDailySummary = async () => {
+  try {
+    // Stats
+    const all = (await sb('paper_trades?select=*')) || [];
+    const today = new Date().toDateString();
+    const todayTrades = all.filter(t => new Date(t.created_at).toDateString() === today);
+    const closed = todayTrades.filter(t => t.status !== 'OPEN');
+    const wins = closed.filter(t => t.outcome === 'WIN').length;
+    const losses = closed.filter(t => t.outcome === 'LOSS').length;
+    const open = todayTrades.filter(t => t.status === 'OPEN').length;
+    const longs = todayTrades.filter(t => t.direction === 'LONG').length;
+    const shorts = todayTrades.filter(t => t.direction === 'SHORT').length;
+    const wr = closed.length > 0 ? ((wins / closed.length) * 100).toFixed(0) : '—';
+
+    // Top block reasons today
+    const sortedBlocks = Object.entries(blockReasons).sort((a,b) => b[1] - a[1]).filter(([_,v]) => v > 0).slice(0, 3);
+    const topBlocks = sortedBlocks.length > 0
+      ? sortedBlocks.map(([k,v]) => `  ${k}: ${v}`).join('\n')
+      : '  none';
+
+    // Health
+    const minsSinceLog = Math.floor((Date.now() - lastSignalLogTime) / 60000);
+    const paperOk = minsSinceLog < 1440 ? '✅' : '⚠️ no logs for ' + Math.floor(minsSinceLog/60) + 'h';
+    const btcOk = btcFetchFails < 5 ? '✅' : `⚠️ ${btcFetchFails} fails`;
+    const trackerOk = coinTracker.size > 0 ? `✅ tracking ${coinTracker.size}` : '⚠️ empty tracker';
+
+    const msg = `📊 <b>NEXIO DAILY SUMMARY</b>
+━━━━━━━━━━━━━━━
+🌐 BTC Regime: ${btcRegime.regime} (${btcRegime.confidence}%)
+📈 Today's signals: ${todayTrades.length}
+   LONG: ${longs} · SHORT: ${shorts}
+🎯 Closed: ${wins}W ${losses}L · Open: ${open}
+🔥 Win rate today: ${wr}%
+
+📊 Cumulative: ${all.length} signals
+   Closed: ${all.filter(t => t.status !== 'OPEN').length}
+   Win rate: ${all.filter(t => t.status !== 'OPEN').length > 0 ? ((all.filter(t => t.outcome === 'WIN').length / all.filter(t => t.status !== 'OPEN').length) * 100).toFixed(0) : '—'}%
+
+🔬 Top blocks today:
+${topBlocks}
+
+🩺 Health:
+  Paper logger: ${paperOk}
+  BTC fetch: ${btcOk}
+  Coin tracker: ${trackerOk}
+  Watchlist: ${(await getWatchlist()).length}
+
+⏰ ${gstNow()} GST
+━━━━━━━━━━━━━━━
+<i>Reset daily 21:00 Dubai · Send /stats for full breakdown</i>`;
+
+    await tg(OWNER_CHAT_ID, msg);
+    log('📬 Daily summary sent');
+
+    // Reset block counters for next day
+    Object.keys(blockReasons).forEach(k => blockReasons[k] = 0);
+    btcFetchFails = 0;
+  } catch (err) {
+    log(`⚠️ Daily summary failed: ${err.message}`);
+  }
+};
+
+// Schedule check every 30 min — fires summary at 21:00 Dubai
+const checkDailySummary = async () => {
+  const now = new Date();
+  const dubaiHour = parseInt(now.toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Dubai' }));
+  const today = now.toDateString();
+  if (dubaiHour === 21 && lastSummaryDate !== today) {
+    lastSummaryDate = today;
+    await sendDailySummary();
+  }
+};
+
+// Anomaly checker — runs every hour
+const checkAnomalies = async () => {
+  try {
+    const alerts = [];
+
+    // 1. Paper logger silent for 6+ hours during active scanning
+    const minsSinceLog = (Date.now() - lastSignalLogTime) / 60000;
+    if (minsSinceLog > 360 && fullScanCount > 10) {
+      alerts.push(`⚠️ No paper trade logged in ${Math.floor(minsSinceLog/60)}h — logger may be broken`);
+    }
+
+    // 2. BTC fetch failing repeatedly
+    if (btcFetchFails >= 10) {
+      alerts.push(`⚠️ BTC fetch failed ${btcFetchFails} times — check Railway/Binance`);
+    }
+
+    // 3. Tracker stuck (no growth in 2+ hours of scans)
+    if (fullScanCount > 30 && coinTracker.size === 0) {
+      alerts.push(`⚠️ Coin tracker is empty despite ${fullScanCount} scans — filters may be too tight`);
+    }
+
+    // 4. BTC regime stuck UNKNOWN for 1+ hour
+    if (btcRegime.regime === 'UNKNOWN' && Date.now() - btcRegime.changedAt > 3600000) {
+      alerts.push(`⚠️ BTC regime stuck UNKNOWN — regime predictor not updating`);
+    }
+
+    // 5. Watchlist drained to near-zero
+    const wl = await getWatchlist();
+    if (wl.length < 5 && fullScanCount > 5) {
+      alerts.push(`⚠️ Watchlist only ${wl.length} coins — may need /clearwatchlist + /fullscan`);
+    }
+
+    if (alerts.length > 0) {
+      const msg = `🚨 <b>NEXIO ANOMALY DETECTED</b>\n━━━━━━━━━━━━━━━\n${alerts.join('\n\n')}\n\n⏰ ${gstNow()} GST`;
+      await tg(OWNER_CHAT_ID, msg);
+      log('🚨 Anomaly alert sent: ' + alerts.length + ' issue(s)');
+    }
+  } catch (err) {
+    log(`⚠️ Anomaly check failed: ${err.message}`);
   }
 };
 
@@ -976,6 +1101,7 @@ const checkBTCGate = async () => {
   } catch (err) {
     // Log the actual error so we can diagnose
     log(`⚠️ BTC gate fetch failed: ${err.message || err}`);
+    btcFetchFails++;
     // Keep last known good status if we have one — better than zeros
     if (btcGateStatus.price > 0) {
       btcGateStatus.reason = `⚠️ BTC fetch failed (using cached: ${btcGateStatus.change?.toFixed(2)}%)`;
@@ -2033,6 +2159,9 @@ const handleCommand = async msg => {
     const btc = await checkBTCGate();
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
+  else if (text === '/summary') {
+    await sendDailySummary();
+  }
   else if (text === '/regime') {
     const r = btcRegime;
     const emoji = r.regime === 'BULLISH' ? '🟢' : r.regime === 'BEARISH' ? '🔴' : '🟡';
@@ -2133,6 +2262,12 @@ const start = async () => {
 
   // Memory cleanup — every 10 min
   setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); cleanupCoinTracker(); }, 600000);
+
+  // v5.3 Daily summary check every 30 min (fires at 21:00 Dubai)
+  setInterval(checkDailySummary, 1800000);
+
+  // v5.3 Anomaly check every hour
+  setInterval(checkAnomalies, 3600000);
 
   // BTC regime check — every 5 min
   await checkBTCRegime();
