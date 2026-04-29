@@ -1235,7 +1235,7 @@ const buildWatchMsg = (symbol, score, direction, layers, btc, hype = null) => {
 
   return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
 ${tags.join(' · ')}
-⏳ Waiting for breakout
+${direction === 'LONG' ? '⏳ Waiting for breakout (up)' : '⏳ Waiting for breakdown (down)'}
 ${FOOTER(btc, symbol)}`.trim();
 };
 
