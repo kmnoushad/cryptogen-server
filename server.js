@@ -427,6 +427,15 @@ const PUMP_COOLDOWN_MIN = 30;
 
 // ── v5.0 Recovery System — track consecutive losses and adjust risk ──────────
 const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
+
+// v5.2 — Block reason counter for diagnostics
+const blockReasons = {
+  btcDrag: 0, pumped: 0, pumpCooldown: 0, dumpTrap: 0, newsEvent: 0,
+  climax: 0, lowLiq: 0, correlation: 0, atrFlat: 0, weakCandle: 0,
+  notExtended: 0, scoreLow: 0, htfMisaligned: 0, momentumAgainst: 0
+};
+const incBlock = (reason) => { if (blockReasons[reason] !== undefined) blockReasons[reason]++; };
+
 const getPositionSizeHint = () => {
   if (recoveryState.consecutiveLosses >= 2) return { pct: 50, label: '⚠️ REDUCED 50% (2 losses)' };
   return { pct: 100, label: 'NORMAL 100%' };
@@ -1517,7 +1526,7 @@ const runWatchlistScan = async () => {
       // Anti-dump trap check — block LONG after recent dump
       const dumpTrap = checkAntiDumpTrap(klines, direction);
       if (dumpTrap.isTrap) {
-        log(`🔪 DUMP-TRAP: ${symbol} LONG blocked — ${dumpTrap.reasons.join(', ')}`);
+        incBlock('dumpTrap'); log(`🔪 DUMP-TRAP: ${symbol} LONG blocked — ${dumpTrap.reasons.join(', ')}`);
       }
 
       // FIX 6: News/event detector — skip coins with extreme volume spike
@@ -1533,14 +1542,14 @@ const runWatchlistScan = async () => {
         // Massive volume but small price move = news/event (unpredictable)
         if (prevAvg > 0 && lastVol > prevAvg * 5 && priceMove < 1) {
           newsEvent = true;
-          log(`📰 NEWS-EVENT: ${symbol} vol ${(lastVol/prevAvg).toFixed(1)}x but price ${priceMove.toFixed(1)}% — skip`);
+          incBlock('newsEvent'); log(`📰 NEWS-EVENT: ${symbol} vol ${(lastVol/prevAvg).toFixed(1)}x but price ${priceMove.toFixed(1)}% — skip`);
         }
       }
 
       // Volume climax check — blocks LONG if buying exhaustion detected
       const climax = checkVolumeClimax(klines, direction);
       if (climax.climax && direction === 'LONG') {
-        log(`🔝 VOL-CLIMAX: ${symbol} LONG blocked — buying exhaustion (peak ${climax.peakRatio}x, ${climax.peakCandlesAgo} candles ago)`);
+        incBlock('climax'); log(`🔝 VOL-CLIMAX: ${symbol} LONG blocked — buying exhaustion (peak ${climax.peakRatio}x, ${climax.peakCandlesAgo} candles ago)`);
       }
 
       // Bullish absorption check — only for LONG (stealth accumulation)
@@ -1615,12 +1624,12 @@ const runWatchlistScan = async () => {
 
       // BTC direction alignment
       const btcSupportive = isLong ? (btc.bullishOk !== false) : (btc.bearishOk !== false);
-      if (!btcSupportive) log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
+      if (!btcSupportive) incBlock('btcDrag'); log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
 
       // Recent pump check — no-chase rule (checks 30m/1h/2h windows)
       const pumpCheck = checkRecentPump(klines, price);
       if (pumpCheck.pumped) {
-        log(`🚫 NO-CHASE: ${symbol} pumped ${pumpCheck.pct}% in ${pumpCheck.window} (30m:${pumpCheck.pct30m}% 1h:${pumpCheck.pct1h}% 2h:${pumpCheck.pct2h}%)`);
+        incBlock('pumped'); log(`🚫 NO-CHASE: ${symbol} pumped ${pumpCheck.pct}% in ${pumpCheck.window} (30m:${pumpCheck.pct30m}% 1h:${pumpCheck.pct1h}% 2h:${pumpCheck.pct2h}%)`);
         pumpTracker.set(symbol, { pumpedAt: Date.now(), pct: pumpCheck.pct });
       }
       // Pump cooldown — skip if pumped within last PUMP_COOLDOWN_MIN
@@ -1628,12 +1637,12 @@ const runWatchlistScan = async () => {
       const inPumpCooldown = pumpCD && (Date.now() - pumpCD.pumpedAt) < (PUMP_COOLDOWN_MIN * 60000);
       if (inPumpCooldown) {
         const minsLeft = Math.ceil(PUMP_COOLDOWN_MIN - (Date.now() - pumpCD.pumpedAt) / 60000);
-        log(`⏳ PUMP-COOLDOWN: ${symbol} skip ${minsLeft}min more`);
+        incBlock('pumpCooldown'); log(`⏳ PUMP-COOLDOWN: ${symbol} skip ${minsLeft}min more`);
       }
 
       // Session filter
       const lowLiq = isLowLiquiditySession();
-      if (lowLiq && state.scanCount === 1) log(`🌙 LOW-LIQ: ${symbol} — Dubai dead hours`);
+      if (lowLiq && state.scanCount === 1) incBlock('lowLiq'); log(`🌙 LOW-LIQ: ${symbol} — Dubai dead hours`);
 
       // Market regime, OI classification, extension filter
       const regime    = classifyRegime(klines);
@@ -1879,6 +1888,12 @@ const handleCommand = async msg => {
   else if (text === '/btc') {
     const btc = await checkBTCGate();
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
+  }
+  else if (text === '/diagnostics' || text === '/diag') {
+    const total = Object.values(blockReasons).reduce((a,b) => a+b, 0);
+    const sorted = Object.entries(blockReasons).sort((a,b) => b[1] - a[1]);
+    const lines = sorted.filter(([_,v]) => v > 0).map(([k,v]) => `${k}: ${v} (${(v/total*100).toFixed(1)}%)`).join('\n');
+    await tg(chatId, `🔬 <b>Block Reasons (since restart)</b>\n━━━━━━━━━━━━━━━\nTotal blocks: ${total}\n\n${lines || 'No blocks recorded'}\n\nUse this to see which filter is most active.`);
   }
   else if (text === '/stats') {
     const all = (await sb('paper_trades?select=*')) || [];
