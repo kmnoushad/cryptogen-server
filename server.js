@@ -428,7 +428,7 @@ const PUMP_COOLDOWN_MIN = 30;
 // ── v5.0 Recovery System — track consecutive losses and adjust risk ──────────
 const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
 
-// v5.3 — Block reason counter for diagnostics
+// v5.4 — Block reason counter for diagnostics
 const blockReasons = {
   btcDrag: 0, pumped: 0, pumpCooldown: 0, dumpTrap: 0, newsEvent: 0,
   climax: 0, lowLiq: 0, correlation: 0, atrFlat: 0, weakCandle: 0,
@@ -452,7 +452,7 @@ const cleanupPumpTracker = () => {
 };
 
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
-// ── RSI Helper (v5.3) ────────────────────────────────────────────────────────
+// ── RSI Helper (v5.4) ────────────────────────────────────────────────────────
 const calcRSI = (klines, period = 14) => {
   if (!klines || klines.length < period + 1) return 50;
   const closes = klines.map(k => parseFloat(k[4]));
@@ -467,7 +467,7 @@ const calcRSI = (klines, period = 14) => {
   return 100 - (100 / (1 + rs));
 };
 
-// ── MA Stack Analysis (v5.3) ─────────────────────────────────────────────────
+// ── MA Stack Analysis (v5.4) ─────────────────────────────────────────────────
 const checkMAStack = (klines) => {
   if (!klines || klines.length < 99) return { stack: 'unknown' };
   const closes = klines.map(k => parseFloat(k[4]));
@@ -484,7 +484,7 @@ const checkMAStack = (klines) => {
   return { stack, ma7, ma25, ma99 };
 };
 
-// ── BTC Regime Predictor (v5.3) ───────────────────────────────────────────────
+// ── BTC Regime Predictor (v5.4) ───────────────────────────────────────────────
 // Classifies BTC into BULLISH / BEARISH / CHOPPY based on multiple TF + momentum
 // Blocks all signals during CHOPPY (where most losses happen)
 let btcRegime = { regime: 'UNKNOWN', confidence: 0, reason: 'init', changedAt: 0, lastNotified: 'UNKNOWN' };
@@ -578,6 +578,70 @@ const checkBTCRegime = async () => {
   } catch (err) {
     log(`⚠️ BTC regime check failed: ${err.message}`);
     return btcRegime;
+  }
+};
+
+// ── Fake Pump History Detector (v5.4) ────────────────────────────────────────
+// Looks at last 7 days of 4H candles
+// Counts how many times this coin pumped 5%+ then dumped back within 8 hours
+// If 3+ instances → flag as PUMP_DUMP coin → block all signals
+const fakePumpCache = new Map(); // symbol → { result, ts }
+const FAKE_PUMP_CACHE_MS = 4 * 3600 * 1000; // 4h cache
+
+const checkFakePumpHistory = async (symbol) => {
+  const cached = fakePumpCache.get(symbol);
+  if (cached && Date.now() - cached.ts < FAKE_PUMP_CACHE_MS) return cached.result;
+
+  try {
+    // Fetch last 7 days of 4H candles (42 candles)
+    const klines4h = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=4h&limit=42`);
+    if (!klines4h || klines4h.length < 20) {
+      const result = { isPumpDump: false, fakeCount: 0, reason: 'insufficient history' };
+      fakePumpCache.set(symbol, { result, ts: Date.now() });
+      return result;
+    }
+
+    let fakeCount = 0;
+    const events = [];
+
+    // Walk through history — find pump candles followed by dumps
+    for (let i = 0; i < klines4h.length - 2; i++) {
+      const open = parseFloat(klines4h[i][1]);
+      const high = parseFloat(klines4h[i][2]);
+      const low  = parseFloat(klines4h[i][3]);
+      const close = parseFloat(klines4h[i][4]);
+
+      // Did this candle pump 5%+ from open?
+      const pumpPct = ((high - open) / open) * 100;
+      if (pumpPct < 5) continue;
+
+      // Did the next 2 candles dump back below the original open?
+      const next1Low = parseFloat(klines4h[i+1][3]);
+      const next2Low = parseFloat(klines4h[i+2][3]);
+      const lowestAfter = Math.min(next1Low, next2Low);
+      const dumpedBack = lowestAfter < open;
+
+      if (dumpedBack) {
+        fakeCount++;
+        events.push(`+${pumpPct.toFixed(1)}% → dumped`);
+      }
+    }
+
+    // 3+ fake pumps in 7 days = pump-dump scheme coin
+    const isPumpDump = fakeCount >= 3;
+
+    const result = {
+      isPumpDump,
+      fakeCount,
+      events: events.slice(-3), // keep last 3 for logging
+      reason: isPumpDump ? `🚨 ${fakeCount} fake pumps in 7d` : `${fakeCount} fake pumps in 7d (clean)`,
+    };
+
+    fakePumpCache.set(symbol, { result, ts: Date.now() });
+    return result;
+  } catch (err) {
+    log(`⚠️ Fake pump history check failed for ${symbol}: ${err.message}`);
+    return { isPumpDump: false, fakeCount: 0, reason: 'fetch failed' };
   }
 };
 
@@ -875,7 +939,7 @@ const logPaperTrade = async (signal) => {
   }
 };
 
-// ── Daily Summary + Anomaly Alerts (v5.3) ────────────────────────────────────
+// ── Daily Summary + Anomaly Alerts (v5.4) ────────────────────────────────────
 // Auto-pushes summary at 21:00 Dubai daily — no need to remember /stats
 // Also pings on critical anomalies (paper logger broken, BTC fetch dead, etc)
 
@@ -1779,6 +1843,14 @@ const runWatchlistScan = async () => {
       const fundingLS   = checkFundingLS(funding, ls, direction);
       const trap        = await checkTrapRisk(symbol, price, direction, volume.spike, compression.oiBuilding, klines);
 
+      // FAKE PUMP HISTORY check — coins with repeated pump-dump pattern
+      const fakeHist = await checkFakePumpHistory(symbol);
+      if (fakeHist.isPumpDump) {
+        log(`🎭 PUMP-DUMP-COIN: ${symbol} ${fakeHist.reason} — blocking all signals`);
+        coinTracker.delete(symbol);
+        continue; // skip this coin entirely
+      }
+
       // Anti-dump trap check — block LONG after recent dump
       const dumpTrap = checkAntiDumpTrap(klines, direction);
       if (dumpTrap.isTrap) {
@@ -2162,6 +2234,17 @@ const handleCommand = async msg => {
   else if (text === '/summary') {
     await sendDailySummary();
   }
+  else if (text.startsWith('/history')) {
+    const parts = text.split(' ');
+    const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
+    if (!sym) {
+      await tg(chatId, `Usage: /history KAITO\n\nChecks if a coin has fake pump/dump history`);
+    } else {
+      const h = await checkFakePumpHistory(sym);
+      const emoji = h.isPumpDump ? '🚨' : '✅';
+      await tg(chatId, `${emoji} <b>${sym}</b> 7-day history\n━━━━━━━━━━━━━━━\n${h.reason}\n\nFake pumps detected: ${h.fakeCount}\n${h.events ? '\nLast events:\n' + h.events.join('\n') : ''}\n\n${h.isPumpDump ? '⚠️ Bot will BLOCK signals on this coin' : '✅ Coin appears clean'}`);
+    }
+  }
   else if (text === '/regime') {
     const r = btcRegime;
     const emoji = r.regime === 'BULLISH' ? '🟢' : r.regime === 'BEARISH' ? '🔴' : '🟡';
@@ -2263,10 +2346,10 @@ const start = async () => {
   // Memory cleanup — every 10 min
   setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); cleanupCoinTracker(); }, 600000);
 
-  // v5.3 Daily summary check every 30 min (fires at 21:00 Dubai)
+  // v5.4 Daily summary check every 30 min (fires at 21:00 Dubai)
   setInterval(checkDailySummary, 1800000);
 
-  // v5.3 Anomaly check every hour
+  // v5.4 Anomaly check every hour
   setInterval(checkAnomalies, 3600000);
 
   // BTC regime check — every 5 min
