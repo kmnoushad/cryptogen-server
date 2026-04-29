@@ -452,6 +452,135 @@ const cleanupPumpTracker = () => {
 };
 
 // Tighter pump detection — checks 3 timeframes, any trigger blocks
+// ── RSI Helper (v5.2) ────────────────────────────────────────────────────────
+const calcRSI = (klines, period = 14) => {
+  if (!klines || klines.length < period + 1) return 50;
+  const closes = klines.map(k => parseFloat(k[4]));
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i-1];
+    if (diff > 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  if (losses === 0) return 100;
+  const rs = (gains/period) / (losses/period);
+  return 100 - (100 / (1 + rs));
+};
+
+// ── MA Stack Analysis (v5.2) ─────────────────────────────────────────────────
+const checkMAStack = (klines) => {
+  if (!klines || klines.length < 99) return { stack: 'unknown' };
+  const closes = klines.map(k => parseFloat(k[4]));
+  const ma7  = closes.slice(-7).reduce((a,b) => a+b, 0) / 7;
+  const ma25 = closes.slice(-25).reduce((a,b) => a+b, 0) / 25;
+  const ma99 = closes.slice(-99).reduce((a,b) => a+b, 0) / 99;
+  const price = closes[closes.length - 1];
+
+  let stack = 'mixed';
+  if (price > ma7 && ma7 > ma25 && ma25 > ma99) stack = 'bullish_full';
+  else if (price > ma7 && ma7 > ma25)            stack = 'bullish_partial';
+  else if (price < ma7 && ma7 < ma25 && ma25 < ma99) stack = 'bearish_full';
+  else if (price < ma7 && ma7 < ma25)            stack = 'bearish_partial';
+  return { stack, ma7, ma25, ma99 };
+};
+
+// ── BTC Regime Predictor (v5.2) ───────────────────────────────────────────────
+// Classifies BTC into BULLISH / BEARISH / CHOPPY based on multiple TF + momentum
+// Blocks all signals during CHOPPY (where most losses happen)
+let btcRegime = { regime: 'UNKNOWN', confidence: 0, reason: 'init', changedAt: 0, lastNotified: 'UNKNOWN' };
+
+const checkBTCRegime = async () => {
+  try {
+    const klines1H = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=100');
+    const klines4H = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=100');
+    if (!klines1H || !klines4H) return btcRegime;
+
+    const closes1H = klines1H.map(k => parseFloat(k[4]));
+    const closes4H = klines4H.map(k => parseFloat(k[4]));
+    const price    = closes1H[closes1H.length - 1];
+
+    const ema50_1h  = calcEMAFromCloses(closes1H, 50);
+    const ema50_4h  = calcEMAFromCloses(closes4H, 50);
+    const ema200_4h = calcEMAFromCloses(closes4H, 200);
+
+    // Momentum: 4-candle (4h on 1H, 16h on 4H)
+    const momentum1H = ((price - closes1H[closes1H.length - 5]) / closes1H[closes1H.length - 5]) * 100;
+    const momentum4H = ((price - closes4H[closes4H.length - 4]) / closes4H[closes4H.length - 4]) * 100;
+
+    // Range tightness (1H last 24 candles)
+    const recent24h = closes1H.slice(-24);
+    const rangePct = ((Math.max(...recent24h) - Math.min(...recent24h)) / price) * 100;
+
+    let regime = 'CHOPPY';
+    let confidence = 0;
+    const reasons = [];
+
+    const above1H = price > ema50_1h;
+    const above4H = price > ema50_4h;
+    const trendUp = ema50_4h > ema200_4h;
+
+    // BULLISH: price above EMA50 on both TFs, 4H trend up, momentum positive
+    if (above1H && above4H && trendUp && momentum1H > 0.3 && momentum4H > 0.5) {
+      regime = 'BULLISH';
+      confidence = 80;
+      reasons.push(`above EMA50 1H+4H`, `momentum +${momentum1H.toFixed(1)}%/+${momentum4H.toFixed(1)}%`);
+    }
+    // BEARISH: opposite
+    else if (!above1H && !above4H && !trendUp && momentum1H < -0.3 && momentum4H < -0.5) {
+      regime = 'BEARISH';
+      confidence = 80;
+      reasons.push(`below EMA50 1H+4H`, `momentum ${momentum1H.toFixed(1)}%/${momentum4H.toFixed(1)}%`);
+    }
+    // PARTIAL BULLISH: above 1H but mixed
+    else if (above1H && momentum1H > 0.5) {
+      regime = 'BULLISH';
+      confidence = 55;
+      reasons.push(`1H bullish, 4H mixed`);
+    }
+    // PARTIAL BEARISH
+    else if (!above1H && momentum1H < -0.5) {
+      regime = 'BEARISH';
+      confidence = 55;
+      reasons.push(`1H bearish, 4H mixed`);
+    }
+    // CHOPPY: tight range, no clear direction
+    else {
+      regime = 'CHOPPY';
+      confidence = 70;
+      reasons.push(`range ${rangePct.toFixed(1)}% in 24h`, `no clear trend`);
+    }
+
+    const changed = regime !== btcRegime.regime;
+    btcRegime = {
+      regime, confidence,
+      reason: reasons.join(' · '),
+      changedAt: changed ? Date.now() : btcRegime.changedAt,
+      lastNotified: btcRegime.lastNotified,
+      momentum1H: parseFloat(momentum1H.toFixed(2)),
+      momentum4H: parseFloat(momentum4H.toFixed(2)),
+      rangePct: parseFloat(rangePct.toFixed(2)),
+    };
+
+    // Notify owner only when regime changes
+    if (changed && btcRegime.lastNotified !== regime) {
+      const emoji = regime === 'BULLISH' ? '🟢' : regime === 'BEARISH' ? '🔴' : '🟡';
+      const msg = regime === 'BULLISH'
+        ? 'LONG signals enabled · SHORT blocked'
+        : regime === 'BEARISH'
+        ? 'SHORT signals enabled · LONG blocked'
+        : '⚠️ ALL signals blocked — sit out';
+      await tg(OWNER_CHAT_ID, `${emoji} <b>BTC REGIME CHANGE: ${regime}</b>\n━━━━━━━━━━━━━━━\n${reasons.join('\n')}\n\nConfidence: ${confidence}%\n${msg}\n⏰ ${gstNow()} GST`);
+      btcRegime.lastNotified = regime;
+      log(`📡 BTC REGIME: ${regime} (${confidence}%) — ${reasons.join(', ')}`);
+    }
+
+    return btcRegime;
+  } catch (err) {
+    log(`⚠️ BTC regime check failed: ${err.message}`);
+    return btcRegime;
+  }
+};
+
 // ── ATR Expansion Check (v5.0) ───────────────────────────────────────────────
 // Real moves have EXPANDING volatility (wider candles)
 // Flat/shrinking ATR = sideways chop = fakeouts
@@ -1241,6 +1370,9 @@ const buildWatchMsg = (symbol, score, direction, layers, btc, hype = null) => {
   if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
   if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
   if (hype?.tag)                      tags.push(hype.tag);
+  if (layers?.rsi)                    tags.push(`📊RSI${layers.rsi.toFixed(0)}`);
+  if (layers?.maStack === 'bullish_full') tags.push('📈MA-Stack✅');
+  else if (layers?.maStack === 'bearish_full') tags.push('📉MA-Stack✅');
 
   return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
 ${tags.join(' · ')}
@@ -1492,11 +1624,9 @@ const runWatchlistScan = async () => {
       // Structure decides direction (not funding)
       let isLong  = false;
       let isShort = false;
-      if (htfPre.bullish) {
-        // Block LONG if funding VERY positive (longs overcrowded — risky)
+      if (htfPre.bullish && btcRegime.regime !== 'BEARISH') {
         if (funding < 0.03) isLong = true;
-      } else if (htfPre.bearish) {
-        // Block SHORT if funding VERY negative (shorts overcrowded — risky)
+      } else if (htfPre.bearish && btcRegime.regime !== 'BULLISH') {
         if (funding > -0.03) isShort = true;
       }
       // Also require 15m momentum aligned with HTF
@@ -1560,6 +1690,19 @@ const runWatchlistScan = async () => {
         if (absorption.absorbing) log(`🤫 ABSORPTION: ${symbol} score:${absorption.score} [${absorption.reasons.join(', ')}]`);
       }
 
+      const rsi = calcRSI(klines);
+      const maStack = checkMAStack(klines);
+      // RSI extremes block trades in wrong direction (chasing)
+      if (direction === 'LONG' && rsi > 75) {
+        log(`🚫 RSI-OVERBOUGHT: ${symbol} LONG blocked (RSI ${rsi.toFixed(1)})`);
+        coinTracker.delete(symbol);
+        continue;
+      }
+      if (direction === 'SHORT' && rsi < 25) {
+        log(`🚫 RSI-OVERSOLD: ${symbol} SHORT blocked (RSI ${rsi.toFixed(1)})`);
+        coinTracker.delete(symbol);
+        continue;
+      }
       let score = calcMasterScore({ compression, volume, resistance, fundingLS, trap });
       // Absorption boost — add up to +2 for stealth accumulation
       if (absorption.absorbing) {
@@ -1576,7 +1719,7 @@ const runWatchlistScan = async () => {
           log(`🔥 EXTREME-FUNDING: ${symbol} SHORT boost +1.5 (z=${fundingZ.z})`);
         }
       }
-      const layers      = { compression, volume, resistance, fundingLS, trap, absorption, dumpTrap };
+      const layers      = { compression, volume, resistance, fundingLS, trap, absorption, dumpTrap, rsi, maStack: maStack.stack };
 
       // ── Liquidity sweep check (Fix 4) ─────────────────────────────────────
       const sweep = checkLiquiditySweep(klines, direction);
@@ -1661,6 +1804,7 @@ const runWatchlistScan = async () => {
         (early.earlyScore >= 2 || absorption.absorbing) &&
         finalScore >= 5 &&
         !ext.tooExtended &&
+        btcRegime.regime !== 'CHOPPY' &&
         !pumpCheck.pumped &&
         !inPumpCooldown &&
         !(direction === 'LONG' && climax.climax) &&
@@ -1737,7 +1881,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && atrExp.expanding && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && atrExp.expanding && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -1889,6 +2033,15 @@ const handleCommand = async msg => {
     const btc = await checkBTCGate();
     await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
+  else if (text === '/regime') {
+    const r = btcRegime;
+    const emoji = r.regime === 'BULLISH' ? '🟢' : r.regime === 'BEARISH' ? '🔴' : '🟡';
+    const action = r.regime === 'BULLISH' ? 'LONG only · SHORT blocked'
+                  : r.regime === 'BEARISH' ? 'SHORT only · LONG blocked'
+                  : '⚠️ ALL signals blocked';
+    const minsAgo = r.changedAt ? Math.floor((Date.now() - r.changedAt) / 60000) : 0;
+    await tg(chatId, `${emoji} <b>BTC Regime: ${r.regime}</b>\n━━━━━━━━━━━━━━━\n${r.reason || 'no data'}\n\nConfidence: ${r.confidence}%\nMomentum 1H: ${r.momentum1H || 0}%\nMomentum 4H: ${r.momentum4H || 0}%\n24h range: ${r.rangePct || 0}%\n\nAction: ${action}\nIn this regime ${minsAgo}min`);
+  }
   else if (text === '/diagnostics' || text === '/diag') {
     const total = Object.values(blockReasons).reduce((a,b) => a+b, 0);
     const sorted = Object.entries(blockReasons).sort((a,b) => b[1] - a[1]);
@@ -1980,6 +2133,10 @@ const start = async () => {
 
   // Memory cleanup — every 10 min
   setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); cleanupCoinTracker(); }, 600000);
+
+  // BTC regime check — every 5 min
+  await checkBTCRegime();
+  setInterval(checkBTCRegime, 300000);
 
   // Paper trade outcome checker — every 10 min
   setInterval(checkPaperOutcomes, 600000);
