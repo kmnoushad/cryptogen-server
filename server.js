@@ -126,6 +126,22 @@ const cleanupSignalPrices = () => {
   if (cleaned > 0) log(`🧹 Signal prices cleaned: ${cleaned} expired signals`);
 };
 
+// v5.1 — coinTracker cleanup (prevents memory leak)
+// Removes coins from tracker that have been stale for 60+ minutes
+// (didn't get refreshed by recent watchlist scans)
+const cleanupCoinTracker = () => {
+  const cutoff = Date.now() - 60 * 60 * 1000; // 1h
+  let cleaned = 0;
+  for (const [symbol, state] of coinTracker.entries()) {
+    const lastSeen = state.lastUpdated || state.firstSeen || 0;
+    if (lastSeen < cutoff) {
+      coinTracker.delete(symbol);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) log(`🧹 Coin tracker cleaned: ${cleaned} stale entries (size: ${coinTracker.size})`);
+};
+
 // ── Correlation Filter (v4.2) ─────────────────────────────────────────────────
 // Limits directional exposure — too many same-direction signals = correlated risk
 // When BTC dumps, all LONG alts dump together. Cap at 3 open same-direction signals
@@ -1572,7 +1588,7 @@ const runWatchlistScan = async () => {
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
 
       if (!existing) {
-        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score: finalScore, layers, hype, absorption, firstSeen: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
+        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score: finalScore, layers, hype, absorption, firstSeen: Date.now(), lastUpdated: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
       } else {
         if (direction !== existing.direction) {
           if (existing.entryPrice) await postSignal(`⚠️ <b>NEXIO — SIGNAL FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n❌ Direction reversed — exit now\n📍 Entry: $${fmtP(existing.entryPrice)} → Now: $${fmtP(price)}\n⏰ ${gstNow()} GST\n<i>DYOR · SL always set · Paper mode active</i>`);
@@ -1581,6 +1597,7 @@ const runWatchlistScan = async () => {
         }
         existing.history.push(snap);
         existing.scanCount++;
+        existing.lastUpdated = Date.now();
         existing.score  = finalScore;
         existing.layers = layers;
         existing.hype   = hype;
@@ -1947,7 +1964,7 @@ const start = async () => {
   setInterval(runWatchlistScan, WATCHLIST_SCAN_INTERVAL);
 
   // Memory cleanup — every 10 min
-  setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); }, 600000);
+  setInterval(() => { cleanupPumpTracker(); cleanupSignalPrices(); cleanupCoinTracker(); }, 600000);
 
   // Paper trade outcome checker — every 10 min
   setInterval(checkPaperOutcomes, 600000);
