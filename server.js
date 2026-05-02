@@ -1026,10 +1026,15 @@ const checkAnomalies = async () => {
   try {
     const alerts = [];
 
-    // 1. Paper logger silent for 6+ hours during active scanning
+    // 1. Paper logger silent — but only alert if BTC was tradeable (not choppy)
     const minsSinceLog = (Date.now() - lastSignalLogTime) / 60000;
-    if (minsSinceLog > 360 && fullScanCount > 10) {
-      alerts.push(`⚠️ No paper trade logged in ${Math.floor(minsSinceLog/60)}h — logger may be broken`);
+    const btcWasTradeable = btcRegime.regime === 'BULLISH' || btcRegime.regime === 'BEARISH';
+    if (minsSinceLog > 1440 && fullScanCount > 10 && btcWasTradeable) {
+      alerts.push(`⚠️ No paper trade logged in ${Math.floor(minsSinceLog/60)}h despite tradeable BTC regime — logger may be broken`);
+    }
+    // Soft notice if it's been quiet but BTC is choppy (this is correct behavior)
+    else if (minsSinceLog > 1440 && btcRegime.regime === 'CHOPPY') {
+      log(`ℹ️ No signals logged in ${Math.floor(minsSinceLog/60)}h — BTC choppy, this is expected`);
     }
 
     // 2. BTC fetch failing repeatedly
