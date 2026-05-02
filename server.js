@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.1 — Elite Recovery Edition (Rate-Limit Safe)
+// NEXIO SERVER v5.5 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -11,23 +11,18 @@
 // LAYER 8  — THREE-Stage Alert: EARLY → WATCH → FIRE
 // LAYER 9  — Position Manager (breakeven, trailing, force-exit, recovery)
 //
-// v5.0 ADDITIONS:
-//   1. Daily caps: +2% profit stop / -1.5% loss stop / 3 trades max
-//   2. Breakeven at +0.5% profit (lock in zero-risk)
-//   3. Trailing stop: activate at +1%, trail 0.3% from peak
-//   4. Force exit after 6 hours (no dead trades)
-//   5. Recovery system: 50% size after 2 consecutive losses
-//   6. ATR expansion required for FIRE (volatility confirmation)
-//   7. MIN_ALERT_SCORE 7.0 (quality over quantity)
+// VERSION HISTORY:
+// v5.0 — Daily caps, breakeven, trailing stops, force exit, recovery system
+// v5.1 — Rate-limit safe scans (5min/2min), BTC fetch error handling
+// v5.2 — BTC Regime Predictor (BULLISH/BEARISH/CHOPPY), RSI, MA stack
+// v5.3 — Daily auto-summary at 21:00 Dubai, anomaly alerts
+// v5.4 — Pump-Dump coin detector (7-day fake pump history)
+// v5.5 — Looser regime detection (above/below EMA50 = directional)
+//        Bug fixes: recordWin in trailing/timeout, klines validation, RSI continue
 //
-// v5.1 ADJUSTMENTS:
-//   1. Slower scans to avoid Binance HTTP 418 rate limit
-//      - Full scan: 5 min (was 2 min)
-//      - Watchlist scan: 2 min (was 45 sec)
-//      - Per-coin sleep doubled (400-500ms)
-//   2. BTC gate loosened ±0.8% → ±1.2% (was blocking too many signals)
-//   3. BTC fetch error logged + caches last known good status
-//   4. API load: ~462 weight/min (19% of 2400 limit)
+// API LOAD: ~462 weight/min (19% of 2400 Binance limit)
+// PAPER MODE: alerts logged to Supabase paper_trades table
+// COMMANDS: /stats /regime /diagnostics /summary /history SYMBOL
 // ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -519,35 +514,26 @@ const checkBTCRegime = async () => {
     const above4H = price > ema50_4h;
     const trendUp = ema50_4h > ema200_4h;
 
-    // BULLISH: price above EMA50 on both TFs, 4H trend up, momentum positive
-    if (above1H && above4H && trendUp && momentum1H > 0.3 && momentum4H > 0.5) {
+    // v5.5 — Looser regime detection. Defaults to direction based on price vs EMA50.
+    // Only marks CHOPPY when truly sideways (both TFs disagree AND tight range)
+    
+    // BULLISH: price above EMA50 1H, optionally above 4H — momentum can be small
+    if (above1H && (above4H || momentum1H > 0.2)) {
       regime = 'BULLISH';
-      confidence = 80;
-      reasons.push(`above EMA50 1H+4H`, `momentum +${momentum1H.toFixed(1)}%/+${momentum4H.toFixed(1)}%`);
+      confidence = (above1H && above4H && trendUp) ? 80 : 60;
+      reasons.push(above4H ? `above EMA50 1H+4H` : `above EMA50 1H`, `momentum +${momentum1H.toFixed(1)}%/+${momentum4H.toFixed(1)}%`);
     }
-    // BEARISH: opposite
-    else if (!above1H && !above4H && !trendUp && momentum1H < -0.3 && momentum4H < -0.5) {
+    // BEARISH: price below EMA50 1H, optionally below 4H
+    else if (!above1H && (!above4H || momentum1H < -0.2)) {
       regime = 'BEARISH';
-      confidence = 80;
-      reasons.push(`below EMA50 1H+4H`, `momentum ${momentum1H.toFixed(1)}%/${momentum4H.toFixed(1)}%`);
+      confidence = (!above1H && !above4H && !trendUp) ? 80 : 60;
+      reasons.push(!above4H ? `below EMA50 1H+4H` : `below EMA50 1H`, `momentum ${momentum1H.toFixed(1)}%/${momentum4H.toFixed(1)}%`);
     }
-    // PARTIAL BULLISH: above 1H but mixed
-    else if (above1H && momentum1H > 0.5) {
-      regime = 'BULLISH';
-      confidence = 55;
-      reasons.push(`1H bullish, 4H mixed`);
-    }
-    // PARTIAL BEARISH
-    else if (!above1H && momentum1H < -0.5) {
-      regime = 'BEARISH';
-      confidence = 55;
-      reasons.push(`1H bearish, 4H mixed`);
-    }
-    // CHOPPY: tight range, no clear direction
+    // CHOPPY: only when 1H/4H disagree AND range is genuinely tight
     else {
       regime = 'CHOPPY';
       confidence = 70;
-      reasons.push(`range ${rangePct.toFixed(1)}% in 24h`, `no clear trend`);
+      reasons.push(`range ${rangePct.toFixed(1)}% in 24h`, `1H/4H mixed`);
     }
 
     const changed = regime !== btcRegime.regime;
@@ -2290,12 +2276,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.1`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.5`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.1 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.1 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.5 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.5 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2346,9 +2332,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.1 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.5 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.1 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.5 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
