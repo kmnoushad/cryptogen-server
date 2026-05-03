@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.6 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.7 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -19,7 +19,7 @@
 // v5.4 — Pump-Dump coin detector (7-day fake pump history)
 // v5.5 — Looser regime detection (above/below EMA50 = directional)
 //        Bug fixes: recordWin in trailing/timeout, klines validation, RSI continue
-// v5.6 — Coin behavior tracker — records every observation to Supabase
+// v5.7 — Coin behavior tracker — records every observation to Supabase
 //        For long-term per-coin pattern analysis (no impact on alerts)
 //
 // API LOAD: ~462 weight/min (19% of 2400 Binance limit)
@@ -896,7 +896,7 @@ const tg = async (chatId, text) => {
   } catch { }
 };
 
-// ── COIN BEHAVIOR RECORDER (v5.6) ────────────────────────────────────────────
+// ── COIN BEHAVIOR RECORDER (v5.7) ────────────────────────────────────────────
 // Records every coin observation to Supabase for long-term analysis
 // Runs ALONGSIDE existing logic — does not affect current alerts or filters
 // After 14-30 days of data, we can analyze each coin's "personality"
@@ -1615,7 +1615,7 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   if (sweep?.swept && sweep?.recovery) tags.push('🌊Swept');
   if (hype?.isTrending)                tags.push(hype.tag);
 
-  return `⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY</b>  ${score}/10 ${confBar(score)}
+  return `⚡⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY ENTRY</b>  ${score}/10 ${confBar(score)}
 ${tags.join(' · ')}
 💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (${UNIFIED_SL_ATR}ATR)  🎯 $${fmtP(tp1)} (${UNIFIED_TP1_ATR}ATR) / $${fmtP(tp2)} (${UNIFIED_TP2_ATR}ATR)  R:R 1:${rr}
 ⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
@@ -1646,7 +1646,7 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   // v5.0 position size hint based on recovery state
   const sizeHint = getPositionSizeHint();
 
-  return `${isLong?'🟢':'🔴'} <b>NEXIO ${isLong?'📈LONG':'📉SHORT'} CONFIRMATION — ${symbol.replace('USDT','')}</b>\n<i>⚠️ Best entry was EARLY. Skip if you missed it.</i>
+  return `${isLong?'🟢':'🔴'} ${isLong?'🟢🟢🟢':'🔴🔴🔴'} <b>NEXIO 🔥 FIRE ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b> ${isLong?'🟢🟢🟢':'🔴🔴🔴'}\n<b>━━━━━━━━━━━━━━━</b>\n<i>✅ TRADE THIS — entry / SL / TPs below</i>
 📊 ${score}/10 ${confBar(score)}
 ${conf.join(' · ')}
 ━━━━━━━━━━━━━━━
@@ -1758,6 +1758,10 @@ const runFullMarketScan = async () => {
       try { const f = await fetchJSON(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${coin.symbol}`); funding = parseFloat(f.lastFundingRate) * 100; } catch { }
       try { const l = await fetchJSON(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${coin.symbol}&period=1h&limit=1`); ls = parseFloat(l[0]?.longShortRatio || 1); } catch { }
       try { klines = await fetchJSON(`https://fapi.binance.com/fapi/v1/klines?symbol=${coin.symbol}&interval=15m&limit=12`); } catch { }
+      // v5.7: validate klines — skip coins with bad data
+      if (!klines || !Array.isArray(klines) || klines.length < 8) {
+        continue;
+      }
       try { const o = await fetchJSON(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${coin.symbol}`); currentOI = parseFloat(o.openInterest); const oh = await fetchJSON(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${coin.symbol}&period=15m&limit=2`); prevOI = parseFloat(oh[0]?.sumOpenInterest || currentOI); } catch { }
 
       // Fetch HTF trend to decide direction by structure
@@ -1965,7 +1969,7 @@ const runWatchlistScan = async () => {
       const finalScore = Math.max(0, Math.min(10, score + (hype.hypeBonus || 0)));
       if (hype.hasData && hype.hypeBonus !== 0) log(`🌊 ${symbol} hype ${hype.hypeBonus > 0 ? '+' : ''}${hype.hypeBonus} (${hype.tag})`);
 
-      // v5.6 BEHAVIOR LOG — record this observation (non-blocking, silent)
+      // v5.7 BEHAVIOR LOG — record this observation (non-blocking, silent)
       try {
         const lastK = klines[klines.length - 1];
         const candleOpen = parseFloat(lastK[1]);
@@ -2154,7 +2158,7 @@ const runWatchlistScan = async () => {
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
           log(`🚀 FIRED: ${symbol} ${direction} finalScore:${finalScore} (raw:${score}) candle:${trap.candle?.verdict}`);
-          // v5.6 BUGFIX — FIRE alerts must also log to paper_trades (was missing)
+          // v5.7 BUGFIX — FIRE alerts must also log to paper_trades (was missing)
           const slFire = isLong ? price - atr * UNIFIED_SL_ATR : price + atr * UNIFIED_SL_ATR;
           const tp2Fire = isLong ? price + atr * 3.5 : price - atr * 3.5;
           await logPaperTrade({ symbol, direction, type: 'FIRE', price, sl: slFire, tp1: tp1f, tp2: tp2Fire, score: finalScore, candle: trap.candle?.verdict, btcChange: btc.change });
@@ -2215,8 +2219,20 @@ const runWatchlistScan = async () => {
             // Track as win for daily stats
             const pnl = Math.max(0.5, inProfitPct - 0.3);
             dailyLosses.dailyProfitPct += pnl;
-            recordWin(symbol, pnl);  // ← FIX: reset consecutive losses counter
+            recordWin(symbol, pnl);
             log(`💰 TRAILING-WIN: ${symbol} +${pnl.toFixed(2)}%`);
+            // v5.7 FIX: Update paper_trades — trailing exit = WIN
+            try {
+              await sb(`paper_trades?symbol=eq.${symbol}&status=eq.OPEN`, {
+                method: 'PATCH',
+                body: JSON.stringify({
+                  status: 'TRAILING_EXIT',
+                  outcome: 'WIN',
+                  closed_price: price,
+                  closed_at: new Date().toISOString(),
+                }),
+              });
+            } catch (e) { log(`Paper trail update failed: ${e.message}`); }
           }
         }
 
@@ -2227,12 +2243,24 @@ const runWatchlistScan = async () => {
           sig.timeoutSent = true;
           if (inProfitPct > 0) {
             dailyLosses.dailyProfitPct += inProfitPct;
-            recordWin(symbol, inProfitPct);  // ← FIX: reset consecutive losses
+            recordWin(symbol, inProfitPct);
           } else {
             dailyLosses.totalPnlPct += inProfitPct;
           }
           signalPrices.delete(symbol);
           log(`⏰ TIME-EXIT: ${symbol} ${inProfitPct.toFixed(2)}% after 6h`);
+          // v5.7 FIX: Update paper_trades — timeout exit
+          try {
+            await sb(`paper_trades?symbol=eq.${symbol}&status=eq.OPEN`, {
+              method: 'PATCH',
+              body: JSON.stringify({
+                status: 'TIMEOUT',
+                outcome: inProfitPct > 0 ? 'WIN' : 'LOSS',
+                closed_price: price,
+                closed_at: new Date().toISOString(),
+              }),
+            });
+          } catch (e) { log(`Paper timeout update failed: ${e.message}`); }
           continue;
         }
 
@@ -2347,12 +2375,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.6`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.7`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.6 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.6 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.7 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.7 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2403,9 +2431,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.6 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.7 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.6 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.7 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
