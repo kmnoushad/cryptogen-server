@@ -931,6 +931,55 @@ const recordCoinBehavior = async (data) => {
   }
 };
 
+// ── ROLLING COIN INTELLIGENCE (v5.8) ─────────────────────────────────────────
+// Uses last 7 days of paper_trades + coin_behavior to build live coin profiles
+// Cached 30 min per coin. Display only — does NOT auto-block any coin.
+const coinProfileCache = new Map(); // symbol → { profile, ts }
+const PROFILE_CACHE_MS = 30 * 60 * 1000;
+
+const getCoinProfile = async (symbol) => {
+  const cached = coinProfileCache.get(symbol);
+  if (cached && Date.now() - cached.ts < PROFILE_CACHE_MS) return cached.profile;
+
+  try {
+    const since = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+    const trades = (await sb(`paper_trades?symbol=eq.${symbol}&created_at=gte.${since}&select=*`)) || [];
+
+    const closed = trades.filter(t => t.status !== 'OPEN');
+    const wins = closed.filter(t => t.outcome === 'WIN').length;
+    const losses = closed.filter(t => t.outcome === 'LOSS').length;
+    const total = closed.length;
+    const winRate = total > 0 ? (wins / total) : null;
+
+    const since24h = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const behavior = (await sb(`coin_behavior?symbol=eq.${symbol}&recorded_at=gte.${since24h}&select=candle_color,score,vol_vs_avg`)) || [];
+    const obsCount = behavior.length;
+    const greens = behavior.filter(b => b.candle_color === 'green').length;
+    const greenRatio = obsCount > 0 ? (greens / obsCount) : null;
+    const avgScore = obsCount > 0 ? behavior.reduce((s, b) => s + parseFloat(b.score || 0), 0) / obsCount : null;
+
+    let tier = 'UNKNOWN';
+    let action = 'normal';
+    if (total >= 3) {
+      if (winRate >= 0.7)      { tier = 'A'; action = 'boost'; }
+      else if (winRate >= 0.5) { tier = 'B'; action = 'normal'; }
+      else if (winRate < 0.4)  { tier = 'C'; action = 'normal'; } // display only — not blocking
+    }
+
+    const profile = {
+      symbol, tier, action,
+      winRate, wins, losses, totalTrades: total,
+      greenRatio, avgScore, observations24h: obsCount,
+      hasData: total >= 1 || obsCount >= 10,
+    };
+
+    coinProfileCache.set(symbol, { profile, ts: Date.now() });
+    return profile;
+  } catch (err) {
+    return { symbol, tier: 'UNKNOWN', action: 'normal', hasData: false, totalTrades: 0, wins: 0, losses: 0, winRate: null };
+  }
+};
+
 // ── PAPER TRADE LOGGER ───────────────────────────────────────────────────────
 // Logs every signal to Supabase 'paper_trades' table for outcome tracking
 const logPaperTrade = async (signal) => {
