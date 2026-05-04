@@ -1109,9 +1109,10 @@ const checkAnomalies = async () => {
       log(`ℹ️ No signals logged in ${Math.floor(minsSinceLog/60)}h — BTC choppy, this is expected`);
     }
 
-    // 2. BTC fetch failing repeatedly
-    if (btcFetchFails >= 10) {
-      alerts.push(`⚠️ BTC fetch failed ${btcFetchFails} times — check Railway/Binance`);
+    // 2. BTC fetch failing — only alert if BTC is CURRENTLY broken AND lots of recent failures
+    // The counter resets on each successful BTC fetch in checkBTCGate
+    if (btcFetchFails >= 20 && btcGateStatus.price === 0) {
+      alerts.push(`⚠️ BTC fetch currently broken (${btcFetchFails} fails) — check Railway/Binance`);
     }
 
     // 3. Tracker stuck (no growth in 2+ hours of scans)
