@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.7 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.8 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -1599,7 +1599,7 @@ ${FOOTER(btc, symbol)}`.trim();
 };
 
 // EARLY — compact pre-breakout
-const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null) => {
+const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null, profile = null) => {
   const isLong = direction === 'LONG';
   const sl  = isLong ? price - atr * UNIFIED_SL_ATR  : price + atr * UNIFIED_SL_ATR;
   const tp1 = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
@@ -1618,6 +1618,7 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   return `⚡⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY ENTRY</b>  ${score}/10 ${confBar(score)}
 ${tags.join(' · ')}
 💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (${UNIFIED_SL_ATR}ATR)  🎯 $${fmtP(tp1)} (${UNIFIED_TP1_ATR}ATR) / $${fmtP(tp2)} (${UNIFIED_TP2_ATR}ATR)  R:R 1:${rr}
+${profile && profile.totalTrades >= 3 ? `📒 7d WR on ${symbol.replace('USDT','')}: ${(profile.winRate*100).toFixed(0)}% (${profile.wins}W/${profile.losses}L) ${profile.tier === 'A' ? '🟢' : profile.tier === 'C' ? '🔴⚠️' : '🟡'}` : profile && profile.totalTrades >= 1 ? `📒 7d: ${profile.totalTrades} trade${profile.totalTrades > 1 ? 's' : ''} (small sample)` : '📒 7d: no prior trades on this coin'}
 ⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
 ${FOOTER(btc, symbol)}`.trim();
 };
@@ -2026,6 +2027,10 @@ const runWatchlistScan = async () => {
       const state = coinTracker.get(symbol);
       if (!state) continue;
 
+      // v5.8: Get rolling coin profile (display only — no auto-blocking)
+      const profile = await getCoinProfile(symbol);
+      // NOTE: We do NOT block on profile.action — we just attach to alert for user visibility
+
       // ── GUARDS (must be declared BEFORE EARLY and FIRE checks) ──────────
       // Post-loss block check
       const block = isBlocked(symbol);
@@ -2084,7 +2089,7 @@ const runWatchlistScan = async () => {
           state.earlyEntry = price;
           const tp1e = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1e;
-          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype));
+          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype, profile));
           markAlert(earlyKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
@@ -2153,7 +2158,7 @@ const runWatchlistScan = async () => {
           state.state = 'FIRE';
           const tp1f = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1f;
-          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype));
+          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype, profile));
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
@@ -2334,6 +2339,20 @@ const handleCommand = async msg => {
   else if (text === '/summary') {
     await sendDailySummary();
   }
+  else if (text.startsWith('/profile')) {
+    const parts = text.split(' ');
+    const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
+    if (!sym) {
+      await tg(chatId, `Usage: /profile KAITO\n\nShows rolling 7-day profile for a coin`);
+    } else {
+      const p = await getCoinProfile(sym);
+      const tierEmoji = p.tier === 'A' ? '🟢' : p.tier === 'B' ? '🟡' : p.tier === 'C' ? '🔴' : '⚪';
+      const wrStr = p.winRate !== null ? `${(p.winRate*100).toFixed(0)}%` : 'no data';
+      const greenStr = p.greenRatio !== null ? `${(p.greenRatio*100).toFixed(0)}%` : 'no data';
+      const avgStr = p.avgScore !== null ? p.avgScore.toFixed(1) : 'no data';
+      await tg(chatId, `${tierEmoji} <b>${sym} 7-day profile</b>\n━━━━━━━━━━━━━━━\nTier: <b>${p.tier}</b> · Action: ${p.action}\n\n📊 Trades: ${p.totalTrades} (${p.wins}W / ${p.losses}L)\n🎯 Win rate: ${wrStr}\n\n📈 24h observations: ${p.observations24h}\n🟩 Green ratio: ${greenStr}\n📊 Avg score: ${avgStr}\n\n${p.action === 'block' ? '🚫 Bot will BLOCK this coin' : p.action === 'boost' ? '✅ Bot may fire at lower score' : '✅ Normal filtering applies'}`);
+    }
+  }
   else if (text.startsWith('/history')) {
     const parts = text.split(' ');
     const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
@@ -2375,12 +2394,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.7`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.8`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.7 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.7 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.8 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.8 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2431,9 +2450,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.7 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.8 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.7 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.8 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
