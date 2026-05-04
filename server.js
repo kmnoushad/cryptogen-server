@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.8 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.9 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -642,7 +642,7 @@ const checkATRExpansion = (klines) => {
   const atr20 = calculateATR(klines.slice(-30, -10), 10);
   if (atr20 === 0) return { expanding: false, reason: 'zero ATR', expansion: 0 };
   const expansion = ((atr10 - atr20) / atr20) * 100;
-  const expanding = expansion > 10; // needs 10%+ increase
+  const expanding = expansion > 5; // v5.9 — loosened from 10% to 5%
   return {
     expanding,
     expansion: parseFloat(expansion.toFixed(1)),
@@ -2181,9 +2181,9 @@ const runWatchlistScan = async () => {
         const lastVols = klines.slice(-11, -1).map(k => parseFloat(k[5]));
         const avgVol   = lastVols.reduce((a,b) => a+b, 0) / lastVols.length;
         const breakVol = parseFloat(breakoutCandle[5]);
-        const volSpike = avgVol > 0 && breakVol > avgVol * 1.8; // 1.8x average volume required
+        const volSpike = avgVol > 0 && breakVol > avgVol * 1.5; // v5.9 — loosened from 1.8x to 1.5x
         // Valid breakout candle: direction + 0.5% move + 45% body + vol spike
-        const validBreak = (isLong ? breakC > breakO : breakC < breakO) && breakMove >= 0.5 && breakBody >= 45 && volSpike;
+        const validBreak = (isLong ? breakC > breakO : breakC < breakO) && breakMove >= 0.3 && breakBody >= 35 && volSpike; // v5.9 — 0.5%→0.3%, 45%→35%
         // Confirmation candle holds above/below breakout close
         const holds = isLong ? confL >= breakC * 0.997 : confH <= breakC * 1.003;
         return validBreak && holds;
@@ -2200,7 +2200,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && atrExp.expanding && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -2443,12 +2443,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.8`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.9`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.8 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.8 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.9 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.9 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2499,9 +2499,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.8 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.9 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.8 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.9 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
