@@ -1673,7 +1673,7 @@ ${FOOTER(btc, symbol)}`.trim();
 };
 
 // FIRE — full signal with SL/TP
-const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null) => {
+const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null, profile = null) => {
   const isLong   = direction === 'LONG';
   const atr      = calculateATR(klines) || (price * 0.018);
   // Wider SL for FIRE — breakout trades need breathing room
