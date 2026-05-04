@@ -50,7 +50,7 @@ const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pu
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
-const MIN_ALERT_SCORE         = 7.0; // v5.0 — quality over quantity // v4.2 — balanced quality
+const MIN_ALERT_SCORE         = 6.5; // v5.8 — slightly looser to allow signals in tight markets
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 // Unified risk parameters — same SL/TP for both EARLY and FIRE (per user preference)
