@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.9 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.10 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -479,6 +479,49 @@ const checkMAStack = (klines) => {
   else if (price < ma7 && ma7 < ma25 && ma25 < ma99) stack = 'bearish_full';
   else if (price < ma7 && ma7 < ma25)            stack = 'bearish_partial';
   return { stack, ma7, ma25, ma99 };
+};
+
+// ── BTC Cycle Position (v5.10) — WARNING ONLY, no blocking ───────────────────
+// Tells us where BTC is in its weekly cycle: bottom / mid / top / falling
+// Used to add warning labels to alerts when entry timing might be risky
+let btcCyclePosition = { stage: 'UNKNOWN', risk: 'unknown', reason: '', updated: 0 };
+
+const checkBTCCycle = async () => {
+  try {
+    const klines = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=42');
+    if (!klines || klines.length < 30) return btcCyclePosition;
+
+    const closes = klines.map(k => parseFloat(k[4]));
+    const highs = klines.map(k => parseFloat(k[2]));
+    const lows = klines.map(k => parseFloat(k[3]));
+    const price = closes[closes.length - 1];
+
+    const high7d = Math.max(...highs);
+    const low7d = Math.min(...lows);
+    const range = high7d - low7d;
+    const positionInRange = range > 0 ? ((price - low7d) / range) * 100 : 50;
+    const move7d = ((price - closes[0]) / closes[0]) * 100;
+    const recentMomentum = ((price - closes[closes.length - 5]) / closes[closes.length - 5]) * 100;
+    const lastQuarter = ((closes[closes.length - 1] - closes[closes.length - 5]) / closes[closes.length - 5]) * 100;
+    const prevQuarter = ((closes[closes.length - 5] - closes[closes.length - 9]) / closes[closes.length - 9]) * 100;
+    const slowing = lastQuarter < prevQuarter && lastQuarter < 0.3;
+
+    let stage, risk, reason;
+    if (positionInRange < 25) { stage = 'BOTTOM'; risk = 'low'; reason = `at bottom of 7d range (${positionInRange.toFixed(0)}%)`; }
+    else if (positionInRange < 50) { stage = 'EARLY_PUMP'; risk = 'low'; reason = `lower-mid of 7d range (${positionInRange.toFixed(0)}%)`; }
+    else if (positionInRange < 75) { stage = 'MID_PUMP'; risk = 'medium'; reason = `upper-mid of 7d range (${positionInRange.toFixed(0)}%)`; }
+    else if (positionInRange < 90) { stage = 'LATE_PUMP'; risk = slowing ? 'high' : 'medium'; reason = `near top of 7d range (${positionInRange.toFixed(0)}%)${slowing ? ' · momentum slowing ⚠️' : ''}`; }
+    else { stage = 'TOP_ZONE'; risk = 'extreme'; reason = `at peak of 7d range (${positionInRange.toFixed(0)}%) · pullback risk HIGH`; }
+
+    if (move7d > 5 && slowing) { stage = 'EXHAUSTION'; risk = 'extreme'; reason = `+${move7d.toFixed(1)}% in 7d, momentum stalling — pullback likely`; }
+    if (move7d < -3) { stage = 'FALLING'; risk = 'high_for_long'; reason = `${move7d.toFixed(1)}% in 7d — bearish bias`; }
+
+    btcCyclePosition = { stage, risk, reason, positionInRange, move7d, recentMomentum, slowing, updated: Date.now() };
+    return btcCyclePosition;
+  } catch (err) {
+    log(`⚠️ BTC cycle check failed: ${err.message}`);
+    return btcCyclePosition;
+  }
 };
 
 // ── BTC Regime Predictor (v5.4) ───────────────────────────────────────────────
@@ -1669,6 +1712,23 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
 ${tags.join(' · ')}
 💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (${UNIFIED_SL_ATR}ATR)  🎯 $${fmtP(tp1)} (${UNIFIED_TP1_ATR}ATR) / $${fmtP(tp2)} (${UNIFIED_TP2_ATR}ATR)  R:R 1:${rr}
 ${profile && profile.totalTrades >= 3 ? `📒 7d WR on ${symbol.replace('USDT','')}: ${(profile.winRate*100).toFixed(0)}% (${profile.wins}W/${profile.losses}L) ${profile.tier === 'A' ? '🟢' : profile.tier === 'C' ? '🔴⚠️' : '🟡'}` : profile && profile.totalTrades >= 1 ? `📒 7d: ${profile.totalTrades} trade${profile.totalTrades > 1 ? 's' : ''} (small sample)` : '📒 7d: no prior trades on this coin'}
+${(() => {
+  const cp = btcCyclePosition;
+  if (!cp || cp.stage === 'UNKNOWN') return '';
+  if (isLong) {
+    if (cp.stage === 'TOP_ZONE')   return `⚠️🔴 <b>BTC at TOP of 7d range</b> — pullback risk HIGH`;
+    if (cp.stage === 'EXHAUSTION') return `⚠️🔴 <b>BTC EXHAUSTION</b> — ${cp.reason}`;
+    if (cp.stage === 'LATE_PUMP')  return `⚠️🟡 BTC late-pump zone — ${cp.reason}`;
+    if (cp.stage === 'FALLING')    return `⚠️🔴 <b>BTC FALLING</b> — long entry risky`;
+    if (cp.stage === 'BOTTOM' || cp.stage === 'EARLY_PUMP') return `🟢 BTC ${cp.stage} — long entry timing OK`;
+  } else {
+    if (cp.stage === 'BOTTOM')     return `⚠️🔴 <b>BTC at BOTTOM</b> — short entry risky`;
+    if (cp.stage === 'TOP_ZONE')   return `🟢 BTC at top — short entry timing OK`;
+    if (cp.stage === 'EXHAUSTION') return `🟢 BTC exhaustion — short entry timing favorable`;
+    if (cp.stage === 'FALLING')    return `🟢 BTC falling — short entry timing OK`;
+  }
+  return '';
+})()}
 ⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
 ${FOOTER(btc, symbol)}`.trim();
 };
@@ -2414,6 +2474,15 @@ const handleCommand = async msg => {
       await tg(chatId, `${emoji} <b>${sym}</b> 7-day history\n━━━━━━━━━━━━━━━\n${h.reason}\n\nFake pumps detected: ${h.fakeCount}\n${h.events ? '\nLast events:\n' + h.events.join('\n') : ''}\n\n${h.isPumpDump ? '⚠️ Bot will BLOCK signals on this coin' : '✅ Coin appears clean'}`);
     }
   }
+  else if (text === '/cycle') {
+    const cp = btcCyclePosition;
+    if (!cp || cp.stage === 'UNKNOWN') {
+      await tg(chatId, '📊 BTC Cycle data not yet available. Check back in 15 min.');
+    } else {
+      const riskEmoji = cp.risk === 'extreme' ? '🔴🔴' : cp.risk === 'high' ? '🔴' : cp.risk === 'medium' ? '🟡' : '🟢';
+      await tg(chatId, `📊 <b>BTC Cycle Position</b>\n━━━━━━━━━━━━━━━\nStage: <b>${cp.stage}</b> ${riskEmoji}\nRisk level: ${cp.risk}\n\n${cp.reason}\n\n📈 Position in 7d range: ${cp.positionInRange?.toFixed(0)}%\n📊 7d move: ${cp.move7d > 0 ? '+' : ''}${cp.move7d?.toFixed(1)}%\n⏱ Recent momentum: ${cp.recentMomentum > 0 ? '+' : ''}${cp.recentMomentum?.toFixed(2)}%\n${cp.slowing ? '⚠️ Momentum slowing' : '✅ Momentum healthy'}\n\n<i>Updated ${Math.floor((Date.now() - cp.updated)/60000)}min ago</i>`);
+    }
+  }
   else if (text === '/regime') {
     const r = btcRegime;
     const emoji = r.regime === 'BULLISH' ? '🟢' : r.regime === 'BEARISH' ? '🔴' : '🟡';
@@ -2444,12 +2513,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.9`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.10`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.9 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.9 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.10 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.10 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2500,9 +2569,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.9 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.10 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.9 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.10 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
@@ -2524,6 +2593,10 @@ const start = async () => {
   // BTC regime check — every 5 min
   await checkBTCRegime();
   setInterval(checkBTCRegime, 300000);
+
+  // v5.10 BTC Cycle Position check every 15 min (warning-only)
+  await checkBTCCycle();
+  setInterval(checkBTCCycle, 900000);
 
   // Paper trade outcome checker — every 10 min
   setInterval(checkPaperOutcomes, 600000);
