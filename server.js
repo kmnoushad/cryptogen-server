@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.10 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.11 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -1685,7 +1685,7 @@ const buildWatchMsg = (symbol, score, direction, layers, btc, hype = null) => {
   if (layers?.maStack === 'bullish_full') tags.push('📈MA-Stack✅');
   else if (layers?.maStack === 'bearish_full') tags.push('📉MA-Stack✅');
 
-  return `👀 <b>${symbol.replace('USDT','')} ${tag}</b>  ${score}/10 ${confBar(score)}${cv}
+  return `👀 ${symbol.replace('USDT','')} ${tag}  ${score}/10 ${confBar(score)}${cv}
 ${tags.join(' · ')}
 ${direction === 'LONG' ? '⏳ Waiting for breakout (up)' : '⏳ Waiting for breakdown (down)'}
 ${FOOTER(btc, symbol)}`.trim();
@@ -1708,28 +1708,20 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   if (sweep?.swept && sweep?.recovery) tags.push('🌊Swept');
   if (hype?.isTrending)                tags.push(hype.tag);
 
-  return `⚡⚡ <b>${symbol.replace('USDT','')} ${isLong?'🟢LONG':'🔴SHORT'} EARLY ENTRY</b>  ${score}/10 ${confBar(score)}
+  return `⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡
+<b>⚡ NEXIO EARLY — ${isLong?'📈 LONG':'📉 SHORT'}</b>
+<b>${symbol.replace('USDT','')}</b>
+⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡
+
+<b>💰 ENTRY:  $${fmtP(price)}</b>
+<b>🛑 STOP:   $${fmtP(sl)}</b>
+<b>🎯 TP1:    $${fmtP(tp1)}</b>
+<b>🎯 TP2:    $${fmtP(tp2)}</b>
+<b>🎯 TP3:    $${fmtP(tp3)}</b>
+
+━━━━━━━━━━━━━━━
+📊 Score: ${score}/10  ·  R:R 1:${rr}
 ${tags.join(' · ')}
-💰 $${fmtP(price)}  🛑 $${fmtP(sl)} (${UNIFIED_SL_ATR}ATR)  🎯 $${fmtP(tp1)} (${UNIFIED_TP1_ATR}ATR) / $${fmtP(tp2)} (${UNIFIED_TP2_ATR}ATR)  R:R 1:${rr}
-${profile && profile.totalTrades >= 3 ? `📒 7d WR on ${symbol.replace('USDT','')}: ${(profile.winRate*100).toFixed(0)}% (${profile.wins}W/${profile.losses}L) ${profile.tier === 'A' ? '🟢' : profile.tier === 'C' ? '🔴⚠️' : '🟡'}` : profile && profile.totalTrades >= 1 ? `📒 7d: ${profile.totalTrades} trade${profile.totalTrades > 1 ? 's' : ''} (small sample)` : '📒 7d: no prior trades on this coin'}
-${(() => {
-  const cp = btcCyclePosition;
-  if (!cp || cp.stage === 'UNKNOWN') return '';
-  if (isLong) {
-    if (cp.stage === 'TOP_ZONE')   return `⚠️🔴 <b>BTC at TOP of 7d range</b> — pullback risk HIGH`;
-    if (cp.stage === 'EXHAUSTION') return `⚠️🔴 <b>BTC EXHAUSTION</b> — ${cp.reason}`;
-    if (cp.stage === 'LATE_PUMP')  return `⚠️🟡 BTC late-pump zone — ${cp.reason}`;
-    if (cp.stage === 'FALLING')    return `⚠️🔴 <b>BTC FALLING</b> — long entry risky`;
-    if (cp.stage === 'BOTTOM' || cp.stage === 'EARLY_PUMP') return `🟢 BTC ${cp.stage} — long entry timing OK`;
-  } else {
-    if (cp.stage === 'BOTTOM')     return `⚠️🔴 <b>BTC at BOTTOM</b> — short entry risky`;
-    if (cp.stage === 'TOP_ZONE')   return `🟢 BTC at top — short entry timing OK`;
-    if (cp.stage === 'EXHAUSTION') return `🟢 BTC exhaustion — short entry timing favorable`;
-    if (cp.stage === 'FALLING')    return `🟢 BTC falling — short entry timing OK`;
-  }
-  return '';
-})()}
-⚠️ <b>Position size: SMALL (20-30% of normal)</b> · Pre-breakout
 ${FOOTER(btc, symbol)}`.trim();
 };
 
@@ -1757,12 +1749,20 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   // v5.0 position size hint based on recovery state
   const sizeHint = getPositionSizeHint();
 
-  return `${isLong?'🟢':'🔴'} ${isLong?'🟢🟢🟢':'🔴🔴🔴'} <b>NEXIO 🔥 FIRE ${isLong?'📈LONG':'📉SHORT'} — ${symbol.replace('USDT','')}</b> ${isLong?'🟢🟢🟢':'🔴🔴🔴'}\n<b>━━━━━━━━━━━━━━━</b>\n<i>✅ TRADE THIS — entry / SL / TPs below</i>
-📊 ${score}/10 ${confBar(score)}
-${conf.join(' · ')}
+  return `🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+<b>🔥 NEXIO FIRE — ${isLong?'📈 LONG':'📉 SHORT'}</b>
+<b>${symbol.replace('USDT','')}</b>
+🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+
+<b>💰 ENTRY:  $${fmtP(price)}</b>
+<b>🛑 STOP:   $${fmtP(sl)}</b>
+<b>🎯 TP1:    $${fmtP(tp1)}</b>
+<b>🎯 TP2:    $${fmtP(tp2)}</b>
+<b>🎯 TP3:    $${fmtP(tp3)}</b>
+
 ━━━━━━━━━━━━━━━
-💰 $${fmtP(price)}  🛑 $${fmtP(sl)}
-🎯 TP1 $${fmtP(tp1)}  TP2 $${fmtP(tp2)}  TP3 $${fmtP(tp3)}\n💼 <b>Position size: MEDIUM (50-70% of normal)</b>
+📊 Score: ${score}/10 ${confBar(score)}
+${conf.join(' · ')}
 ${FOOTER(btc, symbol)}`.trim();
 };
 
@@ -2513,12 +2513,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.10`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.11`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.10 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.10 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.11 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.11 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2569,9 +2569,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.10 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.11 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.10 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.11 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
