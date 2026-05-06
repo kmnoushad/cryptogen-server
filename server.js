@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.13 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.15 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -51,6 +51,27 @@ const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5; // v5.8 — slightly looser to allow signals in tight markets
+
+// v5.14 — Meme coin blacklist (entirely skipped from scanning)
+// Add new memes here as they appear. To trade one, remove from list.
+const MEME_BLACKLIST = new Set([
+  // Dog memes
+  'DOGEUSDT', 'SHIBUSDT', 'BABYDOGEUSDT', '1MBABYDOGEUSDT', 'FLOKIUSDT',
+  'BONKUSDT', 'WIFUSDT', '1000BONKUSDT', '1000FLOKIUSDT', '1000SHIBUSDT',
+  'NEIROUSDT', 'NEIROETHUSDT', '1000XECUSDT', 'DOGSUSDT',
+  // Frog/animal memes
+  'PEPEUSDT', '1000PEPEUSDT', 'TURBOUSDT', 'BOMEUSDT', 'POPCATUSDT',
+  'BRETTUSDT', 'MEWUSDT', 'PNUTUSDT', 'CHILLGUYUSDT', 'MOODENGUSDT',
+  // Generic memes
+  'MEMEUSDT', '1000RATSUSDT', 'SLERFUSDT', 'MYROUSDT', 'BANANAUSDT',
+  'GOATUSDT', 'ACTUSDT', 'PEOPLEUSDT', '1000SATSUSDT',
+  // Celebrity/political memes
+  'TRUMPUSDT', 'MELANIA1USDT', 'MELANIAUSDT', 'BIDENUSDT', 'JELLYJELLYUSDT',
+  // Pump-and-dump prone (highly speculative)
+  'WLDUSDT', 'GMTUSDT', 'GALAUSDT',
+]);
+
+const isMemeCoin = (symbol) => MEME_BLACKLIST.has(symbol.toUpperCase());
 const PUMP_EXCLUDE_PCT        = 25.0; // was 15% — coins up 15% can still pump
 
 // Unified risk parameters — same SL/TP for both EARLY and FIRE (per user preference)
@@ -1320,7 +1341,13 @@ const checkBTCGate = async () => {
     // v4.2 — DIRECTION-AWARE BTC GATE
     // General pass = only blocked when BTC is doing something extreme (flash crash, overheated)
     // Then per-direction flags check alignment
-    let pass = true, reason = '✅ BTC stable';
+    // v5.15 — Label now reflects RECENT 1H momentum, not just 24h "stability"
+    let pass = true, reason;
+    if (change1H >= 0.5)       reason = `📈 BTC pumping +${change1H.toFixed(2)}% (1H)`;
+    else if (change1H >= 0.1)  reason = `🟢 BTC drifting up +${change1H.toFixed(2)}% (1H)`;
+    else if (change1H > -0.1)  reason = `⚪ BTC flat ${change1H.toFixed(2)}% (1H)`;
+    else if (change1H > -0.5)  reason = `🟡 BTC drifting down ${change1H.toFixed(2)}% (1H)`;
+    else                       reason = `🔴 BTC dumping ${change1H.toFixed(2)}% (1H)`;
 
     // Extreme conditions that block BOTH directions (flash crash / extreme volatility)
     const extremeMove = Math.abs(change1H) > 2.5 || Math.abs(change24h) > 7;
@@ -1945,6 +1972,7 @@ const runFullMarketScan = async () => {
         if (cryptoSet.size > 0 && !cryptoSet.has(t.symbol)) return false;
         // Blacklist fallback
         if (EXCLUDE.has(t.symbol) || EXCLUDE_REGEX.test(t.symbol)) return false;
+        if (isMemeCoin(t.symbol)) return false; // v5.14 — never include memes
         if (STOCK_SUFFIX_REGEX.test(t.symbol)) return false;
         if (isLikelyStock(t.symbol)) return false;
         if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) return false;
@@ -2245,6 +2273,13 @@ const runWatchlistScan = async () => {
 
       const state = coinTracker.get(symbol);
       if (!state) continue;
+
+      // v5.14 — Hard skip meme coins entirely
+      if (isMemeCoin(symbol)) {
+        log(`🚫 MEME-SKIP: ${symbol} blocked (meme blacklist)`);
+        coinTracker.delete(symbol);
+        continue;
+      }
 
       // v5.8: Get rolling coin profile (display only — no auto-blocking)
       const profile = await getCoinProfile(symbol);
@@ -2583,6 +2618,10 @@ const handleCommand = async msg => {
       await tg(chatId, `${emoji} <b>${sym}</b> 7-day history\n━━━━━━━━━━━━━━━\n${h.reason}\n\nFake pumps detected: ${h.fakeCount}\n${h.events ? '\nLast events:\n' + h.events.join('\n') : ''}\n\n${h.isPumpDump ? '⚠️ Bot will BLOCK signals on this coin' : '✅ Coin appears clean'}`);
     }
   }
+  else if (text === '/memes') {
+    const list = Array.from(MEME_BLACKLIST).sort().map(s => s.replace('USDT','')).join(', ');
+    await tg(chatId, `🚫 <b>Meme Coin Blacklist</b>\n━━━━━━━━━━━━━━━\n${MEME_BLACKLIST.size} coins blocked\n\n${list}\n\n<i>These coins will NEVER fire alerts.\nEdit MEME_BLACKLIST in server.js to change.</i>`);
+  }
   else if (text.startsWith('/coin')) {
     const parts = text.split(' ');
     const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
@@ -2662,12 +2701,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.13`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.15`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.13 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.13 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.15 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.15 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2718,9 +2757,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.13 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.15 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.13 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.15 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
