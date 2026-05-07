@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.15 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.16 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -2464,6 +2464,37 @@ const runWatchlistScan = async () => {
           log(`✅ BREAKEVEN-EARLY: ${symbol} +${inProfitPct.toFixed(2)}%`);
         }
 
+        // v5.16: MOMENTUM MILESTONE ALERTS — push update at +1%, +2%, +3%, +4%, +5%
+        // Tells you when to consider partial close or hold
+        const milestones = [
+          { level: 1.0, key: 'm1', emoji: '💚', msg: 'Building momentum — hold for TP1', action: 'HOLD' },
+          { level: 2.0, key: 'm2', emoji: '🟢', msg: 'TP1 zone — consider closing 30%', action: 'PARTIAL' },
+          { level: 3.0, key: 'm3', emoji: '🚀', msg: 'Strong move — close 30% more, trail rest tight', action: 'PARTIAL' },
+          { level: 4.0, key: 'm4', emoji: '💎', msg: 'Big move — secure 50% profit', action: 'BIG' },
+          { level: 5.0, key: 'm5', emoji: '🏆', msg: 'Huge move — close most, keep small runner', action: 'HUGE' },
+          { level: 7.0, key: 'm7', emoji: '⭐', msg: 'Exceptional move — close all, you won', action: 'EXIT' },
+        ];
+        for (const m of milestones) {
+          if (inProfitPct >= m.level && !sig[m.key]) {
+            sig[m.key] = true;
+            signalPrices.set(symbol, sig);
+            await postSignal(`${m.emoji} <b>${symbol.replace('USDT','')} +${m.level}%</b>\n${m.msg}\nCurrent: +${inProfitPct.toFixed(2)}% · Peak: +${(sig.trailingHigh || inProfitPct).toFixed(2)}%\n⏰ ${gstNow()} GST`);
+            log(`📈 MILESTONE +${m.level}%: ${symbol} action=${m.action}`);
+          }
+        }
+
+        // v5.16: MOMENTUM FADE WARNING — alert when profit retracing significantly
+        // Only fires if we're in profit but pulling back from peak
+        if (sig.trailingHigh && sig.trailingHigh > 1.5) {
+          const retracedFromPeak = sig.trailingHigh - inProfitPct;
+          if (retracedFromPeak >= 0.7 && !sig.fadeAlert && inProfitPct > 0) {
+            sig.fadeAlert = true;
+            signalPrices.set(symbol, sig);
+            await postSignal(`⚠️ <b>${symbol.replace('USDT','')} MOMENTUM FADING</b>\n🎯 Peak was: +${sig.trailingHigh.toFixed(2)}%\n📉 Current: +${inProfitPct.toFixed(2)}% (down ${retracedFromPeak.toFixed(2)}% from peak)\n💡 Consider closing — pump may have ended\n⏰ ${gstNow()} GST`);
+            log(`⚠️ FADE-ALERT: ${symbol} peak=${sig.trailingHigh.toFixed(2)} now=${inProfitPct.toFixed(2)}`);
+          }
+        }
+
         // v5.0: Trailing stop at +1% with 0.3% trail
         if (inProfitPct >= 1.0) {
           if (!sig.trailingHigh || inProfitPct > sig.trailingHigh) {
@@ -2701,12 +2732,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.15`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.16`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.15 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.15 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.16 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.16 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2757,9 +2788,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.15 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.16 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.15 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.16 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
