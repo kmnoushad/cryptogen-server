@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.16 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.17 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -32,6 +32,14 @@ const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
 const FREE_CHANNEL    = '-1003900595640';
 const PREMIUM_CHANNEL = '-1003913881352';
 const OWNER_CHAT_ID   = '6896387082';
+
+// v5.16+ — Paper test users: friends who receive alerts during PAPER_MODE
+// Add chat IDs here to give friends test access without going live to channels
+// To find a friend's chat ID: have them /start the bot, check /users command
+const PAPER_TEST_USERS = [
+  // Add friend chat IDs here, e.g.:
+  // '1234567890',
+];
 
 // ── PAPER TRADING MODE ───────────────────────────────────────────────────────
 // When true: alerts go ONLY to owner (no channels), every signal logged to Supabase
@@ -545,6 +553,118 @@ const checkBTCCycle = async () => {
   }
 };
 
+// ── BTC Early Warning (v5.17) ────────────────────────────────────────────────
+// Faster detection layer using 15m EMA20 + momentum slope
+// Runs ALONGSIDE the slower regime predictor (does not replace it)
+// Sends DM warning BEFORE official regime change occurs
+// Only OWNER + PAPER_TEST_USERS receive these warnings
+let btcEarlyWarning = { state: 'normal', notifiedAt: 0, lastDirection: null };
+const EARLY_WARNING_COOLDOWN_MS = 30 * 60 * 1000; // 30 min between same-direction warnings
+
+const checkBTCEarlyWarning = async () => {
+  try {
+    // Fetch 15m candles (last 30 = ~7.5 hours of data)
+    const klines15m = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=30');
+    if (!klines15m || klines15m.length < 25) return;
+
+    const closes = klines15m.map(k => parseFloat(k[4]));
+    const opens = klines15m.map(k => parseFloat(k[1]));
+    const volumes = klines15m.map(k => parseFloat(k[5]));
+    const price = closes[closes.length - 1];
+
+    // 15m EMA20 (faster than 1H EMA50)
+    const ema20_15m = calcEMAFromCloses(closes, 20);
+
+    // Recent momentum (last 4 × 15m = 1 hour)
+    const lastHour = ((price - closes[closes.length - 5]) / closes[closes.length - 5]) * 100;
+    // Previous hour (5-9 candles ago) for slope comparison
+    const prevHour = ((closes[closes.length - 5] - closes[closes.length - 9]) / closes[closes.length - 9]) * 100;
+    // Slope: is momentum accelerating or decelerating?
+    const momentumSlope = lastHour - prevHour;
+
+    // Count recent red candles
+    let redStreak = 0, greenStreak = 0;
+    for (let i = closes.length - 1; i >= closes.length - 8; i--) {
+      if (closes[i] < opens[i]) redStreak++; else break;
+    }
+    for (let i = closes.length - 1; i >= closes.length - 8; i--) {
+      if (closes[i] > opens[i]) greenStreak++; else break;
+    }
+
+    // Volume on red vs green candles
+    const redCandles = []; const greenCandles = [];
+    for (let i = closes.length - 8; i < closes.length; i++) {
+      if (closes[i] < opens[i]) redCandles.push(volumes[i]);
+      else greenCandles.push(volumes[i]);
+    }
+    const avgRedVol = redCandles.length > 0 ? redCandles.reduce((s,v)=>s+v,0) / redCandles.length : 0;
+    const avgGreenVol = greenCandles.length > 0 ? greenCandles.reduce((s,v)=>s+v,0) / greenCandles.length : 0;
+
+    // ─── EARLY WARNING TRIGGERS ────────────────────────────────────
+    let warningType = null;
+    let warningMsg = '';
+    let direction = null;
+
+    // BEARISH early warning: price below 15m EMA20 + negative momentum + accelerating
+    if (price < ema20_15m && lastHour < -0.3 && momentumSlope < -0.1 && redStreak >= 3) {
+      warningType = 'BEARISH_EARLY';
+      direction = 'down';
+      warningMsg = `📉 <b>BTC EARLY WARNING — Bearish momentum building</b>\n`
+                 + `━━━━━━━━━━━━━━━\n`
+                 + `Price: $${price.toFixed(0)} (below 15m EMA20: $${ema20_15m.toFixed(0)})\n`
+                 + `Last hour: ${lastHour.toFixed(2)}% · Slope: ${momentumSlope.toFixed(2)}%\n`
+                 + `Red streak: ${redStreak} consecutive 15m candles\n`
+                 + `Volume on reds vs greens: ${avgRedVol > avgGreenVol ? '↑ stronger (sellers active)' : 'normal'}\n\n`
+                 + `⚠️ <b>Action suggestions:</b>\n`
+                 + `• Tighten trailing stops on open LONG positions\n`
+                 + `• Don't open new LONG even if FIRE alert fires\n`
+                 + `• Watch for regime change to BEARISH soon\n\n`
+                 + `<i>Note: Official regime still ${btcRegime.regime}. This is a faster heads-up.</i>\n`
+                 + `⏰ ${gstNow()} GST`;
+    }
+    // BULLISH early warning: price above 15m EMA20 + positive momentum + accelerating  
+    else if (price > ema20_15m && lastHour > 0.3 && momentumSlope > 0.1 && greenStreak >= 3) {
+      warningType = 'BULLISH_EARLY';
+      direction = 'up';
+      warningMsg = `📈 <b>BTC EARLY WARNING — Bullish momentum building</b>\n`
+                 + `━━━━━━━━━━━━━━━\n`
+                 + `Price: $${price.toFixed(0)} (above 15m EMA20: $${ema20_15m.toFixed(0)})\n`
+                 + `Last hour: +${lastHour.toFixed(2)}% · Slope: +${momentumSlope.toFixed(2)}%\n`
+                 + `Green streak: ${greenStreak} consecutive 15m candles\n\n`
+                 + `🟢 <b>Action suggestions:</b>\n`
+                 + `• LONG opportunities forming, watch for FIRE alerts\n`
+                 + `• Don't open SHORTs even if signal fires\n`
+                 + `• Watch for regime change to BULLISH soon\n\n`
+                 + `<i>Note: Official regime still ${btcRegime.regime}. This is a faster heads-up.</i>\n`
+                 + `⏰ ${gstNow()} GST`;
+    }
+
+    // Send warning if triggered (with cooldown to avoid spam)
+    if (warningType && direction !== btcEarlyWarning.lastDirection) {
+      const sinceLast = Date.now() - btcEarlyWarning.notifiedAt;
+      if (sinceLast > EARLY_WARNING_COOLDOWN_MS) {
+        const recipients = [OWNER_CHAT_ID, ...PAPER_TEST_USERS];
+        for (const r of recipients) {
+          await tg(r, warningMsg);
+        }
+        btcEarlyWarning = { state: warningType, notifiedAt: Date.now(), lastDirection: direction };
+        log(`⚡ EARLY WARNING: ${warningType} — 1H ${lastHour.toFixed(2)}%, slope ${momentumSlope.toFixed(2)}%`);
+      }
+    }
+    // Reset state when conditions normalize
+    else if (!warningType && btcEarlyWarning.state !== 'normal') {
+      const sinceLast = Date.now() - btcEarlyWarning.notifiedAt;
+      // Only reset after 30 min of calm
+      if (sinceLast > EARLY_WARNING_COOLDOWN_MS) {
+        btcEarlyWarning = { state: 'normal', notifiedAt: 0, lastDirection: null };
+        log(`✅ Early warning cleared — conditions normalized`);
+      }
+    }
+  } catch (err) {
+    log(`⚠️ Early warning check failed: ${err.message}`);
+  }
+};
+
 // ── BTC Regime Predictor (v5.4) ───────────────────────────────────────────────
 // Classifies BTC into BULLISH / BEARISH / CHOPPY based on multiple TF + momentum
 // Blocks all signals during CHOPPY (where most losses happen)
@@ -613,15 +733,21 @@ const checkBTCRegime = async () => {
       rangePct: parseFloat(rangePct.toFixed(2)),
     };
 
-    // Notify owner only when regime changes
-    if (changed && btcRegime.lastNotified !== regime) {
+    // v5.17 fix: Notify on EVERY regime change, not just first occurrence
+    // Previous bug: if regime flipped BULLISH→CHOPPY→BULLISH, only first DM sent
+    // Now: notify whenever 'changed' is true (regime differs from previous check)
+    if (changed) {
       const emoji = regime === 'BULLISH' ? '🟢' : regime === 'BEARISH' ? '🔴' : '🟡';
       const msg = regime === 'BULLISH'
         ? 'LONG signals enabled · SHORT blocked'
         : regime === 'BEARISH'
         ? 'SHORT signals enabled · LONG blocked'
         : '⚠️ ALL signals blocked — sit out';
-      await tg(OWNER_CHAT_ID, `${emoji} <b>BTC REGIME CHANGE: ${regime}</b>\n━━━━━━━━━━━━━━━\n${reasons.join('\n')}\n\nConfidence: ${confidence}%\n${msg}\n⏰ ${gstNow()} GST`);
+      // Send to owner + paper test users (so friend sees regime changes too)
+      const recipients = [OWNER_CHAT_ID, ...PAPER_TEST_USERS];
+      for (const r of recipients) {
+        await tg(r, `${emoji} <b>BTC REGIME CHANGE: ${regime}</b>\n━━━━━━━━━━━━━━━\n${reasons.join('\n')}\n\nConfidence: ${confidence}%\n${msg}\n⏰ ${gstNow()} GST`);
+      }
       btcRegime.lastNotified = regime;
       log(`📡 BTC REGIME: ${regime} (${confidence}%) — ${reasons.join(', ')}`);
     }
@@ -1217,15 +1343,19 @@ const checkAnomalies = async () => {
   try {
     const alerts = [];
 
-    // 1. Paper logger silent — but only alert if BTC was tradeable (not choppy)
+    // 1. Paper logger silent — v5.17 smarter check
+    // Only alert if BTC was tradeable AND filters weren't blocking everything
+    // The block counter (resets daily at 21:00) tells us if filters were active
     const minsSinceLog = (Date.now() - lastSignalLogTime) / 60000;
     const btcWasTradeable = btcRegime.regime === 'BULLISH' || btcRegime.regime === 'BEARISH';
-    if (minsSinceLog > 1440 && fullScanCount > 10 && btcWasTradeable) {
-      alerts.push(`⚠️ No paper trade logged in ${Math.floor(minsSinceLog/60)}h despite tradeable BTC regime — logger may be broken`);
+    const totalBlocksToday = Object.values(blockReasons).reduce((a,b) => a+b, 0);
+    // Real bug indicator: BTC tradeable AND tracker active AND <30 blocks (bot not really scanning)
+    if (minsSinceLog > 1440 && fullScanCount > 10 && btcWasTradeable && totalBlocksToday < 30 && coinTracker.size > 0) {
+      alerts.push(`⚠️ No paper trade logged in ${Math.floor(minsSinceLog/60)}h despite tradeable BTC and active tracker — logger may be broken`);
     }
-    // Soft notice if it's been quiet but BTC is choppy (this is correct behavior)
-    else if (minsSinceLog > 1440 && btcRegime.regime === 'CHOPPY') {
-      log(`ℹ️ No signals logged in ${Math.floor(minsSinceLog/60)}h — BTC choppy, this is expected`);
+    // Soft notice if it's been quiet but bot was actively filtering (correct behavior)
+    else if (minsSinceLog > 1440 && (btcRegime.regime === 'CHOPPY' || totalBlocksToday >= 30)) {
+      log(`ℹ️ No signals in ${Math.floor(minsSinceLog/60)}h — bot filtered ${totalBlocksToday} setups (correct behavior)`);
     }
 
     // 2. BTC fetch failing — only alert if BTC is CURRENTLY broken AND lots of recent failures
@@ -1299,8 +1429,11 @@ const checkPaperOutcomes = async () => {
 };
 
 const postSignal = async text => {
-  // In PAPER_MODE, only owner gets alerts — no channel posts
-  const targets = PAPER_MODE ? [OWNER_CHAT_ID] : [FREE_CHANNEL, PREMIUM_CHANNEL, OWNER_CHAT_ID];
+  // In PAPER_MODE: owner + designated test users (friends), no public channels
+  // In LIVE_MODE: owner + free channel + premium channel
+  const targets = PAPER_MODE
+    ? [OWNER_CHAT_ID, ...PAPER_TEST_USERS]
+    : [FREE_CHANNEL, PREMIUM_CHANNEL, OWNER_CHAT_ID];
   for (const chatId of targets) {
     try {
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -2693,6 +2826,20 @@ const handleCommand = async msg => {
       }
     }
   }
+  else if (text === '/warning' || text === '/warn') {
+    const w = btcEarlyWarning;
+    const minsAgo = w.notifiedAt > 0 ? Math.floor((Date.now() - w.notifiedAt) / 60000) : null;
+    let msg = `⚡ <b>BTC Early Warning Status</b>\n━━━━━━━━━━━━━━━\n`;
+    if (w.state === 'normal') {
+      msg += `✅ No active warning\nMarket in normal state\n`;
+    } else if (w.state === 'BEARISH_EARLY') {
+      msg += `📉 BEARISH momentum building\nLast warning: ${minsAgo}min ago\n\nAction: tighten stops, avoid LONG\n`;
+    } else if (w.state === 'BULLISH_EARLY') {
+      msg += `📈 BULLISH momentum building\nLast warning: ${minsAgo}min ago\n\nAction: watch for LONG opportunities\n`;
+    }
+    msg += `\nOfficial regime: ${btcRegime.regime} (slower indicator)\n⏰ ${gstNow()} GST`;
+    await tg(chatId, msg);
+  }
   else if (text === '/cycle') {
     const cp = btcCyclePosition;
     if (!cp || cp.stage === 'UNKNOWN') {
@@ -2732,12 +2879,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.16`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.17`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.16 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.16 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.17 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.17 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -2788,9 +2935,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.16 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.17 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.16 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.17 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
@@ -2816,6 +2963,11 @@ const start = async () => {
   // v5.10 BTC Cycle Position check every 15 min (warning-only)
   await checkBTCCycle();
   setInterval(checkBTCCycle, 900000);
+
+  // v5.17 BTC Early Warning — every 5 min (faster than regime predictor)
+  // Uses 15m EMA20 + momentum slope to warn BEFORE official regime change
+  await checkBTCEarlyWarning();
+  setInterval(checkBTCEarlyWarning, 300000);
 
   // Paper trade outcome checker — every 10 min
   setInterval(checkPaperOutcomes, 600000);
