@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.20 — Adaptive Risk Edition + Smart Regime
+// NEXIO SERVER v5.20 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -21,8 +21,6 @@
 //        Bug fixes: recordWin in trailing/timeout, klines validation, RSI continue
 // v5.7 — Coin behavior tracker — records every observation to Supabase
 //        For long-term per-coin pattern analysis (no impact on alerts)
-// v5.20 — EARLY-first logic, stricter FIRE, short squeeze protection,
-//         adaptive Supabase risk blocks, weekly performance in alerts
 //
 // API LOAD: ~462 weight/min (19% of 2400 Binance limit)
 // PAPER MODE: alerts logged to Supabase paper_trades table
@@ -30,7 +28,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 
-const BOT_TOKEN       = process.env.BOT_TOKEN || ''; // set in Railway/Render env
+const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
 const FREE_CHANNEL    = '-1003900595640';
 const PREMIUM_CHANNEL = '-1003913881352';
 const OWNER_CHAT_ID   = '6896387082';
@@ -49,8 +47,8 @@ const PAPER_TEST_USERS = [
 const PAPER_MODE = true;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
-const SUPABASE_URL    = process.env.SUPABASE_URL || ''; // set in Railway/Render env
-const SUPABASE_KEY    = process.env.SUPABASE_KEY || ''; // set in Railway/Render env
+const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
+const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
 
 const FULL_MARKET_INTERVAL_MS = 300000; // v5.1 — 5 min (recover from 418)
 const WATCHLIST_SCAN_INTERVAL = 120000; // v5.1 — 2 min (recover from 418)
@@ -61,18 +59,6 @@ const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5; // v5.8 — slightly looser to allow signals in tight markets
-
-// ── Adaptive Risk Controls v5.20 ─────────────────────────────────────────────
-// Based on 14d stats: EARLY outperformed FIRE. FIRE and SHORT need higher quality.
-const MIN_EARLY_SCORE         = 5.5;
-const MIN_FIRE_SCORE          = 7.8;
-const MIN_SHORT_SCORE         = 8.2;
-const MIN_PRIORITY_SCORE      = 7.0;
-const FIRE_ULTRA_OVERRIDE     = 9.0; // allow rare A+ FIRE even if global FIRE stats are weak
-const FIRE_REDUCED_MODE       = true;
-const MIN_COIN_TRADES_FOR_BLOCK = 3;
-const MIN_COIN_WR_ALLOWED     = 0.45;
-const BLOCK_TWO_LOSSES_NO_WINS = true;
 
 // v5.14 — Meme coin blacklist (entirely skipped from scanning)
 // Add new memes here as they appear. To trade one, remove from list.
@@ -472,18 +458,12 @@ const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
 const blockReasons = {
   btcDrag: 0, pumped: 0, pumpCooldown: 0, dumpTrap: 0, newsEvent: 0,
   climax: 0, lowLiq: 0, correlation: 0, atrFlat: 0, weakCandle: 0,
-  notExtended: 0, scoreLow: 0, htfMisaligned: 0, momentumAgainst: 0, adaptiveRisk: 0, shortSqueeze: 0
+  notExtended: 0, scoreLow: 0, htfMisaligned: 0, momentumAgainst: 0
 };
 const incBlock = (reason) => { if (blockReasons[reason] !== undefined) blockReasons[reason]++; };
 
-const getPositionSizeHint = (direction = null, signalType = null, score = 0, adaptiveRisk = null) => {
+const getPositionSizeHint = () => {
   if (recoveryState.consecutiveLosses >= 2) return { pct: 50, label: '⚠️ REDUCED 50% (2 losses)' };
-  if (direction === 'SHORT') return { pct: 40, label: '⚠️ SHORT SIZE 40% — squeeze risk' };
-  if (signalType === 'FIRE' && FIRE_REDUCED_MODE) return { pct: 50, label: '⚠️ FIRE SIZE 50% — recent FIRE WR weak' };
-  if (score > 0 && score < 7) return { pct: 0, label: '👀 WATCH ONLY — score below 7' };
-  if (adaptiveRisk?.coinWR !== null && adaptiveRisk?.coinTotal >= 3 && adaptiveRisk.coinWR < 0.5) {
-    return { pct: 50, label: '⚠️ REDUCED 50% — coin history weak' };
-  }
   return { pct: 100, label: 'NORMAL 100%' };
 };
 
@@ -1169,6 +1149,16 @@ const getCoinProfile = async (symbol) => {
     const earlyWR = earlyTrades.length > 0 ? (earlyWins / earlyTrades.length) : null;
     const fireWR = fireTrades.length > 0 ? (fireWins / fireTrades.length) : null;
 
+    // v5.20 — split by direction (LONG vs SHORT separately)
+    const longTrades = closed.filter(t => t.direction === 'LONG');
+    const shortTrades = closed.filter(t => t.direction === 'SHORT');
+    const longWins = longTrades.filter(t => t.outcome === 'WIN').length;
+    const shortWins = shortTrades.filter(t => t.outcome === 'WIN').length;
+    const longLosses = longTrades.length - longWins;
+    const shortLosses = shortTrades.length - shortWins;
+    const longWR = longTrades.length > 0 ? (longWins / longTrades.length) : null;
+    const shortWR = shortTrades.length > 0 ? (shortWins / shortTrades.length) : null;
+
     // 7-day behavior data (extended from 24h to 7d for better insight)
     const behavior = (await sb(`coin_behavior?symbol=eq.${symbol}&recorded_at=gte.${since}&select=candle_color,score,vol_vs_avg,rsi,ma_stack,btc_regime,session`)) || [];
     const obsCount = behavior.length;
@@ -1238,6 +1228,9 @@ const getCoinProfile = async (symbol) => {
       // EARLY/FIRE breakdown
       earlyWR, earlyWins, earlyLosses: earlyTrades.length - earlyWins, earlyTotal: earlyTrades.length,
       fireWR, fireWins, fireLosses: fireTrades.length - fireWins, fireTotal: fireTrades.length,
+      // v5.20 — direction-specific WR
+      longWR, longWins, longLosses, longTotal: longTrades.length,
+      shortWR, shortWins, shortLosses, shortTotal: shortTrades.length,
       // Behavior stats
       greenRatio, avgScore, peakScore, avgVolRatio, avgRsi,
       observations: obsCount, sessions,
@@ -1252,82 +1245,6 @@ const getCoinProfile = async (symbol) => {
     return { symbol, tier: 'UNKNOWN', action: 'normal', hasData: false, totalTrades: 0, wins: 0, losses: 0, winRate: null, verdict: 'ERROR', verdictEmoji: '⚪', verdictReason: 'Profile fetch failed' };
   }
 };
-
-
-// ── ADAPTIVE SUPABASE RISK ENGINE (v5.20) ───────────────────────────────────
-// Uses recent paper_trades to block weak coins/directions/signal types.
-// This is intentionally cached to avoid extra Supabase load on every scan.
-const adaptiveRiskCache = new Map();
-const ADAPTIVE_RISK_CACHE_MS = 10 * 60 * 1000;
-
-const getAdaptiveRisk = async (symbol, direction, signalType) => {
-  const key = `${symbol}_${direction}_${signalType}`;
-  const cached = adaptiveRiskCache.get(key);
-  if (cached && Date.now() - cached.ts < ADAPTIVE_RISK_CACHE_MS) return cached.data;
-
-  try {
-    const since = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
-    const trades = await sb(`paper_trades?created_at=gte.${since}&select=symbol,direction,signal_type,outcome,status`) || [];
-    const closed = trades.filter(t => t.outcome === 'WIN' || t.outcome === 'LOSS');
-
-    const allBySignal = closed.filter(t => t.signal_type === signalType);
-    const signalWins = allBySignal.filter(t => t.outcome === 'WIN').length;
-    const signalLosses = allBySignal.filter(t => t.outcome === 'LOSS').length;
-    const signalTotal = allBySignal.length;
-    const signalWR = signalTotal > 0 ? signalWins / signalTotal : null;
-
-    const coinTrades = closed.filter(t => t.symbol === symbol);
-    const coinWins = coinTrades.filter(t => t.outcome === 'WIN').length;
-    const coinLosses = coinTrades.filter(t => t.outcome === 'LOSS').length;
-    const coinTotal = coinTrades.length;
-    const coinWR = coinTotal > 0 ? coinWins / coinTotal : null;
-
-    const directionTrades = closed.filter(t => t.symbol === symbol && t.direction === direction);
-    const directionWins = directionTrades.filter(t => t.outcome === 'WIN').length;
-    const directionLosses = directionTrades.filter(t => t.outcome === 'LOSS').length;
-    const directionTotal = directionTrades.length;
-    const directionWR = directionTotal > 0 ? directionWins / directionTotal : null;
-
-    let blocked = false;
-    const reasons = [];
-
-    if (signalType === 'FIRE' && signalWR !== null && signalTotal >= 5 && signalWR < 0.45) {
-      blocked = true;
-      reasons.push(`FIRE weak ${signalWins}W/${signalLosses}L (${(signalWR * 100).toFixed(0)}%)`);
-    }
-    if (coinTotal >= MIN_COIN_TRADES_FOR_BLOCK && coinWR < MIN_COIN_WR_ALLOWED) {
-      blocked = true;
-      reasons.push(`coin weak ${coinWins}W/${coinLosses}L (${(coinWR * 100).toFixed(0)}%)`);
-    }
-    if (BLOCK_TWO_LOSSES_NO_WINS && coinTotal === 2 && coinWins === 0 && coinLosses === 2) {
-      blocked = true;
-      reasons.push('coin lost 2/2 recently');
-    }
-    if (directionTotal >= 2 && directionWR !== null && directionWR < 0.40) {
-      blocked = true;
-      reasons.push(`${direction} weak ${directionWins}W/${directionLosses}L`);
-    }
-
-    const data = {
-      blocked,
-      reason: reasons.join(' · '),
-      signalWR, signalTotal, signalWins, signalLosses,
-      coinWR, coinTotal, coinWins, coinLosses,
-      directionWR, directionTotal, directionWins, directionLosses,
-    };
-    adaptiveRiskCache.set(key, { data, ts: Date.now() });
-    return data;
-  } catch (err) {
-    return {
-      blocked: false, reason: '',
-      signalWR: null, signalTotal: 0, signalWins: 0, signalLosses: 0,
-      coinWR: null, coinTotal: 0, coinWins: 0, coinLosses: 0,
-      directionWR: null, directionTotal: 0, directionWins: 0, directionLosses: 0,
-    };
-  }
-};
-
-const fmtWR = (v) => v === null || v === undefined ? '—' : `${(v * 100).toFixed(0)}%`;
 
 // ── PAPER TRADE LOGGER ───────────────────────────────────────────────────────
 // Logs every signal to Supabase 'paper_trades' table for outcome tracking
@@ -2011,14 +1928,13 @@ ${FOOTER(btc, symbol)}`.trim();
 };
 
 // EARLY — compact pre-breakout
-const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null, profile = null, adaptiveRisk = null) => {
+const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr, btc, hype = null, profile = null) => {
   const isLong = direction === 'LONG';
   const sl  = isLong ? price - atr * UNIFIED_SL_ATR  : price + atr * UNIFIED_SL_ATR;
   const tp1 = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
   const tp2 = isLong ? price + atr * UNIFIED_TP2_ATR : price - atr * UNIFIED_TP2_ATR;
   const tp3 = isLong ? price + atr * UNIFIED_TP3_ATR : price - atr * UNIFIED_TP3_ATR;
   const rr  = ((Math.abs(tp1 - price)) / Math.abs(price - sl)).toFixed(1);
-  const sizeHint = getPositionSizeHint(direction, 'EARLY', score, adaptiveRisk);
 
   const tags = [];
   if (layers.compression.compressed && layers.compression.oiBuilding) tags.push('📦Coiling+OI');
@@ -2026,27 +1942,46 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
   if (layers.fundingLS.funding < 0)   tags.push(`💸Fund${layers.fundingLS.funding.toFixed(3)}%`);
   if (layers.fundingLS.ls < 1)        tags.push(`⚖️L/S${layers.fundingLS.ls.toFixed(2)}`);
   if (sweep?.swept && sweep?.recovery) tags.push('🌊Swept');
-  if (hype?.tag)                       tags.push(hype.tag);
+  if (hype?.isTrending)                tags.push(hype.tag);
 
+  // v5.13: Show coin context even when data is thin
+  // v5.20: direction-specific WR + SHORT warning
   const reliability = (() => {
     if (!profile || profile.verdict === 'ERROR') return '';
     const lines = [];
-    if (profile.verdict !== 'INSUFFICIENT_DATA') lines.push(`🎯 <b>Coin Reliability: ${profile.verdictEmoji} ${profile.verdict}</b>`);
-    else if (profile.observations >= 30) lines.push('🎯 <b>Coin Profile: ⚪ LIMITED DATA</b>');
-    else lines.push(`🎯 <b>Coin Profile: ⚪ NEW (${profile.observations || 0} obs)</b>`);
-    if (profile.greenRatio !== null && profile.observations >= 30) lines.push(`   7d trend: ${(profile.greenRatio*100).toFixed(0)}% green ${profile.greenRatio >= 0.55 ? '🟢' : profile.greenRatio >= 0.45 ? '🟡' : '🔴'}`);
+
+    if (profile.verdict !== 'INSUFFICIENT_DATA') {
+      lines.push(`🎯 <b>Coin Reliability: ${profile.verdictEmoji} ${profile.verdict}</b>`);
+    } else if (profile.observations >= 30) {
+      lines.push(`🎯 <b>Coin Profile: ⚪ LIMITED DATA</b>`);
+    } else {
+      lines.push(`🎯 <b>Coin Profile: ⚪ NEW (${profile.observations || 0} obs)</b>`);
+    }
+
+    if (profile.greenRatio !== null && profile.observations >= 30) {
+      lines.push(`   7d trend: ${(profile.greenRatio*100).toFixed(0)}% green ${profile.greenRatio >= 0.55 ? '🟢' : profile.greenRatio >= 0.45 ? '🟡' : '🔴'}`);
+    }
     if (profile.avgVolRatio !== null && profile.observations >= 30) {
       const liqEmoji = profile.avgVolRatio < 0.6 ? '🔴 low liq' : profile.avgVolRatio < 1.0 ? '🟡' : '🟢';
       lines.push(`   Volume: ${profile.avgVolRatio.toFixed(2)}x avg ${liqEmoji}`);
     }
-    if (profile.totalTrades >= 1) lines.push(`   Past trades: ${profile.wins}W/${profile.losses}L${profile.winRate !== null ? ` (WR ${(profile.winRate*100).toFixed(0)}%)` : ''}`);
+    // v5.20: direction-specific past trades
+    const dirTotal = isLong ? profile.longTotal : profile.shortTotal;
+    const dirWins = isLong ? profile.longWins : profile.shortWins;
+    const dirLosses = isLong ? profile.longLosses : profile.shortLosses;
+    const dirWR = isLong ? profile.longWR : profile.shortWR;
+    if (dirTotal >= 1) {
+      const dirEmoji = dirWR >= 0.6 ? '🟢' : dirWR >= 0.4 ? '🟡' : '🔴';
+      lines.push(`   ${isLong ? 'LONG' : 'SHORT'} record: ${dirWins}W/${dirLosses}L${dirWR !== null ? ` (${(dirWR*100).toFixed(0)}%)` : ''} ${dirEmoji}`);
+    } else if (profile.totalTrades >= 1) {
+      lines.push(`   Past trades: ${profile.wins}W/${profile.losses}L${profile.winRate !== null ? ` (WR ${(profile.winRate*100).toFixed(0)}%)` : ''}`);
+    }
+    // v5.20: SHORT in non-BEARISH regime warning
+    if (!isLong && btcRegime.regime !== 'BEARISH') {
+      lines.push(`   ⚠️ SHORT outside BEARISH regime — risky timing`);
+    }
     return '\n' + lines.join('\n');
   })();
-
-  const adaptiveLine = adaptiveRisk
-    ? `\n🧠 <b>14d risk:</b> coin ${adaptiveRisk.coinWins || 0}W/${adaptiveRisk.coinLosses || 0}L · ${direction} WR ${fmtWR(adaptiveRisk.directionWR)} · EARLY WR ${fmtWR(adaptiveRisk.signalWR)}`
-    : '';
-  const shortRiskLine = !isLong ? '\n⚠️ <b>SHORT RISK:</b> Use 30–50% size only. Avoid if BTC flips bullish.' : '';
 
   return `⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡⚡
 <b>⚡ NEXIO EARLY — ${isLong?'📈 LONG':'📉 SHORT'}</b>
@@ -2061,21 +1996,20 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
 
 ━━━━━━━━━━━━━━━
 📊 Score: ${score}/10  ·  R:R 1:${rr}
-📌 Size: <b>${sizeHint.label}</b>
-${tags.join(' · ')}${reliability}${adaptiveLine}${shortRiskLine}
+${tags.join(' · ')}${reliability}
 ${FOOTER(btc, symbol)}`.trim();
 };
 
 // FIRE — full signal with SL/TP
-const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null, profile = null, adaptiveRisk = null) => {
+const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, klines = [], hype = null, profile = null) => {
   const isLong   = direction === 'LONG';
   const atr      = calculateATR(klines) || (price * 0.018);
+  // Wider SL for FIRE — breakout trades need breathing room
   const sl       = isLong ? price - atr * UNIFIED_SL_ATR  : price + atr * UNIFIED_SL_ATR;
   const tp1      = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
   const tp2      = isLong ? price + atr * UNIFIED_TP2_ATR : price - atr * UNIFIED_TP2_ATR;
   const tp3      = isLong ? price + atr * UNIFIED_TP3_ATR : price - atr * UNIFIED_TP3_ATR;
   const candle   = layers.trap?.candle;
-  const sizeHint = getPositionSizeHint(direction, 'FIRE', score, adaptiveRisk);
 
   const conf = [];
   if (layers.compression.compressed && layers.compression.oiBuilding) conf.push('📦OI+Coil');
@@ -2087,27 +2021,49 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
   if (candle?.verdict === 'STRONG')   conf.push(`🕯✅${candle.bodyPct}%body`);
   if (hype?.tag)                      conf.push(hype.tag);
   if (layers?.absorption?.absorbing)  conf.push('🤫ABSORBED');
+  // v5.0 position size hint based on recovery state
+  const sizeHint = getPositionSizeHint();
 
+  // v5.13: Show coin context even when data is thin
+  // v5.20: direction-specific WR + SHORT warning
   const reliability = (() => {
     if (!profile || profile.verdict === 'ERROR') return '';
     const lines = [];
-    if (profile.verdict !== 'INSUFFICIENT_DATA') lines.push(`🎯 <b>Coin Reliability: ${profile.verdictEmoji} ${profile.verdict}</b>`);
-    else if (profile.observations >= 30) lines.push('🎯 <b>Coin Profile: ⚪ LIMITED DATA</b>');
-    else lines.push(`🎯 <b>Coin Profile: ⚪ NEW (${profile.observations || 0} obs)</b>`);
-    if (profile.greenRatio !== null && profile.observations >= 30) lines.push(`   7d trend: ${(profile.greenRatio*100).toFixed(0)}% green ${profile.greenRatio >= 0.55 ? '🟢' : profile.greenRatio >= 0.45 ? '🟡' : '🔴'}`);
+
+    // Header with verdict
+    if (profile.verdict !== 'INSUFFICIENT_DATA') {
+      lines.push(`🎯 <b>Coin Reliability: ${profile.verdictEmoji} ${profile.verdict}</b>`);
+    } else if (profile.observations >= 30) {
+      lines.push(`🎯 <b>Coin Profile: ⚪ LIMITED DATA</b>`);
+    } else {
+      lines.push(`🎯 <b>Coin Profile: ⚪ NEW (${profile.observations || 0} obs)</b>`);
+    }
+
+    // Always show what we have
+    if (profile.greenRatio !== null && profile.observations >= 30) {
+      lines.push(`   7d trend: ${(profile.greenRatio*100).toFixed(0)}% green ${profile.greenRatio >= 0.55 ? '🟢' : profile.greenRatio >= 0.45 ? '🟡' : '🔴'}`);
+    }
     if (profile.avgVolRatio !== null && profile.observations >= 30) {
       const liqEmoji = profile.avgVolRatio < 0.6 ? '🔴 low liq' : profile.avgVolRatio < 1.0 ? '🟡' : '🟢';
       lines.push(`   Volume: ${profile.avgVolRatio.toFixed(2)}x avg ${liqEmoji}`);
     }
-    if (profile.totalTrades >= 1) lines.push(`   Past trades: ${profile.wins}W/${profile.losses}L${profile.winRate !== null ? ` (WR ${(profile.winRate*100).toFixed(0)}%)` : ''}`);
+    // v5.20: direction-specific past trades
+    const dirTotal = isLong ? profile.longTotal : profile.shortTotal;
+    const dirWins = isLong ? profile.longWins : profile.shortWins;
+    const dirLosses = isLong ? profile.longLosses : profile.shortLosses;
+    const dirWR = isLong ? profile.longWR : profile.shortWR;
+    if (dirTotal >= 1) {
+      const dirEmoji = dirWR >= 0.6 ? '🟢' : dirWR >= 0.4 ? '🟡' : '🔴';
+      lines.push(`   ${isLong ? 'LONG' : 'SHORT'} record: ${dirWins}W/${dirLosses}L${dirWR !== null ? ` (${(dirWR*100).toFixed(0)}%)` : ''} ${dirEmoji}`);
+    } else if (profile.totalTrades >= 1) {
+      lines.push(`   Past trades: ${profile.wins}W/${profile.losses}L${profile.winRate !== null ? ` (WR ${(profile.winRate*100).toFixed(0)}%)` : ''}`);
+    }
+    // v5.20: SHORT in non-BEARISH regime warning
+    if (!isLong && btcRegime.regime !== 'BEARISH') {
+      lines.push(`   ⚠️ SHORT outside BEARISH regime — risky timing`);
+    }
     return '\n' + lines.join('\n');
   })();
-
-  const adaptiveLine = adaptiveRisk
-    ? `\n🧠 <b>14d risk:</b> coin ${adaptiveRisk.coinWins || 0}W/${adaptiveRisk.coinLosses || 0}L · ${direction} WR ${fmtWR(adaptiveRisk.directionWR)} · FIRE WR ${fmtWR(adaptiveRisk.signalWR)}`
-    : '';
-  const shortRiskLine = !isLong ? '\n⚠️ <b>SHORT RISK:</b> Use 30–50% size only. Short squeezes can move fast.' : '';
-  const fireNote = '\n⚠️ <b>FIRE NOTE:</b> FIRE is stricter in v5.20 because recent FIRE stats were weaker than EARLY.';
 
   return `🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 <b>🔥 NEXIO FIRE — ${isLong?'📈 LONG':'📉 SHORT'}</b>
@@ -2122,8 +2078,7 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
 
 ━━━━━━━━━━━━━━━
 📊 Score: ${score}/10 ${confBar(score)}
-📌 Size: <b>${sizeHint.label}</b>
-${conf.join(' · ')}${reliability}${adaptiveLine}${shortRiskLine}${fireNote}
+${conf.join(' · ')}${reliability}
 ${FOOTER(btc, symbol)}`.trim();
 };
 
@@ -2134,56 +2089,94 @@ const buildBreakevenMsg = (symbol, entryPrice, tp1Price, direction) => {
 ⏰ ${gstNow()} GST`.trim();
 };
 
-// PRIORITY LIST — grouped, no per-coin repetition
+// PRIORITY LIST — grouped, with v5.20 coin intelligence layer
 const buildPriorityList = async (btc) => {
+  // v5.18: filter out stale entries (not updated in 10+ min)
   const now = Date.now();
   const sorted = [...coinTracker.values()]
-    .filter(c => c.state !== 'FADING' && c.score >= MIN_PRIORITY_SCORE)
+    .filter(c => c.state !== 'FADING' && c.score >= 6)
     .filter(c => {
       const lastUpdate = c.lastUpdated || c.firstSeen || 0;
-      return (now - lastUpdate) < 15 * 60 * 1000;
+      return (now - lastUpdate) < 15 * 60 * 1000; // exclude entries older than 15 min
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, 10);
-
   if (!sorted.length) return null;
 
-  const lines = [];
-  for (let i = 0; i < sorted.length; i++) {
-    const s = sorted[i];
+  // v5.20: fetch coin profile for each coin in parallel
+  const profiles = await Promise.all(sorted.map(c => getCoinProfile(c.symbol).catch(() => null)));
+
+  const lines = sorted.map((s, i) => {
     const rank  = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][i];
     const dir   = s.direction === 'LONG' ? '📈 LONG' : '📉 SHORT';
     const state = s.state === 'FIRE' ? '🔥 HIGH CONF' : s.state === 'CONFIRMING' ? '⚡ CONFIRMED' : '👀 WATCHING';
     const bar   = confBar(s.score);
+    // v5.18: show data freshness
     const ageMin = Math.floor((now - (s.lastUpdated || s.firstSeen || now)) / 60000);
     const freshness = ageMin <= 3 ? '🟢' : ageMin <= 8 ? '🟡' : '🔴';
-    const risk = await getAdaptiveRisk(s.symbol, s.direction, 'EARLY');
-    const profile = await getCoinProfile(s.symbol);
-    const behavior = profile?.greenRatio !== null && profile?.greenRatio !== undefined
-      ? `${(profile.greenRatio * 100).toFixed(0)}% green`
-      : 'no behavior data';
-    const scoreRisk = s.score < 8 ? '🟡 WATCH / SMALL SIZE' : '✅ STRONG WATCH';
-    const danger = risk.blocked ? ` 🚫 ${risk.reason}` : '';
-    const shortCaution = s.direction === 'SHORT' ? '\n     ⚠️ SHORT: half size only · avoid if BTC turns bullish' : '';
 
-    lines.push(`${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> — ${state} ${s.score}/10 ${freshness}${ageMin}m
-     ${bar}
-     🧠 14d: ${risk.coinWins || 0}W/${risk.coinLosses || 0}L · Coin WR ${fmtWR(risk.coinWR)} · ${s.direction} WR ${fmtWR(risk.directionWR)}
-     📊 Behavior: ${behavior} · Avg score ${profile?.avgScore ? profile.avgScore.toFixed(1) : '—'}
-     ${scoreRisk}${danger}${shortCaution}`);
-  }
+    // v5.20: build intelligence info from coin profile
+    const p = profiles[i];
+    let infoLine = '';
+    let recommendation = '';
+
+    if (p) {
+      const isLong = s.direction === 'LONG';
+      const dirWR = isLong ? p.longWR : p.shortWR;
+      const dirWins = isLong ? p.longWins : p.shortWins;
+      const dirLosses = isLong ? p.longLosses : p.shortLosses;
+      const dirTotal = isLong ? p.longTotal : p.shortTotal;
+
+      // Direction-specific history line
+      if (dirTotal >= 1) {
+        const wrPct = dirWR !== null ? (dirWR * 100).toFixed(0) : '—';
+        const emoji = dirWR >= 0.6 ? '🟢' : dirWR >= 0.4 ? '🟡' : '🔴';
+        infoLine = `     📒 ${s.direction}: ${dirWins}W/${dirLosses}L (${wrPct}%) ${emoji}`;
+      } else if (p.totalTrades >= 1) {
+        const wrPct = (p.winRate * 100).toFixed(0);
+        const emoji = p.winRate >= 0.6 ? '🟢' : p.winRate >= 0.4 ? '🟡' : '🔴';
+        infoLine = `     📒 Overall: ${p.wins}W/${p.losses}L (${wrPct}%) ${emoji}`;
+      } else if (p.greenRatio !== null && p.observations >= 30) {
+        const greenPct = (p.greenRatio * 100).toFixed(0);
+        infoLine = `     📊 7d: ${greenPct}% green · no trades yet`;
+      }
+
+      // Bot recommendation logic
+      const liqWarn = p.avgVolRatio !== null && p.avgVolRatio < 0.6;
+      if (dirTotal >= 2 && dirWR !== null && dirWR < 0.4) {
+        recommendation = ' ❌ AVOID';
+      } else if (dirTotal >= 3 && dirWR >= 0.6) {
+        recommendation = ' ✅ ENTER';
+      } else if (p.totalTrades >= 3 && p.winRate < 0.4) {
+        recommendation = ' ❌ AVOID';
+      } else if (liqWarn) {
+        recommendation = ' 🟡 LOW-LIQ';
+      } else if (p.totalTrades === 0 && p.observations < 30) {
+        recommendation = ' ⚪ NEW';
+      }
+    }
+
+    // Late entry warning (v5.20: track price drift since detection)
+    let lateWarning = '';
+    const priceMove = s.priceChangePct || 0;
+    if (priceMove > 3) {
+      lateWarning = ` ⚠️ +${priceMove.toFixed(1)}%`;
+    }
+
+    return `${rank} ${dir} <b>${s.symbol.replace('USDT','')}</b> — ${state} ${s.score}/10 ${freshness}${ageMin}m${recommendation}${lateWarning}\n     ${bar}${infoLine ? '\n' + infoLine : ''}`;
+  }).join('\n');
 
   const btcStr = btc ? `${btc.emoji} BTC $${btc.price?.toLocaleString()} ${btc.change > 0?'+':''}${btc.change?.toFixed(1)}%` : '';
   return `📊 <b>NEXIO PRIORITY LIST</b>
 ━━━━━━━━━━━━━━━
-${lines.join('\n\n')}
+${lines}
 ━━━━━━━━━━━━━━━
 ${btcStr}  ⏰ ${gstNow()} GST
-
-<b>Rule:</b> Priority List = WATCH ONLY. Enter only on EARLY/FIRE with SL.
-Score below ${MIN_PRIORITY_SCORE}/10 is hidden from priority to reduce manual overtrading.
-<i>DYOR · SL always set</i>`.trim();
+🔥 HIGH CONF = enter | ⚡ CONFIRMED = watch | 👀 WATCHING = building
+✅ ENTER · ❌ AVOID · 🟡 CAUTION · ⚪ NEW
+🟢 fresh · 🟡 ok · 🔴 stale  |  <i>DYOR · SL always set</i>`.trim();
 };
+
 
 // ── Contract Info Cache — only fetch once per hour ────────────────────────────
 let contractInfoCache = { data: null, ts: 0 };
@@ -2372,19 +2365,6 @@ const runWatchlistScan = async () => {
       if (!isLong && !isShort) { coinTracker.delete(symbol); continue; }
       const direction = isLong ? 'LONG' : 'SHORT';
 
-      // ── SHORT SQUEEZE PROTECTION v5.20 ─────────────────────────────────────
-      const shortSqueezeRisk = direction === 'SHORT' && (
-        btcEarlyWarning.state === 'BULLISH_EARLY' ||
-        btcRegime.regime === 'BULLISH' ||
-        btc.change1H > 0.35
-      );
-      if (shortSqueezeRisk) {
-        incBlock('shortSqueeze');
-        log(`🚫 SHORT-SQUEEZE-RISK: ${symbol} SHORT blocked — BTC bullish/early bullish`);
-        coinTracker.delete(symbol);
-        continue;
-      }
-
       // HTF already checked above when deciding direction
       const htf = htfPre;
 
@@ -2520,7 +2500,8 @@ const runWatchlistScan = async () => {
       const snap = { price, funding, oi: currentOI, ls, vol: volume.spike, score, time: Date.now() };
 
       if (!existing) {
-        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score: finalScore, layers, hype, absorption, firstSeen: Date.now(), lastUpdated: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
+        // v5.20: track firstSeenPrice to detect late entries
+        coinTracker.set(symbol, { symbol, direction, state: 'WATCHING', scanCount: 1, score: finalScore, layers, hype, absorption, firstSeen: Date.now(), firstSeenPrice: price, priceChangePct: 0, lastUpdated: Date.now(), history: [snap], entryPrice: null, earlyEntry: null, tp1Price: null });
       } else {
         if (direction !== existing.direction) {
           if (existing.entryPrice) await postSignal(`⚠️ <b>NEXIO — SIGNAL FADING</b>\n━━━━━━━━━━━━━━━\n🪙 <b>${symbol.replace('USDT','')}</b>\n❌ Direction reversed — exit now\n📍 Entry: $${fmtP(existing.entryPrice)} → Now: $${fmtP(price)}\n⏰ ${gstNow()} GST\n<i>DYOR · SL always set · Paper mode active</i>`);
@@ -2535,6 +2516,11 @@ const runWatchlistScan = async () => {
         existing.hype   = hype;
         existing.absorption = absorption;
         existing.state  = finalScore >= 8 ? 'FIRE' : finalScore >= 6 ? 'CONFIRMING' : 'WATCHING';
+        // v5.20: track price change since first detected
+        if (!existing.firstSeenPrice) existing.firstSeenPrice = price;
+        existing.priceChangePct = ((price - existing.firstSeenPrice) / existing.firstSeenPrice) * 100;
+        // For SHORT, flip sign so positive = move against direction
+        if (direction === 'SHORT') existing.priceChangePct = -existing.priceChangePct;
         coinTracker.set(symbol, existing);
       }
 
@@ -2557,13 +2543,8 @@ const runWatchlistScan = async () => {
       const block = isBlocked(symbol);
 
       // BTC direction alignment
-      const btcSupportive = isLong
-        ? (btc.bullishOk !== false && btcRegime.regime !== 'BEARISH' && btcEarlyWarning.state !== 'BEARISH_EARLY')
-        : (btc.bearishOk !== false && btcRegime.regime !== 'BULLISH' && btcEarlyWarning.state !== 'BULLISH_EARLY' && btc.change1H < 0.35);
-      if (!btcSupportive) {
-        incBlock('btcDrag');
-        log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
-      }
+      const btcSupportive = isLong ? (btc.bullishOk !== false) : (btc.bearishOk !== false);
+      if (!btcSupportive) incBlock('btcDrag'); log(`🚫 BTC-DRAG: ${symbol} ${direction} — BTC 1H ${btc.change1H?.toFixed(2)}% against us`);
 
       // Recent pump check — no-chase rule (checks 30m/1h/2h windows)
       const pumpCheck = checkRecentPump(klines, price);
@@ -2589,29 +2570,16 @@ const runWatchlistScan = async () => {
       const oiClass   = classifyOI(currentOI, prevOI, price, prevPrice, funding, trap.candle);
       const ext       = checkExtension(klines, price, atr);
 
-      const earlyAdaptiveRisk = await getAdaptiveRisk(symbol, direction, 'EARLY');
-      if (earlyAdaptiveRisk.blocked) {
-        incBlock('adaptiveRisk');
-        log(`🧠 ADAPTIVE-BLOCK EARLY: ${symbol} ${direction} — ${earlyAdaptiveRisk.reason}`);
-      }
-
-      const fireAdaptiveRisk = await getAdaptiveRisk(symbol, direction, 'FIRE');
-      if (fireAdaptiveRisk.blocked) {
-        incBlock('adaptiveRisk');
-        log(`🧠 ADAPTIVE-BLOCK FIRE: ${symbol} ${direction} — ${fireAdaptiveRisk.reason}`);
-      }
-
       // ── STAGE 0 — EARLY ENTRY alert ───────────────────────────────────────
       // Pre-breakout: compression + OI building + low volume + HTF aligned
       // Best R:R — enter before the crowd
-      const earlyBtcOk = isLong ? (btc.change1H > -0.3) : (btc.change1H < 0.15 && btcEarlyWarning.state !== 'BULLISH_EARLY');
+      const earlyBtcOk = isLong ? (btc.change1H > -0.3) : (btc.change1H < 0.3);
       if (
         btc.pass &&
         earlyBtcOk &&
-        !earlyAdaptiveRisk.blocked &&
         (early.isEarly || absorption.absorbing) &&
         (early.earlyScore >= 2 || absorption.absorbing) &&
-        finalScore >= MIN_EARLY_SCORE &&
+        finalScore >= 5 &&
         !ext.tooExtended &&
         btcRegime.regime !== 'CHOPPY' &&
         !pumpCheck.pumped &&
@@ -2628,7 +2596,7 @@ const runWatchlistScan = async () => {
           state.earlyEntry = price;
           const tp1e = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1e;
-          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype, profile, earlyAdaptiveRisk));
+          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype, profile));
           markAlert(earlyKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
@@ -2679,7 +2647,7 @@ const runWatchlistScan = async () => {
         return validBreak && holds;
       })();
 
-      const candleOk = trap.candle?.verdict === 'STRONG' && (trap.candle?.bodyPct || 0) >= 55;
+      const candleOk = trap.candle?.verdict === 'STRONG' || (trap.candle?.verdict === 'WEAK' && score >= 8);
       // Regime, OI, extension — log as warnings but do NOT block
       // Current market: most alts below EMA200, regime shows ranging — but can still 3x
       const regimeWarn = !regime.allowFire ? `regime:${regime.regime}` : '';
@@ -2690,14 +2658,14 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && (!fireAdaptiveRisk.blocked || finalScore >= FIRE_ULTRA_OVERRIDE) && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && atrExp.expanding && finalScore >= (direction === 'SHORT' ? MIN_SHORT_SCORE : MIN_FIRE_SCORE) && state.scanCount >= 2 && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
           state.state = 'FIRE';
           const tp1f = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1f;
-          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype, profile, fireAdaptiveRisk));
+          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype, profile));
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
@@ -2707,7 +2675,7 @@ const runWatchlistScan = async () => {
           const tp2Fire = isLong ? price + atr * 3.5 : price - atr * 3.5;
           await logPaperTrade({ symbol, direction, type: 'FIRE', price, sl: slFire, tp1: tp1f, tp2: tp2Fire, score: finalScore, candle: trap.candle?.verdict, btcChange: btc.change });
         }
-      } else if (btc.pass && score >= MIN_FIRE_SCORE && state.scanCount >= 2) {
+      } else if (btc.pass && score >= MIN_ALERT_SCORE && state.scanCount >= 2) {
         const reasons = [];
         if (!breakoutConfirmed) reasons.push('no 1-bar confirm');
         if (!candleOk)          reasons.push(`candle:${trap.candle?.verdict}`);
@@ -2741,18 +2709,6 @@ const runWatchlistScan = async () => {
         const inProfitPct = sig.direction === 'LONG'
           ? ((price - sig.price) / sig.price) * 100
           : ((sig.price - price) / sig.price) * 100;
-
-        // ── SHORT EMERGENCY SQUEEZE EXIT v5.20 ───────────────────────────────
-        if (sig.direction === 'SHORT' && (btcEarlyWarning.state === 'BULLISH_EARLY' || btcRegime.regime === 'BULLISH' || btc.change1H > 0.5) && !sig.shortSqueezeExitSent) {
-          await postSignal(`🚨 <b>${symbol.replace('USDT','')} SHORT SQUEEZE EXIT</b>
-BTC turned bullish while SHORT is open.
-Current PnL: ${inProfitPct > 0 ? '+' : ''}${inProfitPct.toFixed(2)}%
-⚡ Exit or reduce immediately.
-⏰ ${gstNow()} GST`);
-          sig.shortSqueezeExitSent = true;
-          signalPrices.set(symbol, sig);
-          log(`🚨 SHORT-SQUEEZE-EXIT: ${symbol} pnl=${inProfitPct.toFixed(2)}%`);
-        }
 
         if (inProfitPct >= 0.5 && !sig.breakevenEarly) {
           await postSignal(`✅ <b>${symbol.replace('USDT','')} BREAKEVEN</b> — Move SL to entry $${fmtP(sig.price)}\n💰 +0.5% secured · Risk now zero\n⏰ ${gstNow()} GST`);
@@ -2932,7 +2888,7 @@ const handleCommand = async msg => {
       const wrStr = p.winRate !== null ? `${(p.winRate*100).toFixed(0)}%` : 'no data';
       const greenStr = p.greenRatio !== null ? `${(p.greenRatio*100).toFixed(0)}%` : 'no data';
       const avgStr = p.avgScore !== null ? p.avgScore.toFixed(1) : 'no data';
-      await tg(chatId, `${tierEmoji} <b>${sym} 7-day profile</b>\n━━━━━━━━━━━━━━━\nTier: <b>${p.tier}</b> · Action: ${p.action}\n\n📊 Trades: ${p.totalTrades} (${p.wins}W / ${p.losses}L)\n🎯 Win rate: ${wrStr}\n\n📈 7d observations: ${p.observations}\n🟩 Green ratio: ${greenStr}\n📊 Avg score: ${avgStr}\n\n<i>Profile is display-only. Adaptive risk engine may still block weak setups.</i>`);
+      await tg(chatId, `${tierEmoji} <b>${sym} 7-day profile</b>\n━━━━━━━━━━━━━━━\nTier: <b>${p.tier}</b> · Action: ${p.action}\n\n📊 Trades: ${p.totalTrades} (${p.wins}W / ${p.losses}L)\n🎯 Win rate: ${wrStr}\n\n📈 24h observations: ${p.observations24h}\n🟩 Green ratio: ${greenStr}\n📊 Avg score: ${avgStr}\n\n${p.action === 'block' ? '🚫 Bot will BLOCK this coin' : p.action === 'boost' ? '✅ Bot may fire at lower score' : '✅ Normal filtering applies'}`);
     }
   }
   else if (text.startsWith('/history')) {
@@ -2990,6 +2946,64 @@ const handleCommand = async msg => {
       }
     }
   }
+  else if (text.startsWith('/verdict')) {
+    const parts = text.split(' ');
+    const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
+    if (!sym) {
+      await tg(chatId, `Usage: /verdict KAS\n\nDeep recommendation on whether to trade this coin`);
+    } else {
+      const p = await getCoinProfile(sym);
+      let msg = `🎯 <b>${sym} — Trade Verdict</b>\n━━━━━━━━━━━━━━━\n\n`;
+
+      if (p.totalTrades >= 1) {
+        msg += `📒 <b>Trade history (7d):</b>\n`;
+        msg += `   Total: ${p.totalTrades} (${p.wins}W/${p.losses}L) — ${(p.winRate*100).toFixed(0)}%\n`;
+        if (p.longTotal > 0) {
+          const emoji = p.longWR >= 0.6 ? '🟢' : p.longWR >= 0.4 ? '🟡' : '🔴';
+          msg += `   LONG:  ${p.longWins}W/${p.longLosses}L (${(p.longWR*100).toFixed(0)}%) ${emoji}\n`;
+        }
+        if (p.shortTotal > 0) {
+          const emoji = p.shortWR >= 0.6 ? '🟢' : p.shortWR >= 0.4 ? '🟡' : '🔴';
+          msg += `   SHORT: ${p.shortWins}W/${p.shortLosses}L (${(p.shortWR*100).toFixed(0)}%) ${emoji}\n`;
+        }
+        if (p.earlyTotal > 0) msg += `   EARLY: ${p.earlyWins}W/${p.earlyLosses}L (${(p.earlyWR*100).toFixed(0)}%)\n`;
+        if (p.fireTotal > 0) msg += `   FIRE:  ${p.fireWins}W/${p.fireLosses}L (${(p.fireWR*100).toFixed(0)}%)\n`;
+      } else {
+        msg += `📒 No closed trades yet on this coin\n`;
+      }
+
+      msg += `\n📊 <b>Behavior (7d):</b>\n`;
+      if (p.greenRatio !== null) msg += `   Green candles: ${(p.greenRatio*100).toFixed(0)}%\n`;
+      if (p.avgScore !== null) msg += `   Avg score: ${p.avgScore.toFixed(1)} · Peak: ${p.peakScore?.toFixed(1)}\n`;
+      if (p.avgVolRatio !== null) {
+        const liq = p.avgVolRatio < 0.6 ? '🔴 LOW' : p.avgVolRatio < 1.0 ? '🟡' : '🟢';
+        msg += `   Volume: ${p.avgVolRatio.toFixed(2)}x avg ${liq}\n`;
+      }
+      msg += `   Observations: ${p.observations}\n`;
+
+      // Recommendation logic
+      msg += `\n🎯 <b>Verdict:</b>\n`;
+      const liqWarn = p.avgVolRatio !== null && p.avgVolRatio < 0.6;
+      if (p.longWR !== null && p.longTotal >= 3 && p.longWR >= 0.6) {
+        msg += `   ✅ LONG: take with confidence (${(p.longWR*100).toFixed(0)}% historical WR)\n`;
+      } else if (p.longWR !== null && p.longTotal >= 2 && p.longWR < 0.4) {
+        msg += `   ❌ LONG: avoid (only ${(p.longWR*100).toFixed(0)}% WR on ${p.longTotal} trades)\n`;
+      } else if (p.longTotal >= 1) {
+        msg += `   🟡 LONG: limited data (${p.longTotal} trades)\n`;
+      }
+      if (p.shortWR !== null && p.shortTotal >= 3 && p.shortWR >= 0.6) {
+        msg += `   ✅ SHORT: take with confidence (${(p.shortWR*100).toFixed(0)}% historical WR)\n`;
+      } else if (p.shortWR !== null && p.shortTotal >= 2 && p.shortWR < 0.4) {
+        msg += `   ❌ SHORT: avoid (only ${(p.shortWR*100).toFixed(0)}% WR on ${p.shortTotal} trades)\n`;
+      } else if (p.shortTotal >= 1) {
+        msg += `   🟡 SHORT: limited data (${p.shortTotal} trades)\n`;
+      }
+      if (liqWarn) msg += `   ⚠️ LOW LIQUIDITY — size down or skip\n`;
+      if (p.totalTrades === 0) msg += `   ⚪ Unproven coin — wait for first trade data\n`;
+
+      await tg(chatId, msg);
+    }
+  }
   else if (text === '/warning' || text === '/warn') {
     const w = btcEarlyWarning;
     const minsAgo = w.notifiedAt > 0 ? Math.floor((Date.now() - w.notifiedAt) / 60000) : null;
@@ -3043,12 +3057,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.19`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.20`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.19 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.20 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.20 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.20 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3099,9 +3113,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.20 — Adaptive Risk Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.20 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.20 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 EARLY ≥ ${MIN_EARLY_SCORE}/10 · FIRE ≥ ${MIN_FIRE_SCORE}/10 · SHORT ≥ ${MIN_SHORT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.20 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
