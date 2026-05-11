@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.20 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.21 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -59,6 +59,7 @@ const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
 const FADE_THRESHOLD_PCT      = 1.2;
 const MIN_ALERT_SCORE         = 6.5; // v5.8 — slightly looser to allow signals in tight markets
+const MIN_FIRE_SCORE          = 8.0; // v5.21 — separate higher bar for FIRE (was 6.5, raised after 33% FIRE WR on 6 trades)
 
 // v5.14 — Meme coin blacklist (entirely skipped from scanning)
 // Add new memes here as they appear. To trade one, remove from list.
@@ -2265,6 +2266,13 @@ const runFullMarketScan = async () => {
       if (htfFM.bullish && funding < 0.03)      direction = 'LONG';
       else if (htfFM.bearish && funding > -0.03) direction = 'SHORT';
       if (!direction) continue; // skip coins with no clear HTF direction
+      // v5.21: DISABLE SHORT until we have 15+ SHORT samples with proven WR
+      // Current SHORT WR: 33% on 3 trades = unprofitable
+      // Re-enable by removing this block after verification
+      if (direction === 'SHORT') {
+        log(`🚫 SHORT-DISABLED: ${coin.symbol} (v5.21 disabled SHORT until proven)`);
+        continue;
+      }
       // direction always set above — no skip
 
       const score = calcMasterScore({
@@ -2364,6 +2372,14 @@ const runWatchlistScan = async () => {
       // If HTF not aligned or momentum against, skip
       if (!isLong && !isShort) { coinTracker.delete(symbol); continue; }
       const direction = isLong ? 'LONG' : 'SHORT';
+
+      // v5.21: SHORT disabled until proven (only 33% WR on 3 trades — unprofitable)
+      // Re-enable: remove this block after 15+ SHORT samples show consistent edge
+      if (direction === 'SHORT') {
+        log(`🚫 SHORT-DISABLED: ${symbol} skipped (v5.21 SHORT disabled)`);
+        coinTracker.delete(symbol);
+        continue;
+      }
 
       // HTF already checked above when deciding direction
       const htf = htfPre;
@@ -2658,7 +2674,7 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= MIN_ALERT_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= MIN_FIRE_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -2748,19 +2764,21 @@ const runWatchlistScan = async () => {
           }
         }
 
-        // v5.0: Trailing stop at +1% with 0.3% trail
-        if (inProfitPct >= 1.0) {
+        // v5.21: Looser trailing stop — let winners run further before locking
+        // OLD: activated at +1%, trailed 0.3% (clipped wins too early)
+        // NEW: activated at +1.5%, trails 0.5% (captures more upside)
+        if (inProfitPct >= 1.5) {
           if (!sig.trailingHigh || inProfitPct > sig.trailingHigh) {
             sig.trailingHigh = inProfitPct;
             signalPrices.set(symbol, sig);
           }
-          // If we retraced 0.3% from peak, alert trailing stop hit
-          if (sig.trailingHigh && sig.trailingHigh - inProfitPct > 0.3 && !sig.trailingExitSent) {
+          // If we retraced 0.5% from peak, alert trailing stop hit
+          if (sig.trailingHigh && sig.trailingHigh - inProfitPct > 0.5 && !sig.trailingExitSent) {
             await postSignal(`📉 <b>${symbol.replace('USDT','')} TRAILING STOP</b>\n🎯 Peak: +${sig.trailingHigh.toFixed(2)}%  Current: +${inProfitPct.toFixed(2)}%\n💰 Lock in profit — exit position\n⏰ ${gstNow()} GST`);
             sig.trailingExitSent = true;
             signalPrices.set(symbol, sig);
             // Track as win for daily stats
-            const pnl = Math.max(0.5, inProfitPct - 0.3);
+            const pnl = Math.max(0.5, inProfitPct - 0.5);
             dailyLosses.dailyProfitPct += pnl;
             recordWin(symbol, pnl);
             log(`💰 TRAILING-WIN: ${symbol} +${pnl.toFixed(2)}%`);
@@ -3057,12 +3075,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.20`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.21`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.20 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.20 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.21 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.21 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3113,9 +3131,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.20 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.21 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.20 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.21 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
