@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.22 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.23 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -1387,8 +1387,21 @@ const checkAnomalies = async () => {
     }
 
     // 3. Tracker stuck (no growth in 2+ hours of scans)
+    // v5.23: Smarter — don't false-alarm when both LONG and SHORT are blocked
+    // Examples: BEARISH regime + SHORT disabled, or CHOPPY blocks all
     if (fullScanCount > 30 && coinTracker.size === 0) {
-      alerts.push(`⚠️ Coin tracker is empty despite ${fullScanCount} scans — filters may be too tight`);
+      const isBearish = btcRegime.regime === 'BEARISH';
+      const isChoppy = btcRegime.regime === 'CHOPPY';
+      const inRegimeMin = Math.floor((Date.now() - (btcRegime.changedAt || Date.now())) / 60000);
+      const shortFreshlyAllowed = isBearish && inRegimeMin >= 60;
+      // Real bug: bot scanning but tracker empty when SHOULD be finding things
+      if (isChoppy) {
+        log(`ℹ️ Tracker empty (${fullScanCount} scans) — CHOPPY blocks all (correct)`);
+      } else if (isBearish && !shortFreshlyAllowed) {
+        log(`ℹ️ Tracker empty — BEARISH ${inRegimeMin}min, SHORT needs 60+min for stability`);
+      } else {
+        alerts.push(`⚠️ Coin tracker empty despite ${fullScanCount} scans + ${btcRegime.regime} regime — possible filter issue`);
+      }
     }
 
     // 4. BTC regime stuck UNKNOWN for 1+ hour
@@ -1981,6 +1994,10 @@ const buildEarlyMsg = (symbol, price, score, direction, layers, htf, sweep, atr,
     if (!isLong && btcRegime.regime !== 'BEARISH') {
       lines.push(`   ⚠️ SHORT outside BEARISH regime — risky timing`);
     }
+    // v5.23: SHORT testing warning — use HALF size for first 10 SHORT trades
+    if (!isLong) {
+      lines.push(`   🟡 <b>SHORT testing phase — USE HALF SIZE ($5-7 margin)</b>`);
+    }
     return '\n' + lines.join('\n');
   })();
 
@@ -2062,6 +2079,10 @@ const buildFireMsg = (symbol, price, score, direction, layers, scanCount, btc, k
     // v5.20: SHORT in non-BEARISH regime warning
     if (!isLong && btcRegime.regime !== 'BEARISH') {
       lines.push(`   ⚠️ SHORT outside BEARISH regime — risky timing`);
+    }
+    // v5.23: SHORT testing warning — use HALF size for first 10 SHORT trades
+    if (!isLong) {
+      lines.push(`   🟡 <b>SHORT testing phase — USE HALF SIZE ($5-7 margin)</b>`);
     }
     return '\n' + lines.join('\n');
   })();
@@ -2266,12 +2287,21 @@ const runFullMarketScan = async () => {
       if (htfFM.bullish && funding < 0.03)      direction = 'LONG';
       else if (htfFM.bearish && funding > -0.03) direction = 'SHORT';
       if (!direction) continue; // skip coins with no clear HTF direction
-      // v5.21: DISABLE SHORT until we have 15+ SHORT samples with proven WR
-      // Current SHORT WR: 33% on 3 trades = unprofitable
-      // Re-enable by removing this block after verification
+      // v5.23: SHORT re-enabled with strict conditions
+      // Only allow SHORT when: BTC confirmed BEARISH for 60+ min (regime stable, not flickering)
+      // Previously disabled in v5.21 (33% WR on 3 trades — but those were wrong-regime SHORTs)
       if (direction === 'SHORT') {
-        log(`🚫 SHORT-DISABLED: ${coin.symbol} (v5.21 disabled SHORT until proven)`);
-        continue;
+        const inRegimeMs = Date.now() - (btcRegime.changedAt || Date.now());
+        const inRegimeMin = Math.floor(inRegimeMs / 60000);
+        if (btcRegime.regime !== 'BEARISH') {
+          log(`🚫 SHORT-SKIP: ${coin.symbol} — BTC not BEARISH (${btcRegime.regime})`);
+          continue;
+        }
+        if (inRegimeMin < 60) {
+          log(`🚫 SHORT-SKIP: ${coin.symbol} — BEARISH only ${inRegimeMin}min (need 60+)`);
+          continue;
+        }
+        log(`✅ SHORT-ALLOWED: ${coin.symbol} — BTC BEARISH ${inRegimeMin}min`);
       }
       // direction always set above — no skip
 
@@ -2373,12 +2403,16 @@ const runWatchlistScan = async () => {
       if (!isLong && !isShort) { coinTracker.delete(symbol); continue; }
       const direction = isLong ? 'LONG' : 'SHORT';
 
-      // v5.21: SHORT disabled until proven (only 33% WR on 3 trades — unprofitable)
-      // Re-enable: remove this block after 15+ SHORT samples show consistent edge
+      // v5.23: SHORT re-enabled with strict conditions (was disabled in v5.21)
+      // Only allow SHORT in confirmed BEARISH regime, 60+ min stable
       if (direction === 'SHORT') {
-        log(`🚫 SHORT-DISABLED: ${symbol} skipped (v5.21 SHORT disabled)`);
-        coinTracker.delete(symbol);
-        continue;
+        const inRegimeMs = Date.now() - (btcRegime.changedAt || Date.now());
+        const inRegimeMin = Math.floor(inRegimeMs / 60000);
+        if (btcRegime.regime !== 'BEARISH' || inRegimeMin < 60) {
+          log(`🚫 SHORT-SKIP: ${symbol} — regime=${btcRegime.regime} ${inRegimeMin}min`);
+          coinTracker.delete(symbol);
+          continue;
+        }
       }
 
       // HTF already checked above when deciding direction
@@ -3075,12 +3109,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.22`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.23`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.22 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.22 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.23 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.23 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3131,9 +3165,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.22 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.23 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.22 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.23 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
