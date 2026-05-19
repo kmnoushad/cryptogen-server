@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.23 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.24 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -459,7 +459,8 @@ const recoveryState = { consecutiveLosses: 0, lastTradeWin: null };
 const blockReasons = {
   btcDrag: 0, pumped: 0, pumpCooldown: 0, dumpTrap: 0, newsEvent: 0,
   climax: 0, lowLiq: 0, correlation: 0, atrFlat: 0, weakCandle: 0,
-  notExtended: 0, scoreLow: 0, htfMisaligned: 0, momentumAgainst: 0
+  notExtended: 0, scoreLow: 0, htfMisaligned: 0, momentumAgainst: 0,
+  hostileDirection: 0, fireCaution: 0  // v5.24 — Supabase decision layer
 };
 const incBlock = (reason) => { if (blockReasons[reason] !== undefined) blockReasons[reason]++; };
 
@@ -1245,6 +1246,67 @@ const getCoinProfile = async (symbol) => {
   } catch (err) {
     return { symbol, tier: 'UNKNOWN', action: 'normal', hasData: false, totalTrades: 0, wins: 0, losses: 0, winRate: null, verdict: 'ERROR', verdictEmoji: '⚪', verdictReason: 'Profile fetch failed' };
   }
+};
+
+// ── v5.24 SUPABASE DECISION LAYER ────────────────────────────────────────────
+// Uses profile data to make actual blocking/adjusting decisions, not just display
+
+// Layer 1: Check if coin should be hard-blocked due to hostile direction history
+// Returns { block: bool, reason: string }
+const checkHostileDirection = (profile, direction) => {
+  if (!profile || profile.verdict === 'ERROR' || profile.verdict === 'INSUFFICIENT_DATA') {
+    return { block: false, reason: '' };
+  }
+  const isLong = direction === 'LONG';
+  const dirWR = isLong ? profile.longWR : profile.shortWR;
+  const dirTotal = isLong ? profile.longTotal : profile.shortTotal;
+  const dirWins = isLong ? profile.longWins : profile.shortWins;
+  const dirLosses = isLong ? profile.longLosses : profile.shortLosses;
+
+  // Need at least 3 trades on this direction with WR < 35%
+  if (dirTotal >= 3 && dirWR !== null && dirWR < 0.35) {
+    return {
+      block: true,
+      reason: `${direction} WR ${(dirWR*100).toFixed(0)}% (${dirWins}W/${dirLosses}L)`
+    };
+  }
+  return { block: false, reason: '' };
+};
+
+// Layer 2: Calculate score adjustment based on coin track record
+// Returns { adjustment: number, reason: string }
+// Positive adjustment = coin is trusted, lower bar
+// Negative adjustment = coin is risky, higher bar
+const calcScoreAdjustment = (profile, direction) => {
+  if (!profile || profile.verdict === 'ERROR' || profile.verdict === 'INSUFFICIENT_DATA') {
+    return { adjustment: 0, reason: '' };
+  }
+  const isLong = direction === 'LONG';
+  const dirWR = isLong ? profile.longWR : profile.shortWR;
+  const dirTotal = isLong ? profile.longTotal : profile.shortTotal;
+
+  // TRUSTED: 5+ trades with WR >= 60% → -1 score required (easier to fire)
+  if (dirTotal >= 5 && dirWR !== null && dirWR >= 0.60) {
+    return { adjustment: -1.0, reason: `TRUSTED ${(dirWR*100).toFixed(0)}% WR` };
+  }
+  // CAUTION: 3+ trades with WR between 35-45% → +1 score required (harder to fire)
+  if (dirTotal >= 3 && dirWR !== null && dirWR >= 0.35 && dirWR < 0.45) {
+    return { adjustment: +1.0, reason: `CAUTION ${(dirWR*100).toFixed(0)}% WR` };
+  }
+  return { adjustment: 0, reason: '' };
+};
+
+// Layer 3: Should FIRE signal be blocked on a CAUTION-rated coin?
+// FIRE is supposed to be high conviction — don't fire on marginal coins
+const shouldBlockFireOnCaution = (profile, direction) => {
+  if (!profile || profile.verdict === 'ERROR' || profile.verdict === 'INSUFFICIENT_DATA') {
+    return false;
+  }
+  // Block FIRE if coin has CAUTION or worse verdict overall
+  if (profile.verdict === 'CAUTION' || profile.verdict === 'WARNING') {
+    return true;
+  }
+  return false;
 };
 
 // ── PAPER TRADE LOGGER ───────────────────────────────────────────────────────
@@ -2588,6 +2650,25 @@ const runWatchlistScan = async () => {
       const profile = await getCoinProfile(symbol);
       // NOTE: We do NOT block on profile.action — we just attach to alert for user visibility
 
+      // v5.24 LAYER 1: Hard block on HOSTILE direction history
+      // If coin has 3+ trades on this direction with WR < 35% → SKIP entirely
+      const hostile = checkHostileDirection(profile, direction);
+      if (hostile.block) {
+        incBlock('hostileDirection');
+        log(`🚫 HOSTILE-BLOCK: ${symbol} ${direction} — ${hostile.reason}`);
+        coinTracker.delete(symbol);
+        continue;
+      }
+
+      // v5.24 LAYER 2: Calculate score adjustment based on coin track record
+      // TRUSTED coins get -1 score relief, CAUTION coins get +1 score penalty
+      const scoreAdj = calcScoreAdjustment(profile, direction);
+      if (scoreAdj.adjustment !== 0) {
+        log(`🎯 SCORE-ADJ: ${symbol} ${direction} ${scoreAdj.adjustment > 0 ? '+' : ''}${scoreAdj.adjustment} (${scoreAdj.reason})`);
+      }
+      const effectiveMinFire = MIN_FIRE_SCORE + scoreAdj.adjustment;
+      const effectiveMinAlert = MIN_ALERT_SCORE + scoreAdj.adjustment;
+
       // ── GUARDS (must be declared BEFORE EARLY and FIRE checks) ──────────
       // Post-loss block check
       const block = isBlocked(symbol);
@@ -2629,7 +2710,7 @@ const runWatchlistScan = async () => {
         earlyBtcOk &&
         (early.isEarly || absorption.absorbing) &&
         (early.earlyScore >= 2 || absorption.absorbing) &&
-        finalScore >= 5 &&
+        finalScore >= (5 + scoreAdj.adjustment) &&
         !ext.tooExtended &&
         btcRegime.regime !== 'CHOPPY' &&
         !pumpCheck.pumped &&
@@ -2708,7 +2789,11 @@ const runWatchlistScan = async () => {
 
       if (block.blocked) {
         log(`🛑 BLOCKED: ${symbol} — ${block.reason}`);
-      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= MIN_FIRE_SCORE && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
+      } else if (finalScore >= effectiveMinFire && shouldBlockFireOnCaution(profile, direction)) {
+        // v5.24 LAYER 3: FIRE-worthy score but verdict is CAUTION/WARNING — block FIRE
+        incBlock('fireCaution');
+        log(`🚫 FIRE-CAUTION: ${symbol} ${direction} score=${finalScore} but verdict=${profile?.verdict}`);
+      } else if (btc.pass && btcRegime.regime !== 'CHOPPY' && btcSupportive && !pumpCheck.pumped && !inPumpCooldown && !(direction === 'LONG' && climax.climax) && getOpenDirectionCount(direction) < MAX_SAME_DIRECTION && !lowLiq && !dumpTrap.isTrap && !newsEvent && (atrExp.expanding || finalScore >= 7.5) && finalScore >= effectiveMinFire && !shouldBlockFireOnCaution(profile, direction) && (state.scanCount >= 2 || finalScore >= 8.5) && trap.safe && candleOk && breakoutConfirmed && !ext.tooExtended && alertsFired < 2) {
         const fireKey = `fire_${symbol}`;
         if (canAlert(fireKey)) {
           state.entryPrice = price;
@@ -3109,12 +3194,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.23`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.24`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.23 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.23 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.24 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.24 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3165,9 +3250,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.23 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.24 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.23 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.24 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
