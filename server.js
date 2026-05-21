@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.25 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.26 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -28,10 +28,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 
-const BOT_TOKEN       = '8758159971:AAEzjYQPQVAtTmU3VBYRkUy0e6hdhy0gQRU';
-const FREE_CHANNEL    = '-1003900595640';
-const PREMIUM_CHANNEL = '-1003913881352';
-const OWNER_CHAT_ID   = '6896387082';
+// ── v5.26 SECURITY: All secrets loaded from Railway environment variables ─────
+// Set these in Railway → Variables tab. Never hardcode secrets in this file.
+const BOT_TOKEN       = process.env.BOT_TOKEN;
+const FREE_CHANNEL    = process.env.FREE_CHANNEL    || '-1003900595640';
+const PREMIUM_CHANNEL = process.env.PREMIUM_CHANNEL || '-1003913881352';
+const OWNER_CHAT_ID   = process.env.OWNER_CHAT_ID   || '6896387082';
 
 // v5.16+ — Paper test users: friends who receive alerts during PAPER_MODE
 // Add chat IDs here to give friends test access without going live to channels
@@ -47,8 +49,24 @@ const PAPER_TEST_USERS = [
 const PAPER_MODE = true;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
-const SUPABASE_URL    = 'https://jxsvqxnbjuhtenmarioe.supabase.co';
-const SUPABASE_KEY    = 'sb_publishable_2TyePq_3BLHi2s8GbLMEaA_rspMsMN4';
+const SUPABASE_URL    = process.env.SUPABASE_URL || 'https://jxsvqxnbjuhtenmarioe.supabase.co';
+const SUPABASE_KEY    = process.env.SUPABASE_KEY;
+const FINNHUB_KEY     = process.env.FINNHUB_KEY;
+
+// v5.26: Validate critical secrets are present — fail loud, not silent
+(() => {
+  const missing = [];
+  if (!BOT_TOKEN)    missing.push('BOT_TOKEN');
+  if (!SUPABASE_KEY) missing.push('SUPABASE_KEY');
+  if (missing.length) {
+    console.error(`[FATAL] Missing required env variables: ${missing.join(', ')}`);
+    console.error('[FATAL] Set these in Railway → Variables tab. Bot cannot start.');
+    process.exit(1);
+  }
+  if (!FINNHUB_KEY) {
+    console.warn('[WARN] FINNHUB_KEY not set — economic calendar will use fallback hardcoded dates only.');
+  }
+})();
 
 const FULL_MARKET_INTERVAL_MS = 300000; // v5.1 — 5 min (recover from 418)
 const WATCHLIST_SCAN_INTERVAL = 120000; // v5.1 — 2 min (recover from 418)
@@ -243,9 +261,63 @@ const ECONOMIC_EVENTS = [
 // Returns active event if we're within the danger window, else null
 // windowBeforeMin: minutes before event to start warning
 // windowAfterMin: minutes after event to keep warning
+// (Definition moved below — see Finnhub live calendar section)
+
+// Format event time in Dubai for display
+const eventTimeDubai = (evTime) => new Date(evTime).toLocaleTimeString('en-US', {
+  hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Dubai'
+});
+
+// ── v5.26 FINNHUB LIVE ECONOMIC CALENDAR ─────────────────────────────────────
+// Fetches real economic calendar from Finnhub (free tier), refreshed every 6h.
+// Replaces sparse hardcoded list with live, complete US high-impact events.
+// Falls back to hardcoded ECONOMIC_EVENTS if Finnhub unavailable.
+let liveEconomicEvents = [];   // populated from Finnhub
+let lastFinnhubFetch = 0;
+
+const fetchFinnhubCalendar = async () => {
+  if (!FINNHUB_KEY) return; // no key → stay on hardcoded fallback
+  // Refresh at most every 6 hours
+  if (Date.now() - lastFinnhubFetch < 6 * 60 * 60 * 1000 && liveEconomicEvents.length) return;
+  try {
+    const now = new Date();
+    const from = now.toISOString().slice(0, 10);
+    const toDate = new Date(now.getTime() + 14 * 24 * 60 * 60000).toISOString().slice(0, 10);
+    const url = `https://finnhub.io/api/v1/calendar/economic?from=${from}&to=${toDate}&token=${FINNHUB_KEY}`;
+    const data = await fetchJSON(url);
+    if (data && Array.isArray(data.economicCalendar)) {
+      // Keep only US high-impact events
+      liveEconomicEvents = data.economicCalendar
+        .filter(e => e.country === 'US' && (e.impact === 'high' || e.impact === 3))
+        .map(e => {
+          // Finnhub time format: "2026-05-21 12:30:00" (UTC)
+          const evTime = new Date(e.time.replace(' ', 'T') + 'Z').getTime();
+          return { name: e.event, evTime, impact: 'HIGH' };
+        })
+        .filter(e => !isNaN(e.evTime));
+      lastFinnhubFetch = Date.now();
+      log(`📅 Finnhub: loaded ${liveEconomicEvents.length} US high-impact events`);
+    }
+  } catch (err) {
+    log(`⚠️ Finnhub fetch failed: ${err.message} — using hardcoded fallback`);
+  }
+};
+
+// Track which events we've already DM'd about (avoid spam)
+const economicEventNotified = new Set();
+
+// Returns active event if we're within the danger window, else null
+// Checks LIVE Finnhub events first, then hardcoded fallback
 const getActiveEconomicEvent = (windowBeforeMin = 60, windowAfterMin = 90) => {
   const now = Date.now();
-  // Check hardcoded one-off events
+  // v5.26: Check live Finnhub events first
+  for (const ev of liveEconomicEvents) {
+    if (now >= ev.evTime - windowBeforeMin*60000 && now <= ev.evTime + windowAfterMin*60000) {
+      const minsUntil = Math.round((ev.evTime - now) / 60000);
+      return { ...ev, minsUntil, phase: minsUntil > 0 ? 'BEFORE' : 'DURING' };
+    }
+  }
+  // Fallback: hardcoded one-off events
   for (const ev of ECONOMIC_EVENTS) {
     const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
     if (now >= evTime - windowBeforeMin*60000 && now <= evTime + windowAfterMin*60000) {
@@ -253,9 +325,9 @@ const getActiveEconomicEvent = (windowBeforeMin = 60, windowAfterMin = 90) => {
       return { ...ev, evTime, minsUntil, phase: minsUntil > 0 ? 'BEFORE' : 'DURING' };
     }
   }
-  // Check recurring weekly jobless claims (Thursday 12:30 UTC)
+  // Fallback: recurring weekly jobless claims (Thursday 12:30 UTC)
   const d = new Date();
-  if (d.getUTCDay() === 4) { // Thursday
+  if (d.getUTCDay() === 4) {
     const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
     if (now >= claimsTime - windowBeforeMin*60000 && now <= claimsTime + windowAfterMin*60000) {
       const minsUntil = Math.round((claimsTime - now) / 60000);
@@ -264,14 +336,6 @@ const getActiveEconomicEvent = (windowBeforeMin = 60, windowAfterMin = 90) => {
   }
   return null;
 };
-
-// Format event time in Dubai for display
-const eventTimeDubai = (evTime) => new Date(evTime).toLocaleTimeString('en-US', {
-  hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Dubai'
-});
-
-// Track which events we've already DM'd about (avoid spam)
-const economicEventNotified = new Set();
 
 // Append a caution tag to alerts during event window (Option B: warn, don't block)
 const econCautionTag = () => {
@@ -2486,6 +2550,7 @@ const runWatchlistScan = async () => {
   log(`👁 Watchlist Scan #${watchlistScanCount}`);
   try {
     await checkWeeklyDrawdown(); // update weekly DD cache
+    await fetchFinnhubCalendar(); // v5.26: refresh live economic calendar (6h cache)
 
     // v5.25: Check for high-impact economic event window
     const econEvent = getActiveEconomicEvent();
@@ -3174,29 +3239,40 @@ const handleCommand = async msg => {
     }
   }
   else if (text === '/events' || text === '/calendar') {
+    await fetchFinnhubCalendar(); // ensure fresh
     const now = Date.now();
     const upcoming = [];
-    // Gather hardcoded events in next 14 days
-    for (const ev of ECONOMIC_EVENTS) {
-      const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
-      if (evTime > now && evTime < now + 14*24*60*60000) {
-        upcoming.push({ name: ev.name, evTime });
+    // v5.26: Use live Finnhub events first
+    if (liveEconomicEvents.length) {
+      for (const ev of liveEconomicEvents) {
+        if (ev.evTime > now && ev.evTime < now + 14*24*60*60000) {
+          upcoming.push({ name: ev.name, evTime: ev.evTime });
+        }
       }
-    }
-    // Add next few Thursday jobless claims
-    for (let i = 0; i < 14; i++) {
-      const d = new Date(now + i*24*60*60000);
-      if (d.getUTCDay() === 4) {
-        const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
-        if (claimsTime > now) upcoming.push({ name: 'US Jobless Claims + Data', evTime: claimsTime });
+    } else {
+      // Fallback: hardcoded events
+      for (const ev of ECONOMIC_EVENTS) {
+        const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
+        if (evTime > now && evTime < now + 14*24*60*60000) {
+          upcoming.push({ name: ev.name, evTime });
+        }
+      }
+      // Add next few Thursday jobless claims
+      for (let i = 0; i < 14; i++) {
+        const d = new Date(now + i*24*60*60000);
+        if (d.getUTCDay() === 4) {
+          const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
+          if (claimsTime > now) upcoming.push({ name: 'US Jobless Claims + Data', evTime: claimsTime });
+        }
       }
     }
     upcoming.sort((a,b) => a.evTime - b.evTime);
-    let msg = `📅 <b>Upcoming High-Impact Events (14d)</b>\n━━━━━━━━━━━━━━━\n\n`;
+    const srcLabel = liveEconomicEvents.length ? '🟢 live (Finnhub)' : '🟡 fallback (hardcoded)';
+    let msg = `📅 <b>Upcoming High-Impact Events (14d)</b>\n${srcLabel}\n━━━━━━━━━━━━━━━\n\n`;
     if (!upcoming.length) {
       msg += `No major scheduled events in the next 14 days.`;
     } else {
-      for (const ev of upcoming.slice(0, 10)) {
+      for (const ev of upcoming.slice(0, 12)) {
         const dateStr = new Date(ev.evTime).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'Asia/Dubai' });
         msg += `• ${dateStr} ${eventTimeDubai(ev.evTime)} — ${ev.name}\n`;
       }
@@ -3315,12 +3391,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.25`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.26`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.25 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.25 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.26 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.26 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3371,9 +3447,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.25 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.26 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.25 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.26 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
