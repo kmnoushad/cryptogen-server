@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.26 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.27 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -342,6 +342,101 @@ const econCautionTag = () => {
   const ev = getActiveEconomicEvent();
   if (!ev) return '';
   return `\n\n⚠️ <b>CAUTION:</b> ${ev.name} ${ev.phase === 'BEFORE' ? `in ~${ev.minsUntil}min` : 'happening now'} — high-impact data window. Use tight SL, reduce size, the move is fast.`;
+};
+
+// ── v5.27 MULTI-STAGE EVENT REMINDERS ────────────────────────────────────────
+// Fires staggered reminders so user (busy at work) doesn't miss the window:
+//   Morning 08:00 Dubai heads-up + T-4hr + T-60/45/30/15min + at-event
+// Each stage dedup'd so it sends exactly once per event.
+const eventReminderSent = new Set(); // keys: "evKey@stage"
+
+// Get all events within next 5 hours (for reminder scanning)
+const getUpcomingEventsForReminders = () => {
+  const now = Date.now();
+  const events = [];
+  const seen = new Set();
+  const add = (name, evTime) => {
+    const k = `${name}-${new Date(evTime).toISOString().slice(0,13)}`;
+    if (seen.has(k)) return; seen.add(k);
+    events.push({ name, evTime, key: k });
+  };
+  // Live Finnhub events
+  for (const ev of liveEconomicEvents) {
+    if (ev.evTime > now - 5*60000 && ev.evTime < now + 5*60*60000) add(ev.name, ev.evTime);
+  }
+  // Hardcoded fallback
+  for (const ev of ECONOMIC_EVENTS) {
+    const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
+    if (evTime > now - 5*60000 && evTime < now + 5*60*60000) add(ev.name, evTime);
+  }
+  // Weekly jobless claims (Thursday)
+  const d = new Date();
+  if (d.getUTCDay() === 4) {
+    const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
+    if (claimsTime > now - 5*60000 && claimsTime < now + 5*60*60000) add('US Jobless Claims + Data', claimsTime);
+  }
+  return events;
+};
+
+// Check and fire staggered reminders — called every scan
+const checkEventReminders = async () => {
+  const now = Date.now();
+  // Morning heads-up: 08:00 Dubai if any event today
+  const dubaiHour = parseInt(new Date().toLocaleString('en-US', { hour: '2-digit', hour12: false, timeZone: 'Asia/Dubai' }));
+  const dubaiDate = new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Dubai' });
+
+  // Gather today's events for morning summary
+  const allUpcoming = [];
+  const seenM = new Set();
+  for (const ev of liveEconomicEvents) {
+    const evDubaiDate = new Date(ev.evTime).toLocaleDateString('en-US', { timeZone: 'Asia/Dubai' });
+    if (evDubaiDate === dubaiDate && ev.evTime > now) {
+      const k = `${ev.name}-${new Date(ev.evTime).toISOString().slice(0,13)}`;
+      if (!seenM.has(k)) { seenM.add(k); allUpcoming.push(ev); }
+    }
+  }
+  // Morning heads-up at 08:00 Dubai (fires during the 08:00 hour, once)
+  const morningKey = `morning-${dubaiDate}`;
+  if (dubaiHour === 8 && allUpcoming.length && !eventReminderSent.has(morningKey)) {
+    eventReminderSent.add(morningKey);
+    let msg = `📅 <b>TODAY'S HIGH-IMPACT EVENTS</b>\n━━━━━━━━━━━━━━━\n\n`;
+    for (const ev of allUpcoming) {
+      msg += `🕐 ${eventTimeDubai(ev.evTime)} Dubai — ${ev.name}\n`;
+    }
+    msg += `\nReminders will follow at 4hr, 1hr, then every 15min.\n<i>Plan your positions around these windows.</i>`;
+    await tg(OWNER_CHAT_ID, msg);
+  }
+
+  // Staggered reminders per event
+  const events = getUpcomingEventsForReminders();
+  for (const ev of events) {
+    const minsUntil = Math.round((ev.evTime - now) / 60000);
+    // Define reminder stages (minutes before): 240, 60, 45, 30, 15, 0
+    const stages = [
+      { at: 240, tol: 3, label: '4 hours', emoji: '⚠️', extra: 'Plan your positions.' },
+      { at: 60,  tol: 2, label: '1 hour',  emoji: '⚠️', extra: 'Prepare — volatility burst approaching.' },
+      { at: 45,  tol: 2, label: '45 minutes', emoji: '⚠️', extra: 'Reduce size if entering.' },
+      { at: 30,  tol: 2, label: '30 minutes', emoji: '⚠️', extra: 'Set tight stops on open positions.' },
+      { at: 15,  tol: 2, label: '15 minutes', emoji: '🔴', extra: 'FINAL WARNING — tighten SL now, the move is fast.' },
+      { at: 0,   tol: 2, label: 'NOW',        emoji: '🔴', extra: 'DATA DROPPING — expect sharp volatility either direction.' },
+    ];
+    for (const st of stages) {
+      const stageKey = `${ev.key}@${st.at}`;
+      if (Math.abs(minsUntil - st.at) <= st.tol && !eventReminderSent.has(stageKey)) {
+        eventReminderSent.add(stageKey);
+        const timing = st.at === 0 ? 'happening NOW' : `in ~${st.label}`;
+        await tg(OWNER_CHAT_ID,
+          `${st.emoji} <b>${ev.name.toUpperCase()}</b> — ${timing}\n━━━━━━━━━━━━━━━\n` +
+          `🕐 ${eventTimeDubai(ev.evTime)} Dubai\n\n` +
+          `${st.extra}\n\n` +
+          `<i>Tight SL · reduce size · don't chase the first candle</i>\n` +
+          `⏰ ${gstNow()} GST`);
+        break; // one stage per scan per event
+      }
+    }
+  }
+  // Cleanup old reminder keys (older than 24h) to prevent unbounded growth
+  if (eventReminderSent.size > 200) eventReminderSent.clear();
 };
 
 const fmtP = p => p >= 1000
@@ -2552,26 +2647,8 @@ const runWatchlistScan = async () => {
     await checkWeeklyDrawdown(); // update weekly DD cache
     await fetchFinnhubCalendar(); // v5.26: refresh live economic calendar (6h cache)
 
-    // v5.25: Check for high-impact economic event window
-    const econEvent = getActiveEconomicEvent();
-    if (econEvent) {
-      const evKey = `${econEvent.name}-${new Date(econEvent.evTime).toISOString().slice(0,13)}`;
-      // DM warning once per event (on first detection in BEFORE phase)
-      if (econEvent.phase === 'BEFORE' && !economicEventNotified.has(evKey)) {
-        economicEventNotified.add(evKey);
-        await tg(OWNER_CHAT_ID,
-          `⚠️ <b>HIGH-IMPACT DATA INCOMING</b>\n━━━━━━━━━━━━━━━\n` +
-          `📅 ${econEvent.name}\n` +
-          `🕐 ${eventTimeDubai(econEvent.evTime)} Dubai (in ~${econEvent.minsUntil} min)\n\n` +
-          `Expect a sharp volatility burst — price can spike either direction.\n\n` +
-          `<b>If you trade this window:</b>\n` +
-          `• Use tight stop loss (the move is fast)\n` +
-          `• Reduce position size\n` +
-          `• Don't chase the first violent candle\n\n` +
-          `<i>Signals will continue with a caution tag during this window.</i>\n` +
-          `⏰ ${gstNow()} GST`);
-      }
-    }
+    // v5.27: Multi-stage event reminders (morning + 4hr + 60/45/30/15min + at-event)
+    await checkEventReminders();
 
     const btc       = await checkBTCGate();
     const watchlist = await getWatchlist();
@@ -3391,12 +3468,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.26`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.27`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.26 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.26 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.27 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.27 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3447,9 +3524,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.26 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.27 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.26 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.27 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
