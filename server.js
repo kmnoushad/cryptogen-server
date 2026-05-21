@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.24 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.25 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -211,6 +211,74 @@ const isLowLiquiditySession = () => {
 };
 const canAlert  = k => !alertHistory.has(k) || Date.now() - alertHistory.get(k) > ALERT_COOLDOWN_MS;
 const markAlert = k => alertHistory.set(k, Date.now());
+
+// ── v5.25 ECONOMIC EVENT CALENDAR ────────────────────────────────────────────
+// High-impact scheduled US data that causes volatility bursts.
+// All times stored in UTC. Bot converts to Dubai for display.
+// Recurring events computed dynamically; one-off events hardcoded.
+// PURPOSE: warn of volatility windows so user can size down + set tight SL.
+// Does NOT predict direction — only timing of expected volatility.
+
+// Recurring weekly: Initial Jobless Claims — every Thursday 12:30 UTC (16:30 Dubai)
+// Recurring monthly: CPI, NFP, PMI, FOMC — approximate, refined by hardcoded dates
+const ECONOMIC_EVENTS = [
+  // Format: { date: 'YYYY-MM-DD', timeUTC: 'HH:MM', name: '...', impact: 'HIGH'|'MED' }
+  // 2026 FOMC meeting decision days (2:00 PM ET = 18:00 UTC)
+  { date: '2026-06-17', timeUTC: '18:00', name: 'FOMC Rate Decision', impact: 'HIGH' },
+  { date: '2026-07-29', timeUTC: '18:00', name: 'FOMC Rate Decision', impact: 'HIGH' },
+  { date: '2026-09-16', timeUTC: '18:00', name: 'FOMC Rate Decision', impact: 'HIGH' },
+  { date: '2026-11-04', timeUTC: '19:00', name: 'FOMC Rate Decision', impact: 'HIGH' },
+  { date: '2026-12-16', timeUTC: '19:00', name: 'FOMC Rate Decision', impact: 'HIGH' },
+  // CPI releases (8:30 AM ET = 12:30 UTC) — approximate monthly
+  { date: '2026-05-12', timeUTC: '12:30', name: 'CPI Inflation Data', impact: 'HIGH' },
+  { date: '2026-06-10', timeUTC: '12:30', name: 'CPI Inflation Data', impact: 'HIGH' },
+  { date: '2026-07-14', timeUTC: '12:30', name: 'CPI Inflation Data', impact: 'HIGH' },
+  { date: '2026-08-12', timeUTC: '12:30', name: 'CPI Inflation Data', impact: 'HIGH' },
+  // NFP / Jobs Report (8:30 AM ET first Friday)
+  { date: '2026-06-05', timeUTC: '12:30', name: 'Nonfarm Payrolls (Jobs)', impact: 'HIGH' },
+  { date: '2026-07-02', timeUTC: '12:30', name: 'Nonfarm Payrolls (Jobs)', impact: 'HIGH' },
+  { date: '2026-08-07', timeUTC: '12:30', name: 'Nonfarm Payrolls (Jobs)', impact: 'HIGH' },
+];
+
+// Returns active event if we're within the danger window, else null
+// windowBeforeMin: minutes before event to start warning
+// windowAfterMin: minutes after event to keep warning
+const getActiveEconomicEvent = (windowBeforeMin = 60, windowAfterMin = 90) => {
+  const now = Date.now();
+  // Check hardcoded one-off events
+  for (const ev of ECONOMIC_EVENTS) {
+    const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
+    if (now >= evTime - windowBeforeMin*60000 && now <= evTime + windowAfterMin*60000) {
+      const minsUntil = Math.round((evTime - now) / 60000);
+      return { ...ev, evTime, minsUntil, phase: minsUntil > 0 ? 'BEFORE' : 'DURING' };
+    }
+  }
+  // Check recurring weekly jobless claims (Thursday 12:30 UTC)
+  const d = new Date();
+  if (d.getUTCDay() === 4) { // Thursday
+    const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
+    if (now >= claimsTime - windowBeforeMin*60000 && now <= claimsTime + windowAfterMin*60000) {
+      const minsUntil = Math.round((claimsTime - now) / 60000);
+      return { name: 'US Jobless Claims + Data', impact: 'HIGH', evTime: claimsTime, minsUntil, phase: minsUntil > 0 ? 'BEFORE' : 'DURING' };
+    }
+  }
+  return null;
+};
+
+// Format event time in Dubai for display
+const eventTimeDubai = (evTime) => new Date(evTime).toLocaleTimeString('en-US', {
+  hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Dubai'
+});
+
+// Track which events we've already DM'd about (avoid spam)
+const economicEventNotified = new Set();
+
+// Append a caution tag to alerts during event window (Option B: warn, don't block)
+const econCautionTag = () => {
+  const ev = getActiveEconomicEvent();
+  if (!ev) return '';
+  return `\n\n⚠️ <b>CAUTION:</b> ${ev.name} ${ev.phase === 'BEFORE' ? `in ~${ev.minsUntil}min` : 'happening now'} — high-impact data window. Use tight SL, reduce size, the move is fast.`;
+};
 
 const fmtP = p => p >= 1000
   ? p.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -2418,6 +2486,28 @@ const runWatchlistScan = async () => {
   log(`👁 Watchlist Scan #${watchlistScanCount}`);
   try {
     await checkWeeklyDrawdown(); // update weekly DD cache
+
+    // v5.25: Check for high-impact economic event window
+    const econEvent = getActiveEconomicEvent();
+    if (econEvent) {
+      const evKey = `${econEvent.name}-${new Date(econEvent.evTime).toISOString().slice(0,13)}`;
+      // DM warning once per event (on first detection in BEFORE phase)
+      if (econEvent.phase === 'BEFORE' && !economicEventNotified.has(evKey)) {
+        economicEventNotified.add(evKey);
+        await tg(OWNER_CHAT_ID,
+          `⚠️ <b>HIGH-IMPACT DATA INCOMING</b>\n━━━━━━━━━━━━━━━\n` +
+          `📅 ${econEvent.name}\n` +
+          `🕐 ${eventTimeDubai(econEvent.evTime)} Dubai (in ~${econEvent.minsUntil} min)\n\n` +
+          `Expect a sharp volatility burst — price can spike either direction.\n\n` +
+          `<b>If you trade this window:</b>\n` +
+          `• Use tight stop loss (the move is fast)\n` +
+          `• Reduce position size\n` +
+          `• Don't chase the first violent candle\n\n` +
+          `<i>Signals will continue with a caution tag during this window.</i>\n` +
+          `⏰ ${gstNow()} GST`);
+      }
+    }
+
     const btc       = await checkBTCGate();
     const watchlist = await getWatchlist();
     const symbols   = watchlist.map(r => r.symbol);
@@ -2727,7 +2817,7 @@ const runWatchlistScan = async () => {
           state.earlyEntry = price;
           const tp1e = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1e;
-          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype, profile));
+          await postSignal(buildEarlyMsg(symbol, price, finalScore, direction, layers, htf, sweep, atr, btc, hype, profile) + econCautionTag());
           markAlert(earlyKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'EARLY', atr, tp1: tp1e });
           alertsFired++;
@@ -2800,7 +2890,7 @@ const runWatchlistScan = async () => {
           state.state = 'FIRE';
           const tp1f = isLong ? price + atr * UNIFIED_TP1_ATR : price - atr * UNIFIED_TP1_ATR;
           state.tp1Price = tp1f;
-          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype, profile));
+          await postSignal(buildFireMsg(symbol, price, finalScore, direction, layers, state.scanCount, btc, klines, hype, profile) + econCautionTag());
           markAlert(fireKey);
           signalPrices.set(symbol, { price, direction, firedAt: Date.now(), type: 'FIRE', atr, tp1: tp1f });
           alertsFired++;
@@ -3083,6 +3173,37 @@ const handleCommand = async msg => {
       }
     }
   }
+  else if (text === '/events' || text === '/calendar') {
+    const now = Date.now();
+    const upcoming = [];
+    // Gather hardcoded events in next 14 days
+    for (const ev of ECONOMIC_EVENTS) {
+      const evTime = new Date(`${ev.date}T${ev.timeUTC}:00Z`).getTime();
+      if (evTime > now && evTime < now + 14*24*60*60000) {
+        upcoming.push({ name: ev.name, evTime });
+      }
+    }
+    // Add next few Thursday jobless claims
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(now + i*24*60*60000);
+      if (d.getUTCDay() === 4) {
+        const claimsTime = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 30, 0)).getTime();
+        if (claimsTime > now) upcoming.push({ name: 'US Jobless Claims + Data', evTime: claimsTime });
+      }
+    }
+    upcoming.sort((a,b) => a.evTime - b.evTime);
+    let msg = `📅 <b>Upcoming High-Impact Events (14d)</b>\n━━━━━━━━━━━━━━━\n\n`;
+    if (!upcoming.length) {
+      msg += `No major scheduled events in the next 14 days.`;
+    } else {
+      for (const ev of upcoming.slice(0, 10)) {
+        const dateStr = new Date(ev.evTime).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'Asia/Dubai' });
+        msg += `• ${dateStr} ${eventTimeDubai(ev.evTime)} — ${ev.name}\n`;
+      }
+      msg += `\n<i>Bot warns 1hr before each. Use tight SL during these windows — fast volatility.</i>`;
+    }
+    await tg(chatId, msg);
+  }
   else if (text.startsWith('/verdict')) {
     const parts = text.split(' ');
     const sym = parts[1] ? parts[1].toUpperCase() + (parts[1].toUpperCase().endsWith('USDT') ? '' : 'USDT') : null;
@@ -3194,12 +3315,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.24`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.25`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.24 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.24 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.25 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.25 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3250,9 +3371,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.24 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.25 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.24 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.25 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
