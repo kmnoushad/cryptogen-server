@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.29 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.28 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -1779,55 +1779,13 @@ const addToChannel = async (chatId, channelId) => {
 };
 
 // ── LAYER 1: BTC Gate ─────────────────────────────────────────────────────────
-// v5.29: Retry-with-fallback for BTC fetch — addresses persistent fetch failures
-// Tries Futures API → wait → retry → Spot API fallback
-// Each path has the same data; bot can build BTC gate from either
-// (sleep helper already declared near top of file)
-
-const fetchBTCData = async () => {
-  // Attempt 1: Binance Futures API (primary)
+const checkBTCGate = async () => {
   try {
     const [klines, ticker, funding] = await Promise.all([
       fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=8'),
       fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
       fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
     ]);
-    return { klines, ticker, funding, source: 'futures' };
-  } catch (err1) {
-    log(`⚠️ BTC futures fetch failed: ${err1.message || err1} — retrying in 1.5s`);
-    await sleep(1500);
-    // Attempt 2: Retry Futures API once
-    try {
-      const [klines, ticker, funding] = await Promise.all([
-        fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=8'),
-        fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
-        fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
-      ]);
-      log(`✅ BTC futures fetch succeeded on retry`);
-      return { klines, ticker, funding, source: 'futures-retry' };
-    } catch (err2) {
-      log(`⚠️ BTC futures retry also failed: ${err2.message || err2} — trying spot API`);
-      // Attempt 3: Spot API fallback (different rate-limit bucket, same data)
-      try {
-        const [klines, ticker] = await Promise.all([
-          fetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=8'),
-          fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'),
-        ]);
-        // Spot doesn't have funding rate — use last known cached value (or 0)
-        const funding = { lastFundingRate: btcGateStatus.funding ? (btcGateStatus.funding / 100).toString() : '0' };
-        log(`✅ BTC spot fetch succeeded (futures unavailable)`);
-        return { klines, ticker, funding, source: 'spot-fallback' };
-      } catch (err3) {
-        // All three attempts failed — throw to outer catch
-        throw new Error(`All BTC fetch attempts failed: futures(${err1.message}) retry(${err2.message}) spot(${err3.message})`);
-      }
-    }
-  }
-};
-
-const checkBTCGate = async () => {
-  try {
-    const { klines, ticker, funding, source } = await fetchBTCData();
     const price     = parseFloat(ticker.lastPrice);
     const change24h = parseFloat(ticker.priceChangePercent);
     const fundRate  = parseFloat(funding.lastFundingRate) * 100;
@@ -1848,18 +1806,12 @@ const checkBTCGate = async () => {
     else if (change1H > -0.5)  reason = `🟡 BTC drifting down ${change1H.toFixed(2)}% (1H)`;
     else                       reason = `🔴 BTC dumping ${change1H.toFixed(2)}% (1H)`;
 
-    // v5.29: Mark when using spot fallback (funding data is stale on spot)
-    if (source === 'spot-fallback') {
-      reason += ' [spot-API]';
-    }
-
     // Extreme conditions that block BOTH directions (flash crash / extreme volatility)
     const extremeMove = Math.abs(change1H) > 2.5 || Math.abs(change24h) > 7;
     if (extremeMove) {
       pass = false;
       reason = `⚡ BTC extreme move (1H ${change1H.toFixed(2)}%) — skip all`;
-    } else if (fundRate > 0.04 && source !== 'spot-fallback') {
-      // Only block on extreme funding if data is FRESH (not spot fallback, which has stale funding)
+    } else if (fundRate > 0.04) {
       pass = false;
       reason = `⚠️ BTC funding extreme ${fundRate.toFixed(3)}%`;
     }
@@ -1871,8 +1823,8 @@ const checkBTCGate = async () => {
     btcGateStatus = { pass, reason, price, change: change24h, change1H, funding: fundRate, emoji, bullishOk, bearishOk };
     return btcGateStatus;
   } catch (err) {
-    // All attempts (futures + retry + spot) failed
-    log(`⚠️ BTC gate fetch FULLY FAILED: ${err.message || err}`);
+    // Log the actual error so we can diagnose
+    log(`⚠️ BTC gate fetch failed: ${err.message || err}`);
     btcFetchFails++;
     // Keep last known good status if we have one — better than zeros
     if (btcGateStatus.price > 0) {
@@ -3513,12 +3465,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.29`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.28`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.29 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.29 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.28 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.28 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3569,9 +3521,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.29 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.28 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.29 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.28 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
