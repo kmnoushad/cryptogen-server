@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.28 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.30 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -690,6 +690,10 @@ const blockReasons = {
   hostileDirection: 0, fireCaution: 0  // v5.24 — Supabase decision layer
 };
 const incBlock = (reason) => { if (blockReasons[reason] !== undefined) blockReasons[reason]++; };
+
+// v5.30 — Relative Strength watch: coins holding strong during BTC dumps
+// Map<symbol, { detectedAt, detectPrice, detectChg, btcChgAtDetect, alerted }>
+const rsWatch = new Map();
 
 const getPositionSizeHint = () => {
   if (recoveryState.consecutiveLosses >= 2) return { pct: 50, label: '⚠️ REDUCED 50% (2 losses)' };
@@ -1682,12 +1686,12 @@ const checkAnomalies = async () => {
       const isBearish = btcRegime.regime === 'BEARISH';
       const isChoppy = btcRegime.regime === 'CHOPPY';
       const inRegimeMin = Math.floor((Date.now() - (btcRegime.changedAt || Date.now())) / 60000);
-      const shortFreshlyAllowed = isBearish && inRegimeMin >= 60;
       // Real bug: bot scanning but tracker empty when SHOULD be finding things
       if (isChoppy) {
         log(`ℹ️ Tracker empty (${fullScanCount} scans) — CHOPPY blocks all (correct)`);
-      } else if (isBearish && !shortFreshlyAllowed) {
-        log(`ℹ️ Tracker empty — BEARISH ${inRegimeMin}min, SHORT needs 60+min for stability`);
+      } else if (isBearish) {
+        // v5.28.1: SHORT disabled in v5.28 + LONG blocked in BEARISH = empty tracker is EXPECTED
+        log(`ℹ️ Tracker empty — BEARISH regime, SHORT disabled (v5.28), LONG blocked (correct)`);
       } else {
         alerts.push(`⚠️ Coin tracker empty despite ${fullScanCount} scans + ${btcRegime.regime} regime — possible filter issue`);
       }
@@ -2523,6 +2527,70 @@ const runFullMarketScan = async () => {
   try {
     const cryptoSet = await getContractInfo();
     const tickers = await fetchJSON('https://fapi.binance.com/fapi/v1/ticker/24hr');
+
+    // ── v5.30 RELATIVE STRENGTH FRONT-RUNNER TRACKER ─────────────────────────
+    // User insight: coins that STAND STILL while BTC dumps = quiet accumulation.
+    // When BTC turns, these are often the early front-runners.
+    // Uses the tickers already fetched above — ZERO new API calls.
+    try {
+      const btc24h = btcGateStatus.change || 0;
+      const btc1H  = btcGateStatus.change1H || 0;
+      // PHASE 1 — DETECT: BTC dumping meaningfully → find coins holding strong
+      if (btc24h <= -1.5) {
+        for (const t of tickers) {
+          if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) continue;
+          if (cryptoSet.size > 0 && !cryptoSet.has(t.symbol)) continue;
+          if (EXCLUDE.has(t.symbol) || EXCLUDE_REGEX.test(t.symbol)) continue;
+          if (isMemeCoin(t.symbol)) continue;
+          if (STOCK_SUFFIX_REGEX.test(t.symbol) || isLikelyStock(t.symbol)) continue;
+          if (parseFloat(t.quoteVolume) < MIN_VOLUME_USD) continue;
+          const chg = parseFloat(t.priceChangePercent);
+          // Holding strong: outperforming BTC by 1.5%+ AND not actually red beyond -0.5%
+          if (chg >= btc24h + 1.5 && chg >= -0.5 && chg <= 6) {
+            if (!rsWatch.has(t.symbol)) {
+              if (rsWatch.size >= 15) continue; // cap at 15
+              rsWatch.set(t.symbol, {
+                detectedAt: Date.now(),
+                detectPrice: parseFloat(t.lastPrice),
+                detectChg: chg,
+                btcChgAtDetect: btc24h,
+                alerted: false,
+              });
+              log(`💎 RS-DETECT: ${t.symbol} holding ${chg.toFixed(1)}% while BTC ${btc24h.toFixed(1)}%`);
+            }
+          }
+        }
+      }
+      // Expire RS entries older than 48h
+      for (const [sym, rs] of rsWatch) {
+        if (Date.now() - rs.detectedAt > 48 * 3600000) rsWatch.delete(sym);
+      }
+      // PHASE 2 — ALERT: BTC turning up → check if RS coins are running
+      if (btc1H >= 0.4 && rsWatch.size > 0) {
+        for (const [sym, rs] of rsWatch) {
+          if (rs.alerted) continue;
+          const tk = tickers.find(t => t.symbol === sym);
+          if (!tk) continue;
+          const nowPrice = parseFloat(tk.lastPrice);
+          const moveFromDetect = ((nowPrice - rs.detectPrice) / rs.detectPrice) * 100;
+          // Front-runner: up 1.5%+ from where it stood during the dump
+          if (moveFromDetect >= 1.5) {
+            rs.alerted = true;
+            const heldFor = Math.round((Date.now() - rs.detectedAt) / 3600000);
+            await tg(OWNER_CHAT_ID,
+              `🏃 <b>FRONT-RUNNER: ${sym.replace('USDT','')}</b>\n━━━━━━━━━━━━━━━\n` +
+              `💎 Held strong during dump (${rs.detectChg.toFixed(1)}% while BTC ${rs.btcChgAtDetect.toFixed(1)}%)\n` +
+              `📈 Now +${moveFromDetect.toFixed(1)}% from detection (${heldFor}h ago)\n` +
+              `🟢 BTC turning: +${btc1H.toFixed(2)}% (1H)\n\n` +
+              `<i>Early mover off accumulation. DYOR · SL always set</i>\n` +
+              `⏰ ${gstNow()} GST`);
+            log(`🏃 FRONT-RUNNER ALERT: ${sym} +${moveFromDetect.toFixed(1)}% from RS detection`);
+          }
+        }
+      }
+    } catch (rsErr) { log(`⚠️ RS tracker error (non-fatal): ${rsErr.message}`); }
+    // ── end RS tracker ───────────────────────────────────────────────────────
+
     const valid = tickers
       .filter(t => {
         if (!t.symbol.endsWith('USDT') || t.symbol.includes('_')) return false;
@@ -3312,6 +3380,19 @@ const handleCommand = async msg => {
       }
     }
   }
+  else if (text === '/rs' || text === '/frontrunners') {
+    if (!rsWatch.size) {
+      await tg(chatId, `💎 <b>RS Watch</b>\n━━━━━━━━━━━━━━━\nEmpty — no coins detected holding strong during a dump yet.\n<i>Populates when BTC drops -1.5%+ and coins stand still.</i>`);
+    } else {
+      let msg = `💎 <b>RS Watch (${rsWatch.size})</b> — held strong during dump\n━━━━━━━━━━━━━━━\n\n`;
+      for (const [sym, rs] of rsWatch) {
+        const ageH = Math.round((Date.now() - rs.detectedAt) / 3600000);
+        msg += `${rs.alerted ? '🏃' : '💎'} ${sym.replace('USDT','')} — held ${rs.detectChg.toFixed(1)}% vs BTC ${rs.btcChgAtDetect.toFixed(1)}% · ${ageH}h ago${rs.alerted ? ' · FIRED' : ''}\n`;
+      }
+      msg += `\n<i>🏃 = front-runner alert fired. Watch these when BTC turns up.</i>`;
+      await tg(chatId, msg);
+    }
+  }
   else if (text === '/events' || text === '/calendar') {
     await fetchFinnhubCalendar(); // ensure fresh
     const now = Date.now();
@@ -3470,7 +3551,7 @@ const handleCommand = async msg => {
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.28 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.28 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.30 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.30 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3523,7 +3604,7 @@ const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
   log(`🚀 Nexio v5.28 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.28 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.30 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
