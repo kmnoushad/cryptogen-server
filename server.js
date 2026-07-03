@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.32 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.33 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -30,10 +30,10 @@
 
 // ── v5.26 SECURITY: All secrets loaded from Railway environment variables ─────
 // Set these in Railway → Variables tab. Never hardcode secrets in this file.
-const BOT_TOKEN       = process.env.BOT_TOKEN;
-const FREE_CHANNEL    = process.env.FREE_CHANNEL    || '-1003900595640';
-const PREMIUM_CHANNEL = process.env.PREMIUM_CHANNEL || '-1003913881352';
-const OWNER_CHAT_ID   = process.env.OWNER_CHAT_ID   || '6896387082';
+const BOT_TOKEN       = (process.env.BOT_TOKEN || '').trim();
+const FREE_CHANNEL    = (process.env.FREE_CHANNEL    || '-1003900595640').trim();
+const PREMIUM_CHANNEL = (process.env.PREMIUM_CHANNEL || '-1003913881352').trim();
+const OWNER_CHAT_ID   = (process.env.OWNER_CHAT_ID   || '6896387082').trim();
 
 // v5.16+ — Paper test users: friends who receive alerts during PAPER_MODE
 // Add chat IDs here to give friends test access without going live to channels
@@ -49,9 +49,9 @@ const PAPER_TEST_USERS = [
 const PAPER_MODE = true;
 const USDT_ADDRESS    = 'THNNCFN9TyrcazTp3n9ngXLTgMLhH8nWaL';
 const PRICE_USD       = 9.99;
-const SUPABASE_URL    = process.env.SUPABASE_URL || 'https://jxsvqxnbjuhtenmarioe.supabase.co';
-const SUPABASE_KEY    = process.env.SUPABASE_KEY;
-const FINNHUB_KEY     = process.env.FINNHUB_KEY;
+const SUPABASE_URL    = (process.env.SUPABASE_URL || 'https://jxsvqxnbjuhtenmarioe.supabase.co').trim().replace(/\/+$/, '');
+const SUPABASE_KEY    = (process.env.SUPABASE_KEY || '').trim();
+const FINNHUB_KEY     = (process.env.FINNHUB_KEY || '').trim();
 
 // v5.26: Validate critical secrets are present — fail loud, not silent
 (() => {
@@ -1293,7 +1293,7 @@ const sb = async (path, options = {}) => {
     if (!res.ok) { log(`⚠️ Supabase ${res.status} on ${(path||'').split('?')[0]} (${options.method||'GET'})`); return null; }
     const text = await res.text();
     return text ? JSON.parse(text) : null;
-  } catch { return null; }
+  } catch (e) { log(`⚠️ Supabase fetch THREW on ${(path||'').split('?')[0]}: ${e.message}`); return null; }
 };
 
 const getWatchlist         = async () => (await sb('watchlist?select=symbol,score,direction,updated_at,added_by')) || [];
@@ -3564,7 +3564,7 @@ const handleCommand = async msg => {
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.32 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.32 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.33 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.33 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3615,9 +3615,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.32 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.33 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.32 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.33 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
