@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// v5.40 NETWORK FIX: Force IPv4-first DNS resolution.
+// v5.41 NETWORK FIX: Force IPv4-first DNS resolution.
 // Railway containers often have broken IPv6 egress; Supabase/Cloudflare
 // publish IPv6 (AAAA) records; Node fetch tries IPv6 first → instant
 // "fetch failed" with no HTTP status. Telegram (IPv4-only) unaffected —
@@ -7,7 +7,7 @@
 import('node:dns').then(m => (m.default || m).setDefaultResultOrder('ipv4first')).catch(() => {});
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.40 — Elite Recovery Edition + Smart Regime
+// NEXIO SERVER v5.41 — Elite Recovery Edition + Smart Regime
 //
 // LAYER 1  — BTC Momentum Gate (direction-aware) + HTF EMA50/200 trend filter
 // LAYER 2  — Full coin universe (crypto only, anti-pump, dump-trap, climax)
@@ -79,7 +79,7 @@ const FINNHUB_KEY     = (process.env.FINNHUB_KEY || '').trim();
 const FULL_MARKET_INTERVAL_MS = 300000; // v5.1 — 5 min (recover from 418)
 const WATCHLIST_SCAN_INTERVAL = 120000; // v5.1 — 2 min (recover from 418)
 const POLL_INTERVAL_MS        = 30000;
-const ALERT_COOLDOWN_MS       = 900000; // v5.40: 30→15min — catch second legs
+const ALERT_COOLDOWN_MS       = 900000; // v5.41: 30→15min — catch second legs
 const MIN_VOLUME_USD          = 200000; // was 500K — catch low caps before pump
 const MAX_WATCHLIST           = 50; // quality over quantity
 const MAX_TRACKED             = 20;
@@ -102,7 +102,7 @@ const MEME_BLACKLIST = new Set([
   'GOATUSDT', 'ACTUSDT', 'PEOPLEUSDT', '1000SATSUSDT',
   // Celebrity/political memes
   'TRUMPUSDT', 'MELANIA1USDT', 'MELANIAUSDT', 'BIDENUSDT', 'JELLYJELLYUSDT',
-  // v5.40: WLD/GMT/GALA removed — legitimate mid-caps with real utility,
+  // v5.41: WLD/GMT/GALA removed — legitimate mid-caps with real utility,
   // not memes. They were shrinking the tradeable universe for no reason.
 ]);
 
@@ -712,7 +712,7 @@ const incBlock = (reason) => { if (blockReasons[reason] !== undefined) blockReas
 // Map<symbol, { detectedAt, detectPrice, detectChg, btcChgAtDetect, alerted }>
 const rsWatch = new Map();
 
-// v5.40 — MARKET MOVERS RADAR: snapshot of all tickers each full scan,
+// v5.41 — MARKET MOVERS RADAR: snapshot of all tickers each full scan,
 // diffed against the previous snapshot to catch coins ACCELERATING NOW.
 // Fills the architectural hole: movers that never matched the compression
 // profile were invisible to the entire pipeline. Zero extra API calls.
@@ -928,6 +928,35 @@ const checkBTCEarlyWarning = async () => {
 // Blocks all signals during CHOPPY (where most losses happen)
 let btcRegime = { regime: 'UNKNOWN', confidence: 0, reason: 'init', changedAt: 0, lastNotified: 'UNKNOWN' };
 
+// v5.41 — BTC range context: where does price sit in its multi-day box?
+// Used ONLY to boost LONG setups near range LOW (buy support, bounded downside).
+// Does NOT enable shorting the range top — that's the proven-loser direction.
+let btcRangeCtx = { inRange: false, position: null, support: 0, resistance: 0 };
+const updateBTCRangeContext = async () => {
+  try {
+    const kl = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=42'); // ~7 days
+    if (!Array.isArray(kl) || kl.length < 20) return;
+    const highs = kl.map(k => parseFloat(k[2]));
+    const lows  = kl.map(k => parseFloat(k[3]));
+    const close = parseFloat(kl[kl.length - 1][4]);
+    const resistance = Math.max(...highs);
+    const support    = Math.min(...lows);
+    const span = resistance - support;
+    if (span <= 0) return;
+    const position = (close - support) / span; // 0 = at support, 1 = at resistance
+    // "In range" = not breaking out: within the box, span is a sane 3-15% band
+    const spanPct = (span / support) * 100;
+    const inRange = spanPct >= 3 && spanPct <= 18;
+    btcRangeCtx = {
+      inRange,
+      position: parseFloat(position.toFixed(2)),
+      support: parseFloat(support.toFixed(0)),
+      resistance: parseFloat(resistance.toFixed(0)),
+      spanPct: parseFloat(spanPct.toFixed(1)),
+    };
+  } catch { }
+};
+
 const checkBTCRegime = async () => {
   try {
     const klines1H = await fetchJSON('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=100');
@@ -1140,7 +1169,7 @@ const checkFundingExtreme = async (symbol, currentFunding) => {
   }
 };
 
-// ── v5.40 IMPULSE SCORER — fixes the architecture's blind spot ───────────────
+// ── v5.41 IMPULSE SCORER — fixes the architecture's blind spot ───────────────
 // The scoring engine rewards COMPRESSION (coiling) and penalises movement.
 // Result: a coin actively pumping scores 2-4/10 and can NEVER reach FIRE (7.5).
 // That is why movers detected by the radar died in the watchlist.
@@ -1173,7 +1202,7 @@ const checkImpulse = (klines, direction) => {
   return { boost: parseFloat(boost.toFixed(1)), reason: parts.join(' '), move1, move2, volRatio };
 };
 
-// ── v5.40 CVD (Cumulative Volume Delta) — order-flow approximation ───────────
+// ── v5.41 CVD (Cumulative Volume Delta) — order-flow approximation ───────────
 // Approximates aggressive buying vs selling from klines already fetched.
 // Green candle → volume counted as buy pressure; red → sell pressure.
 // The valuable signal is DIVERGENCE:
@@ -1845,7 +1874,7 @@ const checkPaperOutcomes = async () => {
           outcome = chg > 0 ? 'WIN' : 'LOSS';
         }
         if (status !== 'OPEN') {
-          // v5.40 MFE: compute how far the trade ACTUALLY travelled in our favour
+          // v5.41 MFE: compute how far the trade ACTUALLY travelled in our favour
           // before closing. This is the only honest way to settle the R:R question:
           //   losers peaking at +1.5% → TP1 at 4% is unreachable, tighten it
           //   losers peaking at +4%+  → TP1 is fine, the exits are the problem
@@ -2712,7 +2741,7 @@ const runFullMarketScan = async () => {
     } catch (rsErr) { log(`⚠️ RS tracker error (non-fatal): ${rsErr.message}`); }
     // ── end RS tracker ───────────────────────────────────────────────────────
 
-    // ── v5.40 MARKET MOVERS RADAR ────────────────────────────────────────────
+    // ── v5.41 MARKET MOVERS RADAR ────────────────────────────────────────────
     // Diff current tickers vs previous full-scan snapshot (~5 min apart).
     // Catches coins ACCELERATING RIGHT NOW — at inception, not after +15%.
     // 24h cap of +6% = board EARLY in the day move, never chase extended tops.
@@ -2886,6 +2915,7 @@ const runWatchlistScan = async () => {
   try {
     await checkWeeklyDrawdown(); // update weekly DD cache
     await fetchFinnhubCalendar(); // v5.26: refresh live economic calendar (6h cache)
+    await updateBTCRangeContext(); // v5.41: refresh BTC range box
 
     // v5.27: Multi-stage event reminders (morning + 4hr + 60/45/30/15min + at-event)
     await checkEventReminders();
@@ -3020,9 +3050,15 @@ const runWatchlistScan = async () => {
         const boost = Math.min(2, absorption.score * 0.3);
         score = Math.min(10, score + boost);
       }
-      // v5.40: CVD order-flow check — asymmetric by design.
+      // v5.41: CVD order-flow check — asymmetric by design.
       // The fake-pump penalty is LARGER than the accumulation boost:
       // avoiding a rug is worth more than catching one extra setup.
+      // v5.41: RANGE-LOW boost — BTC in bottom third of its box = LONG near support,
+      // bounded downside. The SAFE half of mean-reversion (no shorting the top).
+      if (direction === 'LONG' && btcRangeCtx.inRange && btcRangeCtx.position !== null && btcRangeCtx.position <= 0.33) {
+        score = Math.min(10, score + 1.0);
+        log(`🟢 RANGE-LOW: ${symbol} — BTC near support (pos ${btcRangeCtx.position}) LONG +1.0`);
+      }
       const cvd = checkCVD(klines);
       if (cvd.divergence === 'BEARISH' && direction === 'LONG') {
         score = Math.max(0, score - 1.5);
@@ -3032,7 +3068,7 @@ const runWatchlistScan = async () => {
         log(`🟢 CVD-${cvd.divergence}: ${symbol} (+0.7)`);
       }
 
-      // v5.40: IMPULSE BOOST — let coins that are ALREADY MOVING score high enough
+      // v5.41: IMPULSE BOOST — let coins that are ALREADY MOVING score high enough
       // to reach FIRE. Without this, momentum coins are structurally capped at 2-4/10.
       const impulse = checkImpulse(klines, direction);
       if (impulse.boost > 0) {
@@ -3064,7 +3100,7 @@ const runWatchlistScan = async () => {
       const finalScore = Math.max(0, Math.min(10, score + (hype.hypeBonus || 0)));
       if (hype.hasData && hype.hypeBonus !== 0) log(`🌊 ${symbol} hype ${hype.hypeBonus > 0 ? '+' : ''}${hype.hypeBonus} (${hype.tag})`);
 
-      // v5.40: MOMENTUM SURGE ALERT — the "hybrid momentum layer"
+      // v5.41: MOMENTUM SURGE ALERT — the "hybrid momentum layer"
       // Detects a move ALREADY HAPPENING: +1.5% in last 2 candles (30min) with 1.3x volume.
       // Informational WATCH-style DM only — no paper trade, no entry logic.
       // Feeds the user's judgment (the real edge) in real time.
@@ -3088,7 +3124,7 @@ const runWatchlistScan = async () => {
               `Momentum LIVE right now — tracked as paper trade.\n` +
               `<i>Your judgment decides · tight SL if entering</i>\n` +
               `⏰ ${gstNow()} GST`);
-            // v5.40: log as paper trade → SURGE win rate becomes measurable in ~2 weeks
+            // v5.41: log as paper trade → SURGE win rate becomes measurable in ~2 weeks
             await logPaperTrade({ symbol, direction, type: 'SURGE', price, sl: sSl, tp1: sTp1, tp2: sTp2,
                                   score: finalScore, candle: trap?.candle?.verdict, btcChange: btc.change });
             log(`⚡ SURGE: ${symbol} +${surgeMove.toFixed(1)}% vol ${(surgeVol/surgeAvg).toFixed(1)}x — paper logged`);
@@ -3315,7 +3351,7 @@ const runWatchlistScan = async () => {
         && (Date.now() - (btcRegime.changedAt || 0)) > 60*60000;
       const scanCountOk = bullConfirmed ? (state.scanCount >= 1) : (state.scanCount >= 2 || finalScore >= 8.5);
 
-      // v5.40: In confirmed BULLISH, EXCEPTIONAL setups (STRONG candle + score 8+)
+      // v5.41: In confirmed BULLISH, EXCEPTIONAL setups (STRONG candle + score 8+)
       // may fire without one-bar confirmation — saves 15-30min entry lag in the
       // user's proven money window. Ordinary setups still need confirmation.
       const breakoutOk = breakoutConfirmed
@@ -3543,7 +3579,11 @@ const handleCommand = async msg => {
   }
   else if (text === '/btc') {
     const btc = await checkBTCGate();
-    await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
+    const rc = btcRangeCtx;
+    const rangeLine = rc.inRange && rc.position !== null
+      ? `\n📦 Range: $${rc.support?.toLocaleString()}–$${rc.resistance?.toLocaleString()} (${rc.spanPct}%) · pos ${(rc.position*100).toFixed(0)}%${rc.position <= 0.33 ? ' 🟢 near support' : rc.position >= 0.67 ? ' 🔴 near resistance' : ' ⚪ mid'}`
+      : '\n📦 Range: not boxed (trending/breakout)';
+    await tg(chatId, `₿ <b>BTC Gate</b>\n${btc.emoji} $${btc.price?.toLocaleString()}\n24h: ${btc.change > 0?'+':''}${btc.change?.toFixed(2)}% | 1H: ${btc.change1H > 0?'+':''}${btc.change1H?.toFixed(2)}%\nFunding: ${btc.funding?.toFixed(3)}%${rangeLine}\n🚦 ${btc.pass ? '✅ PASS' : '❌ BLOCKED'} — ${btc.reason}\n⏰ ${gstNow()}`);
   }
   else if (text === '/summary') {
     await sendDailySummary();
@@ -3807,12 +3847,12 @@ const handleCommand = async msg => {
     await tg(chatId, `📒 <b>Paper Trade Stats</b>\n━━━━━━━━━━━━━━━\n🟢 Wins:   ${wins}\n🔴 Losses: ${losses}\n⏳ Open:   ${open}\n📊 Total closed: ${total}\n\n🎯 <b>Win Rate: ${winRate}%</b>\n📈 LONG WR:  ${longWR}% (${longs.length})\n📉 SHORT WR: ${shortWR}% (${shorts.length})\n\n🔬 <b>By signal type:</b>\n${byType || '   no closed trades yet'}\n\n📏 <b>Max favourable move:</b>\n${peakLine}\n\n${total < 20 ? '⏳ Need 20+ trades for reliable data' : parseFloat(winRate) >= 55 ? '✅ Strategy working' : '❌ Strategy not ready'}`);
   }
   else if (text === '/help') {
-    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.40`);
+    await tg(chatId, `📖 <b>Commands</b>\n/start /status /watchlist /tracking /btc /stats /test /help\n🐆 Nexio v5.41`);
   }
 
   if (text === '/test') {
     const btc = await checkBTCGate();
-    await postSignal(`🧪 <b>NEXIO v5.40 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.40 is watching`);
+    await postSignal(`🧪 <b>NEXIO v5.41 — TEST</b>\n━━━━━━━━━━━━━━━\n✅ Bot online (PAPER MODE)\n✅ Elite scanner active\n✅ Daily caps: +2%/-1.5%/3 trades\n✅ Recovery system active\n✅ ATR expansion required\n${btc.emoji} BTC Gate: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n📊 Watchlist: ${(await getWatchlist()).length}\n🔍 Tracking: ${coinTracker.size}\n⏰ ${gstNow()} GST\n🐆 Nexio v5.41 is watching`);
     await tg(chatId, '✅ Test sent!');
   }
 
@@ -3863,9 +3903,9 @@ const pollUsers = async () => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 const start = async () => {
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
-  log(`🚀 Nexio v5.40 — Signal Intelligence Engine starting... ${modeLabel}`);
+  log(`🚀 Nexio v5.41 — Signal Intelligence Engine starting... ${modeLabel}`);
   const btc = await checkBTCGate();
-  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.40 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
+  await tg(OWNER_CHAT_ID, `🟢 <b>Nexio v5.41 Started</b>\n━━━━━━━━━━━━━━━\n🧠 9-Layer Scanner active\n📈 HTF EMA50 filter (EMA200 advisory)\n🕯 STRONG candle gate\n📐 ATR-based SL/TP (R:R ≥ 1.5)\n🔄 1-bar confirmation\n🛡 Post-loss protection (90min)\n☠️ Daily kill switch (3 losses)\n🚦 BTC gate\n📊 Min score: ${MIN_ALERT_SCORE}/10\n⚡ Max alerts/scan: 2\n${btc.emoji} BTC: ${btc.pass?'✅ PASS':'❌ BLOCKED'}\n⏰ ${gstNow()} GST\n━━━━━━━━━━━━━━━\n/fullscan /scan /btc /pending /users /activate /broadcast /watchlist /tracking /clearwatchlist /test`);
 
   setInterval(pollUsers, POLL_INTERVAL_MS);
   pollUsers();
