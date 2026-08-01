@@ -3,28 +3,18 @@
 import('node:dns').then(m => (m.default || m).setDefaultResultOrder('ipv4first')).catch(() => {});
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NEXIO SERVER v5.44 — THE PUMP CATCHER
+// NEXIO SERVER v5.44 — THE PUMP CATCHER (CRASH-FIXED)
 //
-// WHAT CHANGED:
-// 1. PRIMARY TIMEFRAME: 15m → 5m (limit 30). Catches pumps in first 10-15 min.
-// 2. KILLED EARLY SIGNALS: 34% WR proven loser — removed entirely.
-// 3. NEW MOMENTUM SIGNAL: Catches parabolic/accelerating pumps (GIGGLE/COTI style).
-//    Uses: 3-candle acceleration, volume spike, Taker Buy Ratio (>55%), rug-wick check.
-// 4. TAKER BUY/SELL RATIO: From klines[9] — zero extra API calls.
-//    Fake pump = green candle + taker ratio < 45% (distribution into strength).
-// 5. FIRE UNLEASHED: Removed "one-bar confirmation" delay. FIRE now fires on first
-//    valid scan if score >= 8.0 + STRONG candle + not rug + taker ratio OK.
-// 6. SURGE/MOVERS GUARDED: Now runs through fake-pump, dump-trap, climax, CVD,
-//    taker-ratio filters before alerting. No more raw momentum spam.
-// 7. SCALE-OUT MESSAGES: Every signal now tells you exactly when to take profit:
-//    50% at +0.5%, 25% at +1.0%, trail rest.
-// 8. AUTO DECAY EXIT: Paper trades auto-close as WIN if momentum stalls
-//    (no new high 10 min) or retrace 0.4% from peak. No more holding bags to SL.
-// 9. SCAN SPEED: Watchlist every 90s, Full market every 3 min.
-// 10. MEME PUMP MODE: Meme coins bypass blacklist ONLY if parabolic score >= 7
-//     AND taker ratio > 60% AND zero rug patterns. Catches the +40% meme leg
-//     while skipping the rugpull.
+// FIXES APPLIED:
+// 1. Added HTTP health-check server (binds immediately so platform won't SIGTERM)
+// 2. Added missing stubs: checkWeeklyDrawdown, isBlocked, recordWin, recordLoss,
+//    dailyLosses, LOSS_COOLDOWN, addToChannel
+// 3. Fixed template-literal syntax error in buildMomentumMsg
+// 4. Added graceful SIGTERM shutdown handler
+// 5. Fixed /profile command using observations24h (changed to observations)
 // ─────────────────────────────────────────────────────────────────────────────
+
+const http = require('http');
 
 const BOT_TOKEN       = (process.env.BOT_TOKEN || '').trim();
 const FREE_CHANNEL    = (process.env.FREE_CHANNEL    || '-1003900595640').trim();
@@ -122,6 +112,15 @@ const MID_CAP = new Set([
   'SANDUSDT','MANAUSDT','GALAUSDT','APEUSDT','IMXUSDT',
 ]);
 
+// ── MISSING STUBS (prevent ReferenceError crashes) ───────────────────────────
+const checkWeeklyDrawdown = async () => { /* stub — add weekly drawdown logic here */ };
+const addToChannel = async (chatId, channelId) => { log(`📋 addToChannel stub: ${chatId} → ${channelId}`); };
+const dailyLosses = { dailyProfitPct: 0, totalPnlPct: 0 };
+const recordWin = (symbol, pct) => { log(`🏆 WIN recorded: ${symbol} +${pct?.toFixed?.(2) || pct}%`); };
+const recordLoss = (symbol) => { log(`💔 LOSS recorded: ${symbol}`); };
+const LOSS_COOLDOWN = 30; // minutes
+const isBlocked = (symbol) => ({ blocked: false, reason: '' });
+
 const alertHistory  = new Map();
 const coinTracker   = new Map();
 const signalPrices  = new Map();
@@ -161,7 +160,6 @@ const getOpenDirectionCount = (direction) => {
   }
   return count;
 };
-const MAX_SAME_DIRECTION = 3;
 const resistanceMap = new Map();
 let   lastUpdateId  = 0;
 let   fullScanCount      = 0;
@@ -1756,7 +1754,7 @@ const buildMomentumMsg = (symbol, price, parabolic, layers, btc, klines) => {
 ━━━━━━━━━━━━━━━
 📊 Parabolic Score: ${parabolic.score}/8
 ${tags.join(' · ')}
-📈 Last 3 candles: ${parabolic.candles.map(c => c > 0 ? '+' : ''}${c.toFixed(1)}%`).join(' → ')}
+📈 Last 3 candles: ${parabolic.candles.map(c => `${c > 0 ? '+' : ''}${c.toFixed(1)}%`).join(' → ')}
 ${parabolic.rugRisk ? '⚠️ RUG RISK DETECTED — size down' : '✅ Structure clean'}
 
 ${SCALE_OUT_PLAN()}
@@ -2077,7 +2075,7 @@ const runWatchlistScan = async () => {
       const isMeme = isMemeCoin(symbol);
       const memeOverride = isMeme && parabolic.score >= 7 && taker.ratio > 0.60 && !parabolic.rugRisk;
       
-      // MOMENTUM bypasses normal direction logic — it's pure acceleration
+      // MOMENTUM bypasses normal direction logic — it’s pure acceleration
       if (parabolic.isParabolic || (parabolic.score >= 5 && parabolic.accel >= 1.5)) {
         const fakeHist = await checkFakePumpHistory(symbol);
         const dumpTrap = checkAntiDumpTrap(klines, 'LONG');
@@ -2546,7 +2544,7 @@ const handleCommand = async msg => {
       const wrStr = p.winRate !== null ? `${(p.winRate*100).toFixed(0)}%` : 'no data';
       const greenStr = p.greenRatio !== null ? `${(p.greenRatio*100).toFixed(0)}%` : 'no data';
       const avgStr = p.avgScore !== null ? p.avgScore.toFixed(1) : 'no data';
-      await tg(chatId, `${tierEmoji} <b>${sym} 7-day profile</b>\n━━━━━━━━━━━━━━━\nTier: <b>${p.tier}</b> · Action: ${p.action}\n\n📊 Trades: ${p.totalTrades} (${p.wins}W / ${p.losses}L)\n🎯 Win rate: ${wrStr}\n\n📈 24h observations: ${p.observations24h}\n🟩 Green ratio: ${greenStr}\n📊 Avg score: ${avgStr}\n\n${p.action === 'block' ? '🚫 Bot will BLOCK this coin' : p.action === 'boost' ? '✅ Bot may fire at lower score' : '✅ Normal filtering applies'}`);
+      await tg(chatId, `${tierEmoji} <b>${sym} 7-day profile</b>\n━━━━━━━━━━━━━━━\nTier: <b>${p.tier}</b> · Action: ${p.action}\n\n📊 Trades: ${p.totalTrades} (${p.wins}W / ${p.losses}L)\n🎯 Win rate: ${wrStr}\n\n📈 Observations: ${p.observations}\n🟩 Green ratio: ${greenStr}\n📊 Avg score: ${avgStr}\n\n${p.action === 'block' ? '🚫 Bot will BLOCK this coin' : p.action === 'boost' ? '✅ Bot may fire at lower score' : '✅ Normal filtering applies'}`);
     }
   }
   else if (text.startsWith('/history')) {
@@ -2814,8 +2812,33 @@ const pollUsers = async () => {
   } catch (err) { log('Poll error:', err.message); }
 };
 
-// ── Start (updated intervals) ────────────────────────────────────────────────
+// ── Start (updated with health server + graceful shutdown) ─────────────────────
 const start = async () => {
+  const PORT = process.env.PORT || 3000;
+  
+  // 1. Start health server IMMEDIATELY so Render/Railway don't SIGTERM us
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      version: '5.44', 
+      uptime: process.uptime(),
+      tracker: coinTracker.size,
+      btc: btcRegime.regime
+    }));
+  });
+  server.listen(PORT, () => {
+    log(`🌐 Health check server listening on port ${PORT}`);
+  });
+
+  // Graceful shutdown on SIGTERM
+  process.on('SIGTERM', () => {
+    log('🛑 SIGTERM received, shutting down gracefully...');
+    server.close(() => {
+      process.exit(0);
+    });
+  });
+
   const modeLabel = PAPER_MODE ? '📒 PAPER MODE — alerts silenced, logging only' : '🟢 LIVE MODE';
   log(`🚀 Nexio v5.44 — THE PUMP CATCHER starting... ${modeLabel}`);
   const btc = await checkBTCGate();
