@@ -1,0 +1,16 @@
+{
+  "name": "nexio-v6",
+  "version": "6.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fail-closed Binance USD-M paper signal engine with closed-candle retest confirmation",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test",
+    "check": "node --check src/index.js && node --test",
+    "smoke": "node scripts/binance-smoke.js"
+  }
+}
