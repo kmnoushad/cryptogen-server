@@ -22,11 +22,8 @@ const boolFrom = (env, key, fallback) => {
 };
 
 export const loadConfig = (env = process.env) => {
-  const enableAlphaSignals = boolFrom(env, 'ENABLE_ALPHA_SIGNALS', false);
-  const onchainRiskApiUrl = String(env.ONCHAIN_RISK_API_URL ?? '').trim();
-  if (enableAlphaSignals) {
-    throw new Error('Alpha entry signals are intentionally disabled in v6; an audited on-chain adapter is not included');
-  }
+  const enableAlphaSignals = boolFrom(env, 'ENABLE_ALPHA_SIGNALS', true);
+  const onchainRiskApiUrl = String(env.ONCHAIN_RISK_API_URL ?? 'https://api.gopluslabs.io').trim().replace(/\/+$/, '');
 
   const cfg = {
     botToken: required(env, 'BOT_TOKEN'),
@@ -55,8 +52,16 @@ export const loadConfig = (env = process.env) => {
     tradeTimeoutMin: numberFrom(env, 'TRADE_TIMEOUT_MIN', 120, { min: 15, max: 720 }),
     breakevenAtR: numberFrom(env, 'BREAKEVEN_AT_R', 0.75, { min: 0.25, max: 1.4 }),
     minNetRR: numberFrom(env, 'MIN_NET_RR', 1.35, { min: 1, max: 5 }),
+    priorityAlertIntervalMs: numberFrom(env, 'PRIORITY_ALERT_INTERVAL_MS', 600_000, { min: 120_000, max: 3_600_000 }),
     enableAlphaSignals,
     onchainRiskApiUrl,
+    onchainRiskApiToken: String(env.ONCHAIN_RISK_API_TOKEN ?? '').trim(),
+    alphaScanIntervalMs: numberFrom(env, 'ALPHA_SCAN_INTERVAL_MS', 240_000, { min: 120_000, max: 1_800_000 }),
+    alphaMinLiquidityUsd: numberFrom(env, 'ALPHA_MIN_LIQUIDITY_USD', 150_000, { min: 50_000 }),
+    alphaMinVolumeUsd: numberFrom(env, 'ALPHA_MIN_VOLUME_USD', 200_000, { min: 50_000 }),
+    alphaMinHolders: numberFrom(env, 'ALPHA_MIN_HOLDERS', 800, { min: 100 }),
+    alphaMaxPossibleRugScore: numberFrom(env, 'ALPHA_MAX_POSSIBLE_RUG_SCORE', 4, { min: 0, max: 10 }),
+    alphaMaxOnchainChecksPerScan: numberFrom(env, 'ALPHA_MAX_ONCHAIN_CHECKS_PER_SCAN', 20, { min: 1, max: 30 }),
   };
 
   return Object.freeze(cfg);

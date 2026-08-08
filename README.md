@@ -1,4 +1,4 @@
-# NEXIO v6 — Recovery Core
+# NEXIO v6.1 — Recovery Core + Alpha Guard
 
 This is a clean replacement for the signal engine in v5.51. It remains a paper-trading system by default and intentionally produces fewer alerts.
 
@@ -19,11 +19,11 @@ The central change is simple: an impulse is **not** an entry. The engine first a
 - Enforces one open trade, daily/weekly limits, and consecutive-loss limits.
 - Uses database uniqueness so two Railway instances cannot create the same signal twice.
 
-## Important: "rug pull" versus a futures dump
+## Alpha rug screening
 
-Binance futures candles and order books cannot prove an on-chain rug pull. Real rug screening requires the token contract and chain plus checks for LP ownership/lock, mint/freeze authority, honeypot or sell restrictions, taxes, deployer wallets, and holder concentration.
+Binance Alpha QUALIFIED/IGNITION alerts are enabled by default. Before an Alpha entry alert, the bot sends the chain and contract address to GoPlus and checks contract permissions and live security data. Confirmed honeypots, blocked selling, dangerous taxes, active mint/freeze authority, balance-changing ownership, closed-source contracts, and unavailable security checks block the entry. Medium risks appear prominently as **POSSIBLE RUG**.
 
-For that reason, `ENABLE_ALPHA_SIGNALS` is disabled and v6 refuses to start if somebody turns it on. An audited on-chain adapter is not part of this recovery core. The futures engine detects **manipulation/fade/crash risk**, which is the observable problem that causes a futures entry to collapse.
+This substantially improves detection, but no automated provider can guarantee that a token will not rug later. Alpha alerts therefore use tiny-size/manual-entry language and remain separate from the futures paper ledger.
 
 ## Install
 
@@ -32,7 +32,7 @@ For that reason, `ENABLE_ALPHA_SIGNALS` is disabled and v6 refuses to start if s
 3. Keep `PAPER_MODE=true`.
 4. Deploy with Node 20 or newer. No npm packages are required.
 
-Use `DEPLOYMENT.md` for the safe cutover sequence. Do not run v5.51 and v6 against the same Telegram bot token: two `getUpdates` pollers will steal updates from each other. This recovery project deliberately excludes subscriptions, payments, broadcasts, Alpha entries, social-hype scoring, and economic-calendar guesses so those systems cannot change or delay trade decisions. Your old `paper_trades` data is left untouched; v6 writes to `nexio_trades` because the old outcomes are not trustworthy enough to train the new gate.
+Use `DEPLOYMENT.md` for the safe cutover sequence. Do not run v5.51 and v6 against the same Telegram bot token: two `getUpdates` pollers will steal updates from each other. Subscriptions, payments, broadcasts, social-hype scoring, and economic-calendar guesses remain excluded so they cannot change or delay trade decisions. Your old `paper_trades` data is left untouched; v6 writes to `nexio_trades` because the old outcomes are not trustworthy enough to train the new gate.
 
 ```bash
 npm test
@@ -42,9 +42,12 @@ npm start
 The service exposes `/health` on `PORT` and supports these owner Telegram commands:
 
 - `/status`
+- `/priority`
 - `/candidates`
+- `/alpha`
 - `/stats`
 - `/scan`
+- `/alphascan`
 - `/pause`
 - `/resume`
 - `/help`
@@ -63,3 +66,5 @@ The implementation follows Binance's official USD-M fields:
 - Order-book validation: `/fapi/v1/depth`.
 
 Official reference: <https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data>
+
+GoPlus token-security reference: <https://docs.gopluslabs.io/reference/tokensecurityusingget_1>

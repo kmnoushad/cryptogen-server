@@ -5,6 +5,7 @@ import { BinanceClient } from './binance.js';
 import { Store } from './store.js';
 import { Telegram } from './telegram.js';
 import { Engine } from './engine.js';
+import { AlphaRadar } from './alpha.js';
 import { log } from './util.js';
 
 dns.setDefaultResultOrder('ipv4first');
@@ -13,7 +14,8 @@ const cfg = loadConfig();
 const binance = new BinanceClient();
 const store = new Store(cfg);
 const telegram = new Telegram(cfg);
-const engine = new Engine({ cfg, binance, store, telegram });
+const alpha = new AlphaRadar({ cfg, store, telegram });
+const engine = new Engine({ cfg, binance, store, telegram, alpha });
 
 const server = http.createServer((request, response) => {
   if (request.url === '/health' || request.url === '/') {
@@ -48,7 +50,8 @@ try {
     `Mode: ${cfg.paperMode ? 'PAPER' : 'ALERT-ONLY'}\n` +
     `Closed 1m candles · retest/reclaim · true taker flow\n` +
     `BTC: ${engine.btc.regime} · Universe: ${engine.universe.length}\n` +
-    `<i>Alpha entries disabled; fail-closed risk gates active.</i>`);
+    `Alpha: ${cfg.enableAlphaSignals ? '✅ ON · on-chain rug screening active' : 'disabled'}\n` +
+    `<i>Visual Priority/FIRE alerts restored · fail-closed critical risk gates</i>`);
   void telegram.pollLoop(message => engine.command(message));
   void engine.runLoop();
 } catch (error) {

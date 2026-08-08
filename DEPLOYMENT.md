@@ -7,7 +7,7 @@
 3. Confirm there are no legacy rows in `nexio_trades`; this is a new table and must start clean.
 4. Add the variables from `.env.example` to a new Railway service.
 5. Use the Supabase **service-role** key only in Railway. Never put it in Base44, a browser, a mobile app, or Telegram.
-6. Keep `PAPER_MODE=true` and `ENABLE_ALPHA_SIGNALS=false`.
+6. Keep `PAPER_MODE=true`. Set `ENABLE_ALPHA_SIGNALS=true` for guarded Alpha alerts.
 
 ## Telegram cutover
 
@@ -30,6 +30,9 @@ Using a separate temporary Telegram bot for the first week is even safer because
 - A symbol that loses is blocked for three hours by default.
 - New entries stop after two losses in the same Dubai day, at the daily/weekly limits, or when BTC is not in the strict bullish regime.
 - `/pause` stops new candidates/signals but continues to monitor the open paper trade.
+- `/priority` restores the ranked colored setup board.
+- Alpha QUALIFIED is a watch state; Alpha IGNITION is a manual-entry alert after a second on-chain risk check.
+- `POSSIBLE RUG` means material contract/concentration risk remains. `BLOCKED` means no Alpha entry is issued.
 
 ## First evaluation
 

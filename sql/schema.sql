@@ -52,8 +52,31 @@ create table if not exists public.nexio_events (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.nexio_alpha_tokens (
+  chain_id text not null,
+  chain_name text not null,
+  contract_address text not null,
+  alpha_id text,
+  symbol text not null,
+  name text,
+  state text not null default 'SEEDED'
+    check (state in ('SEEDED','QUALIFIED','IGNITED','BLOCKED')),
+  qualified_at timestamptz,
+  qualification_price numeric,
+  ignited_at timestamptz,
+  history jsonb not null default '[]'::jsonb,
+  security jsonb,
+  last_seen_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (chain_id, contract_address)
+);
+
+create index if not exists nexio_alpha_state_idx
+  on public.nexio_alpha_tokens(state, last_seen_at desc);
+
 alter table public.nexio_trades enable row level security;
 alter table public.nexio_events enable row level security;
+alter table public.nexio_alpha_tokens enable row level security;
 
 -- This worker is designed to use SUPABASE_SERVICE_ROLE_KEY on Railway.
 -- Never expose that key in a browser or mobile client.

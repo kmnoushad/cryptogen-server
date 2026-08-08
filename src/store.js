@@ -99,6 +99,27 @@ export class Store {
     }
   }
 
+  loadAlphaStates() {
+    return this.get('nexio_alpha_tokens', [
+      ['select', '*'],
+      ['order', 'last_seen_at.desc'],
+      ['limit', '1000'],
+    ]);
+  }
+
+  async upsertAlphaStates(rows) {
+    if (!Array.isArray(rows) || !rows.length) return [];
+    return requestJson(this.url('nexio_alpha_tokens', [
+      ['on_conflict', 'chain_id,contract_address'],
+    ]), {
+      method: 'POST',
+      headers: { ...this.headers, prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify(rows),
+      timeoutMs: 20_000,
+      retries: 0,
+    });
+  }
+
   async riskSnapshot(cfg, now = new Date()) {
     const day = dubaiDayBounds(now);
     const weekStart = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();

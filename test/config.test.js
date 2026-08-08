@@ -6,8 +6,10 @@ const base = {
   BOT_TOKEN: 'x', OWNER_CHAT_ID: '1', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'y',
 };
 
-test('Alpha entry mode fails closed without an on-chain risk service', () => {
-  assert.throws(() => loadConfig({ ...base, ENABLE_ALPHA_SIGNALS: 'true' }), /intentionally disabled/);
+test('Alpha entry mode defaults to guarded GoPlus screening', () => {
+  const cfg = loadConfig(base);
+  assert.equal(cfg.enableAlphaSignals, true);
+  assert.equal(cfg.onchainRiskApiUrl, 'https://api.gopluslabs.io');
 });
 
 test('paper mode is the default', () => {

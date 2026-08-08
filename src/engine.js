@@ -15,11 +15,12 @@ const EXCLUDED = new Set([
 ]);
 
 export class Engine {
-  constructor({ cfg, binance, store, telegram }) {
+  constructor({ cfg, binance, store, telegram, alpha = null }) {
     this.cfg = cfg;
     this.binance = binance;
     this.store = store;
     this.telegram = telegram;
+    this.alpha = alpha;
     this.universe = [];
     this.candidates = new Map();
     this.lastBarSeen = new Map();
@@ -33,6 +34,8 @@ export class Engine {
     this.scanRunning = false;
     this.stopping = false;
     this.metrics = { scans: 0, armed: 0, rejected: 0, signaled: 0, dataErrors: 0 };
+    this.priority = new Map();
+    this.lastPriorityAlertAt = Date.now();
   }
 
   async initialize() {
@@ -41,6 +44,7 @@ export class Engine {
     this.btc = await this.binance.btcRegime();
     await this.refreshUniverse();
     await this.manageOpenTrades();
+    if (this.alpha) await this.alpha.initialize();
     log(`Initialized: BTC=${this.btc.regime}, universe=${this.universe.length}, paper=${this.cfg.paperMode}`);
   }
 
@@ -130,6 +134,16 @@ export class Engine {
     if (this.lastBarSeen.get(symbol) === features.last.closeTime) return { action: 'NO_NEW_BAR' };
     this.lastBarSeen.set(symbol, features.last.closeTime);
 
+    this.priority.set(symbol, {
+      symbol,
+      score: Number(features.setupScore ?? 0),
+      state: 'BUILDING',
+      quoteVolume: Number(item.quoteVolume ?? 0),
+      buyRatio: Number(features.buyRatio3),
+      volumeRatio: Number(features.impulseVolumeRatio),
+      updatedAt: Date.now(),
+    });
+
     let candidate = this.candidates.get(symbol);
     if (!candidate) {
       if (!this.btc.allowed || !features.impulse) return { action: 'NONE' };
@@ -140,6 +154,11 @@ export class Engine {
       }
       candidate = armCandidate(symbol, candles, features, context);
       this.candidates.set(symbol, candidate);
+      this.priority.set(symbol, {
+        ...this.priority.get(symbol),
+        state: 'ARMED',
+        score: Math.max(features.setupScore, candidate.setupScore),
+      });
       this.metrics.armed++;
       log(`ARMED ${symbol}: breakout ${features.breakoutPct.toFixed(2)}%, flow ${(features.buyRatio3 * 100).toFixed(0)}%`);
       return { action: 'ARMED' };
@@ -155,10 +174,16 @@ export class Engine {
     const decision = advanceCandidate(candidate, features, context, this.cfg);
     if (decision.action === 'HOLD') {
       this.candidates.set(symbol, decision.candidate);
+      this.priority.set(symbol, {
+        ...this.priority.get(symbol),
+        state: decision.candidate.state,
+        score: Math.max(this.priority.get(symbol)?.score ?? 0, decision.candidate.setupScore ?? 0),
+      });
       return decision;
     }
     if (decision.action === 'REJECT') {
       this.candidates.delete(symbol);
+      this.priority.delete(symbol);
       this.metrics.rejected++;
       if (context.risk.hardBlock) await this.warnRisk(symbol, features, context);
       log(`REJECT ${symbol}: ${decision.reason}`);
@@ -234,9 +259,20 @@ export class Engine {
         }
       }
       await this.manageOpenTrades();
+      if (this.alpha) {
+        try { await this.alpha.scan(); }
+        catch (error) { this.metrics.dataErrors++; log(`Alpha scan failed: ${error.message}`); }
+      }
       this.metrics.scans++;
       this.lastScanAt = Date.now();
       this.lastScanDurationMs = Date.now() - started;
+      if (Date.now() - this.lastPriorityAlertAt >= this.cfg.priorityAlertIntervalMs) {
+        const rows = this.priorityRows();
+        if (rows.length) {
+          await this.telegram.send(this.telegram.priorityMessage(rows, this.btc));
+          this.lastPriorityAlertAt = Date.now();
+        }
+      }
       return { processed: results.length, durationMs: this.lastScanDurationMs };
     } finally {
       this.scanRunning = false;
@@ -304,7 +340,16 @@ export class Engine {
       lastScanAt: this.lastScanAt ? new Date(this.lastScanAt).toISOString() : null,
       lastScanDurationMs: this.lastScanDurationMs,
       metrics: this.metrics,
+      alpha: this.alpha?.health() ?? { enabled: false },
     };
+  }
+
+  priorityRows() {
+    const cutoff = Date.now() - 5 * 60_000;
+    return [...this.priority.values()]
+      .filter(row => row.updatedAt >= cutoff && row.score >= 5)
+      .sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt)
+      .slice(0, 8);
   }
 
   async command(message) {
@@ -316,7 +361,7 @@ export class Engine {
     }
 
     if (text === '/start' || text === '/help') {
-      await this.telegram.send('🧪 <b>NEXIO v6 Recovery Core</b>\n/status /candidates /stats /scan /pause /resume /help');
+      await this.telegram.send('🧪 <b>NEXIO v6 Recovery Core</b>\n/status /priority /candidates /alpha /stats /scan /alphascan /pause /resume /help');
     } else if (text === '/status') {
       const risk = await this.store.riskSnapshot(this.cfg);
       await this.telegram.send(`🩺 <b>NEXIO v6 STATUS</b>\n` +
@@ -325,6 +370,7 @@ export class Engine {
         `Open: ${risk.openTrades} · Today: ${risk.tradesToday}/${this.cfg.maxTradesPerDay}\n` +
         `Daily PnL: ${risk.dailyPnlPct.toFixed(2)}% · Weekly: ${risk.weeklyPnlPct.toFixed(2)}%\n` +
         `Paused: ${this.paused ? 'YES' : 'NO'} · Last scan: ${this.lastScanDurationMs}ms\n` +
+        `Alpha: ${this.alpha?.health().enabled ? `✅ ${this.alpha.active().length} active` : 'disabled'}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/candidates') {
@@ -333,6 +379,21 @@ export class Engine {
         `• ${escapeHtml(c.symbol.replace('USDT', ''))}: ${c.state} · breakout $${formatPrice(c.breakoutLevel)}${c.retested ? ' · retested' : ''}`
       ).join('\n') : 'No armed candidates. This is normal.';
       await this.telegram.send(`🎯 <b>CANDIDATES (${rows.length})</b>\n${body}`);
+    } else if (text === '/priority') {
+      await this.telegram.send(this.telegram.priorityMessage(this.priorityRows(), this.btc));
+    } else if (text === '/alpha') {
+      if (!this.alpha?.health().enabled) {
+        await this.telegram.send('🔷 Alpha signals are disabled in configuration.');
+      } else {
+        const active = this.alpha.active();
+        const body = active.length
+          ? active.slice(0, 12).map(row => {
+            const risk = row.security?.rating ?? 'UNCHECKED';
+            return `• <b>${escapeHtml(row.symbol)}</b> ${escapeHtml(row.state)} · ${escapeHtml(row.chainName)} · ${escapeHtml(risk)}`;
+          }).join('\n')
+          : 'No qualified/ignited Alpha setups right now.';
+        await this.telegram.send(`🔷 <b>ALPHA RADAR</b>\n━━━━━━━━━━━━━━━\n${body}\n⏰ ${gstTime()} GST`);
+      }
     } else if (text === '/stats') {
       const s = await this.store.statistics(200);
       const pf = Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : '∞';
@@ -346,6 +407,14 @@ export class Engine {
       await this.telegram.send('Running one manual scan…');
       const result = await this.scanOnce({ manual: true });
       await this.telegram.send(`Scan complete: ${result.processed ?? 0} symbols in ${result.durationMs ?? 0}ms`);
+    } else if (text === '/alphascan') {
+      if (!this.alpha?.health().enabled) {
+        await this.telegram.send('Alpha signals are disabled in configuration.');
+      } else {
+        await this.telegram.send('Running one Alpha scan with on-chain risk checks…');
+        const result = await this.alpha.scan({ force: true });
+        await this.telegram.send(`Alpha scan complete: ${result.processed ?? 0} liquid tokens in ${result.durationMs ?? 0}ms`);
+      }
     } else if (text === '/pause') {
       this.paused = true;
       await this.telegram.send('⏸ New entries paused. Open-trade monitoring remains active.');
