@@ -95,6 +95,7 @@ export const loadConfig = (env = process.env) => {
     // v6.9.7: extension limits configurable + strong-flow bonus. Set
     // MAX_ENTRY_EXTENSION_ATR=1.60, ..._LIQUID=1.50 and
     // STRONG_FLOW_EXTENSION_BONUS_ATR=0 to restore exact v6.9.6 behaviour.
+    fadeMinNetR: numberFromWarn(env, 'FADE_MIN_NET_R', 0.10, { min: 0, max: 1 }),
     maxEntryExtensionAtr: numberFromWarn(env, 'MAX_ENTRY_EXTENSION_ATR', 1.60, { min: 0.8, max: 3 }),
     maxEntryExtensionAtrLiquid: numberFromWarn(env, 'MAX_ENTRY_EXTENSION_ATR_LIQUID', 1.50, { min: 0.8, max: 3 }),
     strongFlowBuyRatio: numberFromWarn(env, 'STRONG_FLOW_BUY_RATIO', 0.62, { min: 0.50, max: 0.90 }),
