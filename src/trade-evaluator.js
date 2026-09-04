@@ -27,6 +27,25 @@ const closeResult = (trade, rawExit, reason, candle, cfg, mfePct, maePct) => {
   };
 };
 
+// v6.9.9 FIX (Option A — discussed and approved after the 2026-09-04 TAO
+// MOMENTUM_FADE incident): mirrors closeResult's exact PnL math WITHOUT
+// closing the trade, so the fade gate can check "would this exit actually be
+// net-profitable" using the SAME formula that ends up in the report. Before
+// this, the gate compared raw candle.close against a flat 0.10 floor with no
+// fee/slippage applied — on a tight stop (TAO: 0.156%), that 0.10R of raw
+// cushion was worth less than the ~0.13% round-trip cost, so the gate could
+// fire believing it was locking a profit while the recorded outcome was a
+// net loss (observed: raw currentR ~0.13, reported r_multiple -0.42R).
+const estimateNetRMultiple = (trade, rawPrice, cfg) => {
+  const entry = Number(trade.entry);
+  const exitPrice = executionPrice(rawPrice, cfg.exitSlippageBps);
+  const grossPnlPct = (exitPrice - entry) / entry * 100;
+  const feePct = 2 * Number(trade.fee_bps ?? cfg.takerFeeBps) / 100;
+  const netPnlPct = grossPnlPct - feePct;
+  const initialRiskPct = Number(trade.risk_per_unit) / entry * 100 + feePct;
+  return initialRiskPct > 0 ? netPnlPct / initialRiskPct : 0;
+};
+
 export const evaluateTrade = (trade, closedCandles, cfg) => {
   const entry = Number(trade.entry);
   const tp1 = Number(trade.tp1);
@@ -58,7 +77,11 @@ export const evaluateTrade = (trade, closedCandles, cfg) => {
     // The database outcome and the Telegram instruction therefore stay aligned.
     const peakR = initialRisk > 0 ? (mfePct / 100 * entry) / initialRisk : 0;
     const currentR = initialRisk > 0 ? (candle.close - entry) / initialRisk : 0;
-    if (peakR >= 0.75 && peakR - currentR >= 0.50 && currentR > 0.10) {
+    // v6.9.9: this clause now asks "is exiting HERE still worth it after
+    // real costs" instead of "is raw price still above a raw floor" — see
+    // estimateNetRMultiple above for why that distinction matters.
+    const netCurrentR = estimateNetRMultiple(trade, candle.close, cfg);
+    if (peakR >= 0.75 && peakR - currentR >= 0.50 && netCurrentR > (cfg.fadeMinNetR ?? 0.10)) {
       return closeResult(trade, candle.close, 'MOMENTUM_FADE', candle, cfg, mfePct, maePct);
     }
 
@@ -98,3 +121,5 @@ export const closeTradeAtMarket = (trade, rawExit, closeTime, reason, cfg, { mfe
     Number(maePct ?? trade.mae_pct ?? 0),
   );
 };
+
+
