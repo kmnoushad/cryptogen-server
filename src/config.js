@@ -178,6 +178,11 @@ export const loadConfig = (env = process.env) => {
     // change than the 10m/3% rule, so it fires only on genuine acceleration.
     alphaMoverFastWindowMin: numberFromWarn(env, 'ALPHA_MOVER_FAST_WINDOW_MIN', 3, { min: 1, max: 10 }),
     alphaMoverMinFastPct: numberFromWarn(env, 'ALPHA_MOVER_MIN_FAST_PCT', 2.5, { min: 0.5, max: 20 }),
+    // v6.9.9: short-window liquidity drain floor for the fast-mover radar.
+    // -5% between consecutive polls is a bleeding pool, not a mover. Mirrors
+    // the intent of alpha.js's -12% LIQUIDITY_DRAIN block but tighter, because
+    // this fires on a ~90s gap rather than a full scan cycle.
+    alphaMoverMaxDrainPct: numberFromWarn(env, 'ALPHA_MOVER_MAX_DRAIN_PCT', -5, { min: -50, max: 0 }),
     alphaMoverMin10mPct: numberFromWarn(env, 'ALPHA_MOVER_MIN_10M_PCT', 3.0, { min: 0.5, max: 20 }),
     alphaMoverMin30mPct: numberFromWarn(env, 'ALPHA_MOVER_MIN_30M_PCT', 6.0, { min: 1, max: 40 }),
     alphaMoverMax24hChangePct: numberFromWarn(env, 'ALPHA_MOVER_MAX_24H_CHANGE_PCT', 60, { min: 20, max: 200 }),
