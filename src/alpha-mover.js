@@ -61,7 +61,7 @@ export class AlphaFastMover {
       blocked: 0,
       errors: 0,
       dedupSkipped: 0,
-      suppressed: { cooldown: 0, cap: 0, paused: 0, eventGuard: 0 },
+      suppressed: { cooldown: 0, cap: 0, paused: 0, eventGuard: 0, drain: 0 },
     };
   }
 
@@ -203,6 +203,23 @@ export class AlphaFastMover {
     if (ref30 && ref30.liquidity > 0 && pctChange(ref30.liquidity, token.liquidity) < -3) return null;
     const previous = buffer.length >= 2 ? buffer.at(-2) : null;
     if (Number.isFinite(previous?.holders) && Number.isFinite(token.holders) && token.holders < previous.holders) return null;
+
+    // v6.9.9 SHORT-WINDOW DRAIN GUARD.
+    // The ref30 check above is skipped entirely when no 30-minute-old point
+    // exists (referenceAt returns null, and `&&` short-circuits). A token the
+    // radar has only tracked for a few minutes therefore passed with NO
+    // liquidity validation at all — precisely the newest, highest-rug-risk
+    // tokens. This mirrors the LIQUIDITY_DRAIN guard alpha.js already applies
+    // on every poll, using the immediately previous buffered point so it works
+    // from the second observation onward.
+    if (previous && Number.isFinite(previous.liquidity) && previous.liquidity > 0
+      && Number.isFinite(token.liquidity)) {
+      const drainPct = pctChange(previous.liquidity, token.liquidity);
+      if (drainPct <= this.cfg.alphaMoverMaxDrainPct) {
+        this.metrics.suppressed.drain++;
+        return { triggered: false, suppressed: 'liquidityDrain', symbol: token.symbol, drainPct };
+      }
+    }
 
     if (this.isPaused()) {
       this.metrics.suppressed.paused++;
