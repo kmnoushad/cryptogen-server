@@ -1,3 +1,5 @@
+export const EXECUTION_MODEL = 'closed-bar-v2';
+
 const executionPrice = (level, exitSlippageBps) => level * (1 - exitSlippageBps / 10_000);
 
 const closeResult = (trade, rawExit, reason, candle, cfg, mfePct, maePct) => {
@@ -12,6 +14,7 @@ const closeResult = (trade, rawExit, reason, candle, cfg, mfePct, maePct) => {
     closed: true,
     patch: {
       status: 'CLOSED',
+      setup: { ...trade.setup, exitExecutionModel: EXECUTION_MODEL },
       outcome,
       exit_price: exitPrice,
       exit_reason: reason,
@@ -56,7 +59,14 @@ export const evaluateTrade = (trade, closedCandles, cfg) => {
   let maePct = Number(trade.mae_pct ?? 0);
   let lastChecked = Number(trade.last_checked_bar_close ?? trade.entry_bar_close ?? 0);
   const createdAt = new Date(trade.created_at).getTime();
-  const bars = closedCandles.filter(c => c.closeTime > lastChecked).sort((a, b) => a.closeTime - b.closeTime);
+  // The first candle can start before the paper entry. Its extremes cannot
+  // be attributed to the position. Use only its observed close; tick-level
+  // data would be required to reconstruct the missing intraminute path.
+  const bars = closedCandles.filter(c => c.closeTime > lastChecked && c.closeTime >= createdAt)
+    .sort((a, b) => a.closeTime - b.closeTime)
+    .map(c => Number(c.openTime ?? c.closeTime - 59_999) < createdAt
+      ? { ...c, open: c.close, high: c.close, low: c.close }
+      : c);
   if (!bars.length) return { closed: false, patch: null };
 
   for (const candle of bars) {
@@ -65,12 +75,19 @@ export const evaluateTrade = (trade, closedCandles, cfg) => {
     // Conservative ordering: if both levels print in the same one-minute bar,
     // assume the stop happened first. Tick data would be needed to know otherwise.
     if (stopHit) {
-      maePct = Math.min(maePct, (candle.low - entry) / entry * 100);
-      return closeResult(trade, activeSl, breakevenArmed ? 'BREAKEVEN_STOP' : 'STOP', candle, cfg, mfePct, maePct);
+      // A sell stop gapped through cannot fill at the old trigger level.
+      const rawExit = Math.min(activeSl, Number(candle.open ?? candle.close));
+      maePct = Math.min(maePct, (rawExit - entry) / entry * 100);
+      return closeResult(trade, rawExit, breakevenArmed ? 'BREAKEVEN_STOP' : 'STOP', candle, cfg, mfePct, maePct);
+    }
+    if (targetHit) {
+      // Do not count price excursions beyond an already executed target.
+      mfePct = Math.max(mfePct, (tp1 - entry) / entry * 100);
+      maePct = Math.min(maePct, (Number(candle.open ?? entry) - entry) / entry * 100);
+      return closeResult(trade, tp1, 'TP1', candle, cfg, mfePct, maePct);
     }
     mfePct = Math.max(mfePct, (candle.high - entry) / entry * 100);
     maePct = Math.min(maePct, (candle.low - entry) / entry * 100);
-    if (targetHit) return closeResult(trade, tp1, 'TP1', candle, cfg, mfePct, maePct);
 
     // Deterministic closed-bar fade exit: once a trade reached +0.75R, close
     // at the candle close if it gives back at least 0.50R while still green.
@@ -86,9 +103,13 @@ export const evaluateTrade = (trade, closedCandles, cfg) => {
     }
 
     if (!breakevenArmed && candle.close >= entry + cfg.breakevenAtR * initialRisk) {
-      const costsPct = (2 * cfg.takerFeeBps + cfg.exitSlippageBps) / 100;
-      activeSl = entry * (1 + costsPct / 100);
-      breakevenArmed = true;
+      const feeFraction = 2 * Number(trade.fee_bps ?? cfg.takerFeeBps) / 10_000;
+      const breakevenStop = entry * (1 + feeFraction) / (1 - cfg.exitSlippageBps / 10_000);
+      // Never put a long sell stop above the market or lower an existing stop.
+      if (breakevenStop < candle.close && breakevenStop > activeSl) {
+        activeSl = breakevenStop;
+        breakevenArmed = true;
+      }
     }
 
     if (candle.closeTime - createdAt >= cfg.tradeTimeoutMin * 60_000) {

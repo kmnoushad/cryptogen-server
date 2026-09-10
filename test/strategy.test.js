@@ -375,3 +375,27 @@ test('liquid path keeps its 0.03/0.06 relaxation below the configured fast path'
   assert.equal(result.action, 'SIGNAL');
   assert.equal(result.trade.setup.setupType, 'LIQUID_TREND');
 });
+
+test('live entry above the reclaim ceiling is rejected despite a valid closed candle', () => {
+  const candidate = { symbol: 'TESTUSDT', state: 'RECLAIMED_WAIT_BOOK', detectedBarClose: 60_000,
+    expiresBarClose: 1_500_000, breakoutLevel: 100.8, peakPrice: 102, impulseAvgQuoteVolume: 1000,
+    atrAtDetection: 1, setupScore: 8, retested: true, retestLow: 101.1, retestBarClose: 120_000,
+    reclaimed: true, reclaimBarClose: 180_000, reclaimClose: 101.7, reclaimLow: 101.1,
+    executionWaitUntil: 360_000 };
+  const features = { last: { closeTime: 240_000, low: 101.7, high: 101.9, close: 101.8, quoteVolume: 1200 },
+    previous: { high: 101.55 }, atr: 1, ret1m: 0.1, ret3m: 1.2, green: true, bodyPct: 70,
+    upperWickPct: 14, buyRatio1: 0.6, buyRatio3: 0.6, deltaRatio1: 0.2,
+    quoteVolumeRatio: 1.2, extensionAtr: 1.1, ema20: 100.7, ema20Slope5Pct: 0.03 };
+  const book = { ...context.depth, estimatedBuyPrice: 102.2, bestAsk: 102.2, entryImpactBps: 0 };
+  const result = advanceCandidate(candidate, features, { ...context, depth: book }, cfg);
+  assert.equal(result.action, 'REJECT');
+  assert.match(result.reason, /live entry outside valid reclaim zone/);
+  book.estimatedBuyPrice = book.bestAsk = 101.85;
+  book.measuredAt = 1_800_000;
+  const valid = advanceCandidate(candidate, features, { ...context, depth: book }, cfg);
+  assert.equal(valid.action, 'SIGNAL');
+  assert.ok(valid.trade.entry >= valid.trade.setup.entryMin);
+  assert.ok(valid.trade.entry <= valid.trade.setup.entryMax);
+  assert.equal(valid.trade.setup.entryExpiresAt, 1_830_000);
+  assert.equal(valid.trade.setup.executionModel, 'closed-bar-v2');
+});

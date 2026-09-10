@@ -62,9 +62,14 @@ export class Telegram {
       `<b>💰 ENTRY: $${formatPrice(trade.entry)}</b>\n` +
       `<b>🛑 STOP:  $${formatPrice(trade.initial_sl)}</b>\n` +
       `<b>🎯 TP1:   $${formatPrice(trade.tp1)}</b>\n` +
-      `<b>🎯 TP2:   $${formatPrice(trade.tp2)}</b>\n\n` +
+      `<b>Close 100% at TP1; follow any earlier exit alert.</b>\n` +
+      (Number.isFinite(s.entryMin) && Number.isFinite(s.entryMax)
+        ? `Entry zone: $${formatPrice(s.entryMin)}–$${formatPrice(s.entryMax)}\n` : '') +
+      (Number.isFinite(s.entryExpiresAt)
+        ? `Entry expires: ${gstTime(new Date(s.entryExpiresAt))} GST\n` : '') +
+      `<b>Skip if expired, outside the zone, or stop/target already touched.</b>\n\n` +
       `━━━━━━━━━━━━━━━\n` +
-      `📊 Confidence: <b>${score.toFixed(1)}/10</b>\n${confidenceBar(score)}\n` +
+      `📊 Setup score: <b>${score.toFixed(1)}/10</b>\n${confidenceBar(score)}\n` +
       `✅ Closed breakout → ${escapeHtml(String(s.retestType ?? 'STANDARD').replaceAll('_', ' ').toLowerCase())} → reclaim\n` +
       `🟢 Taker buyers ${(Number(s.buyRatio1) * 100).toFixed(0)}% · OI ${Number(s.oiChangePct).toFixed(2)}%\n` +
       `💧 Depth ${usd(Number(s.bidDepthUsd))}/${usd(Number(s.askDepthUsd))} · spread ${Number(s.spreadBps).toFixed(1)} bps\n` +
@@ -72,6 +77,15 @@ export class Telegram {
       `⚖️ Net R:R 1:${Number(s.netRR).toFixed(2)} · manipulation ${Number(s.manipulationScore ?? 0)}/10\n` +
       `₿ BTC ${escapeHtml(btc.regime)} · ${btc.oneHourReturn >= 0 ? '+' : ''}${btc.oneHourReturn.toFixed(2)}%/1h\n\n` +
       `<i>${this.cfg.paperMode ? 'PAPER SIGNAL' : 'ALERT ONLY'} · No setup guarantees profit · SL always set</i>\n` +
+      `⏰ ${gstTime()} GST`;
+  }
+
+  stopUpdateMessage(trade) {
+    return `🛡 <b>[FUTURES] ${escapeHtml(trade.symbol)} — STOP UPDATE</b>\n` +
+      `Paper stop moved to $${formatPrice(trade.active_sl)}.\n` +
+      `If following this trade, raise your stop to this level; never lower an existing higher stop. ` +
+      `If price is already at/below it, close instead of placing a stop above the market.\n` +
+      `Breakeven uses the paper entry and assumed costs; your actual result may differ.\n` +
       `⏰ ${gstTime()} GST`;
   }
 
@@ -126,6 +140,7 @@ export class Telegram {
       : trade.exit_reason === 'MANIPULATION_EXIT' ? 'Liquidity/manipulation risk changed—exit now.'
       : 'Time limit reached—close and reassess.';
     return `${icon} <b>${escapeHtml(trade.symbol.replace('USDT', ''))} ${escapeHtml(trade.exit_reason)}</b>\n` +
+      `Paper exit: $${formatPrice(trade.exit_price)} · ${trade.closed_at ? gstTime(new Date(trade.closed_at)) : '—'} GST\n` +
       `Net: ${Number(trade.net_pnl_pct) >= 0 ? '+' : ''}${Number(trade.net_pnl_pct).toFixed(2)}% · ` +
       `R: ${Number(trade.r_multiple) >= 0 ? '+' : ''}${Number(trade.r_multiple).toFixed(2)}R\n` +
       `MFE +${Number(trade.mfe_pct).toFixed(2)}% · MAE ${Number(trade.mae_pct).toFixed(2)}%\n` +

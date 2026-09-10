@@ -115,6 +115,7 @@ try {
     `<i>Trade alerts actionable-only · calendar information kept separate</i>`);
   void telegram.pollLoop(message => engine.command(message));
   void calendar.runLoop();
+  void engine.monitorLoop();
   void engine.runLoop();
 } catch (error) {
   log(`Fatal startup error: ${error.stack ?? error}`);

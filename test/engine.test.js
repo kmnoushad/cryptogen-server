@@ -1016,3 +1016,63 @@ test('/why surfaces the BTC bias gate while it is blocking new arms', async () =
   await engine.command({ chat: { id: '1' }, text: '/why' });
   assert.match(messages[0], /BTC bias gate ACTIVE: 15m STRONG_DOWN — new arms\/seeds blocked \(2× BTC_BIAS_BLOCK\)/);
 });
+
+const deliveryFixture = ({ quoteAge = 0, expireDuringInsert = false, failInsert = false } = {}) => {
+  const created = [], updates = [], messages = [];
+  const now = Date.now();
+  const engine = new Engine({
+    cfg: { maxEntrySlippageBps: 8, takerFeeBps: 5, exitSlippageBps: 3,
+      maxSpreadBps: 10, minDepthEachSideUsd: 100_000, minNetRR: 1.35,
+      futuresCandidateTtlMin: 24, minStopPctFloor: 0.12, maxStopPct: 1.60,
+      maxEntryQuoteAgeMs: 5000 },
+    binance: { klines: async () => flatKlines(90, now - 60_000) },
+    store: { insertEvent: async () => true,
+      riskSnapshot: async () => ({ allowed: true, reasons: [] }),
+      symbolCooldown: async () => ({ blocked: false }),
+      createTrade: async trade => {
+        if (failInsert) throw Error('insert down');
+        created.push(trade);
+        if (expireDuringInsert) trade.setup.entryObservedAt = Date.now() - 6000;
+        return { created: true, trade: { id: 7, ...trade } };
+      },
+      updateTrade: async (id, patch) => { updates.push(patch); return patch; },
+    },
+    telegram: { send: async text => messages.push(text), signalMessage: () => 'FIRE' },
+  });
+  engine.btc = { allowed: true, regime: 'BULLISH' };
+  engine.context = async () => ({ risk: { hardBlock: false, terminalRisk: false, entryBlocked: false, score: 0, reasons: [] },
+    oi: { changePct: 0.4 }, depth: { estimatedBuyPrice: 100.2, bestAsk: 100.2,
+      spreadBps: 4, bidNotional05: 300_000, askNotional05: 250_000,
+      imbalance: 1, entryImpactBps: 0, measuredAt: Date.now() - quoteAge } });
+  engine.candidates.set('ETHUSDT', { symbol: 'ETHUSDT', state: 'RECLAIMED_WAIT_BOOK',
+    detectedBarClose: now - 6 * 60_000, expiresBarClose: now + 24 * 60_000,
+    breakoutLevel: 100.2, impulseLow: 98, impulseWaveAtArm: 10, peakPrice: 100.7,
+    impulseAvgQuoteVolume: 10_000, atrAtDetection: 1, invalidationLevel: 99.75,
+    setupScore: 8, setupType: 'FAST_BREAKOUT', retested: true, retestLow: 99.8,
+    retestBarClose: now - 3 * 60_000, candidateLow: 99.8, reclaimed: true,
+    reclaimBarClose: now - 60_000, reclaimClose: 100.2, reclaimLow: 99.9,
+    executionWaitUntil: now + 3 * 60_000, barsObserved: 5 });
+  return { engine, created, updates, messages };
+};
+
+test('stale book cannot create or send FIRE', async () => {
+  const x = deliveryFixture({ quoteAge: 6000 });
+  const result = await x.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(result.action, 'HOLD');
+  assert.equal(x.created.length, 0);
+  assert.equal(x.messages.length, 0);
+});
+test('book expiring during persistence cancels the row before sending FIRE', async () => {
+  const x = deliveryFixture({ expireDuringInsert: true });
+  const result = await x.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(result.action, 'CANCELLED');
+  assert.equal(x.created.length, 1);
+  assert.equal(x.updates[0].status, 'CANCELLED');
+  assert.equal(x.messages.length, 0);
+  assert.equal(x.engine.pendingEntrySymbols.size, 0);
+});
+test('failed insertion releases the entry-delivery monitor guard', async () => {
+  const x = deliveryFixture({ failInsert: true });
+  await assert.rejects(x.engine.scanSymbol({ symbol: 'ETHUSDT' }), /insert down/);
+  assert.equal(x.engine.pendingEntrySymbols.size, 0);
+});
