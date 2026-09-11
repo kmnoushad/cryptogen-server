@@ -80,6 +80,8 @@ export class Engine {
     this.btc = { regime: 'UNINITIALIZED', allowed: false };
     this.paused = false;
     this.scanRunning = false;
+    this.monitorRunning = false;
+    this.pendingEntrySymbols = new Set();
     this.stopping = false;
     this.metrics = {
       scans: 0,
@@ -516,13 +518,14 @@ export class Engine {
   }
 
   async context(symbol, features) {
-    const [book, oi, premium, history] = await Promise.all([
-      this.binance.depth(symbol, 100),
+    const [bookSnapshot, oi, premium, history] = await Promise.all([
+      this.binance.depth(symbol, 100).then(book => ({ book, receivedAt: Date.now() })),
       this.binance.oiContext(symbol),
       this.binance.premiumIndex(symbol),
       this.getHistory(symbol),
     ]);
-    const depth = depthMetrics(book, features.last.close, this.cfg.assumedOrderNotionalUsd);
+    const depth = depthMetrics(bookSnapshot.book, features.last.close, this.cfg.assumedOrderNotionalUsd);
+    depth.measuredAt = bookSnapshot.receivedAt;
     const stored = this.depthSnapshots.get(symbol);
     const snapshots = (Array.isArray(stored) ? stored : stored ? [stored] : []).slice(-5);
     const depthBaseline = medianDepthSnapshot(snapshots.slice(-3));
@@ -731,50 +734,69 @@ export class Engine {
       return { action: 'REALTIME_SHOCK_BLOCK' };
     }
 
-    decision.trade.btc_regime = this.btc;
-    const inserted = await this.store.createTrade(decision.trade);
-    this.candidates.delete(symbol);
-    if (!inserted.created) {
-      this.countGate('DUPLICATE_TRADE');
-      return { action: 'DUPLICATE' };
+    const quoteIsStale = () => Date.now() - decision.trade.setup.entryObservedAt
+      > (this.cfg.maxEntryQuoteAgeMs ?? 5_000);
+    if (quoteIsStale()) {
+      this.countGate('STALE_ENTRY_QUOTE');
+      return { action: 'HOLD', reason: 'entry quote expired before persistence' };
     }
-
-    let delivered = false;
+    decision.trade.btc_regime = this.btc;
+    // The independent monitor must not evaluate an entry still being delivered.
+    this.pendingEntrySymbols.add(symbol);
     try {
-      const btcTagLine = this.btcBiasTagLine();
-      await this.telegram.send(this.telegram.signalMessage(inserted.trade, this.btc) + (btcTagLine ? `\n${btcTagLine}` : ''));
-      delivered = true;
-      await this.store.updateTrade(inserted.trade.id, { alert_sent: true });
-      this.metrics.signaled++;
-      const setupType = decision.trade.setup?.setupType ?? 'UNKNOWN';
-      this.metrics.signaledByType[setupType] = Number(this.metrics.signaledByType[setupType] ?? 0) + 1;
-      await this.persistCandidateOutcome(decision.candidate, 'SIGNAL', 'FIRE delivered', features, context);
-      log(`SIGNAL ${symbol}: entry=${decision.trade.entry} stop=${decision.trade.initial_sl}`);
-      return { action: 'SIGNAL' };
-    } catch (error) {
-      if (!delivered) {
-        await this.store.updateTrade(inserted.trade.id, {
-          status: 'CANCELLED',
-          exit_reason: `ALERT_FAILED: ${error.message}`.slice(0, 300),
-          closed_at: new Date().toISOString(),
-        });
-      } else {
-        log(`CRITICAL: Telegram delivered ${symbol}, but alert_sent acknowledgement failed; trade remains monitored`);
+      const inserted = await this.store.createTrade(decision.trade);
+      this.candidates.delete(symbol);
+      if (!inserted.created) {
+        this.countGate('DUPLICATE_TRADE');
+        return { action: 'DUPLICATE' };
       }
-      throw error;
+
+      let delivered = false;
+      try {
+        if (quoteIsStale() || this.realtimeShock?.blocked() || this.eventGuard?.activeWindow()) {
+          await this.store.updateTrade(inserted.trade.id, {
+            status: 'CANCELLED', exit_reason: 'ENTRY_INVALID_BEFORE_DELIVERY', closed_at: new Date().toISOString(),
+          });
+          this.countGate('STALE_OR_BLOCKED_ENTRY');
+          return { action: 'CANCELLED', reason: 'entry expired or market guard activated before delivery' };
+        }
+        const btcTagLine = this.btcBiasTagLine();
+        await this.telegram.send(this.telegram.signalMessage(inserted.trade, this.btc) + (btcTagLine ? `\n${btcTagLine}` : ''));
+        delivered = true;
+        await this.store.updateTrade(inserted.trade.id, { alert_sent: true });
+        this.metrics.signaled++;
+        const setupType = decision.trade.setup?.setupType ?? 'UNKNOWN';
+        this.metrics.signaledByType[setupType] = Number(this.metrics.signaledByType[setupType] ?? 0) + 1;
+        await this.persistCandidateOutcome(decision.candidate, 'SIGNAL', 'FIRE delivered', features, context);
+        log(`SIGNAL ${symbol}: entry=${decision.trade.entry} stop=${decision.trade.initial_sl}`);
+        return { action: 'SIGNAL' };
+      } catch (error) {
+        if (!delivered) {
+          await this.store.updateTrade(inserted.trade.id, {
+            status: 'CANCELLED',
+            exit_reason: `ALERT_FAILED: ${error.message}`.slice(0, 300),
+            closed_at: new Date().toISOString(),
+          });
+        } else {
+          log(`CRITICAL: Telegram delivered ${symbol}, but alert_sent acknowledgement failed; trade remains monitored`);
+        }
+        throw error;
+      }
+    } finally {
+      this.pendingEntrySymbols.delete(symbol);
     }
   }
 
   async scanOnce({ manual = false } = {}) {
     if (this.scanRunning) return { skipped: 'already running' };
-    if (this.paused) {
-      await this.manageOpenTrades();
-      if (this.alpha) await this.alpha.scan({ monitorOnly: true });
-      return { skipped: 'paused' };
-    }
     this.scanRunning = true;
     const started = Date.now();
     try {
+      await this.manageOpenTrades();
+      if (this.paused) {
+        if (this.alpha) await this.alpha.scan({ monitorOnly: true });
+        return { skipped: 'paused' };
+      }
       const eventWindow = this.eventGuard?.activeWindow() ?? null;
       await this.syncEventGuard(eventWindow);
       if (Date.now() - this.lastUniverseRefresh >= this.cfg.universeRefreshMs) await this.refreshUniverse();
@@ -798,7 +820,6 @@ export class Engine {
           log(`Symbol scan failed: ${result.error.message}`);
         }
       }
-      await this.manageOpenTrades();
       if (this.alpha) {
         // During an event window Alpha runs monitor-only (same as paused):
         // no new IGNITIONs, existing alpha trades keep monitoring.
@@ -816,7 +837,81 @@ export class Engine {
   }
 
   async manageOpenTrades() {
-    const pending = await this.store.pendingTradeOutcomeAlerts();
+    if (this.monitorRunning) return { skipped: 'monitor already running' };
+    this.monitorRunning = true;
+    try {
+      return await this.monitorTradesOnce();
+    } finally {
+      this.monitorRunning = false;
+    }
+  }
+
+  async monitorTradesOnce() {
+    const trades = await this.store.listOpenTrades();
+    for (const trade of trades) {
+      if (this.pendingEntrySymbols.has(trade.symbol)) continue;
+      try {
+        const startTime = Math.max(0, Number(trade.last_checked_bar_close ?? trade.entry_bar_close) - 60_000);
+        const rows = await this.binance.klines(trade.symbol, '1m', 500, { startTime });
+        const candles = closedCandles(parseKlines(rows));
+        const result = evaluateTrade(trade, candles, this.cfg);
+        let updated = trade;
+        if (result.patch) {
+          if (!result.closed && !trade.breakeven_armed && result.patch.breakeven_armed) {
+            result.patch.setup = { ...trade.setup, stopAlertPending: true };
+          }
+          // Save deterministic exits/progress before an optional live-risk request
+          // can fail. A restart must never undo an already observed stop or target.
+          updated = await this.store.updateTrade(trade.id, result.patch);
+          if (!updated) throw new Error('Trade update returned no row');
+          if (result.closed) {
+            await this.telegram.send(this.telegram.outcomeMessage(updated));
+            await this.store.updateTrade(trade.id, { exit_alert_sent: true });
+            log(`CLOSED ${trade.symbol}: ${updated.exit_reason} ${Number(updated.net_pnl_pct).toFixed(2)}%`);
+            continue;
+          }
+          try {
+            // Exit replay and risk indicators have different history needs.
+            // Fetch a fresh full feature window, independent of last_checked.
+            const riskRows = await this.binance.klines(trade.symbol, '1m', 90);
+            const riskCandles = closedCandles(parseKlines(riskRows));
+            const features = buildFeatures(riskCandles);
+            if (!features || Date.now() - features.last.closeTime > 90_000) {
+              throw new Error('Open-trade risk history incomplete or stale');
+            }
+            // If replay is still catching up after an outage, finish its older
+            // bars before applying a market exit from the present.
+            if (Number(updated.last_checked_bar_close) >= features.last.closeTime) {
+              const context = await this.context(trade.symbol, features);
+              if (context.risk.hardBlock) {
+                const finalResult = closeTradeAtMarket(updated, context.depth.bestBid, Date.now(),
+                  'MANIPULATION_EXIT', this.cfg);
+                updated = await this.store.updateTrade(trade.id, finalResult.patch);
+                if (!updated) throw new Error('Risk exit update returned no row');
+                await this.telegram.send(this.telegram.outcomeMessage(updated));
+                await this.store.updateTrade(trade.id, { exit_alert_sent: true });
+                continue;
+              }
+            }
+          } catch (error) {
+            this.metrics.dataErrors++;
+            log(`Open-trade risk check failed for ${trade.symbol}: ${error.message}`);
+          }
+        }
+        // Retry after restarts/send failures, even when there is no new candle.
+        if (updated.status !== 'CLOSED' && updated.setup?.stopAlertPending) {
+          await this.telegram.send(this.telegram.stopUpdateMessage(updated));
+          await this.store.updateTrade(trade.id, {
+            setup: { ...updated.setup, stopAlertPending: false },
+          });
+        }
+      } catch (error) {
+        this.metrics.dataErrors++;
+        log(`Open-trade monitor failed for ${trade.symbol}: ${error.message}`);
+      }
+    }
+    // Pending notification failures must not prevent active-position checks.
+    const pending = await this.store.pendingTradeOutcomeAlerts(1);
     for (const trade of pending) {
       try {
         await this.telegram.send(this.telegram.outcomeMessage(trade));
@@ -826,42 +921,17 @@ export class Engine {
         log(`Outcome alert retry failed for ${trade.symbol}: ${error.message}`);
       }
     }
-    const trades = await this.store.listOpenTrades();
-    for (const trade of trades) {
-      try {
-        const startTime = Math.max(0, Number(trade.last_checked_bar_close ?? trade.entry_bar_close) - 60_000);
-        const rows = await this.binance.klines(trade.symbol, '1m', 500, { startTime });
-        const candles = closedCandles(parseKlines(rows));
-        const result = evaluateTrade(trade, candles, this.cfg);
-        if (!result.patch) continue;
-        let finalResult = result;
-        if (!result.closed) {
-          const features = buildFeatures(candles);
-          if (features) {
-            const context = await this.context(trade.symbol, features);
-            if (context.risk.hardBlock) {
-              await this.warnRisk(trade.symbol, features, context);
-              finalResult = closeTradeAtMarket(
-                { ...trade, ...result.patch },
-                context.depth.bestBid,
-                features.last.closeTime,
-                'MANIPULATION_EXIT',
-                this.cfg,
-                { mfePct: result.patch.mfe_pct, maePct: result.patch.mae_pct },
-              );
-            }
-          }
-        }
-        const updated = await this.store.updateTrade(trade.id, finalResult.patch);
-        if (finalResult.closed && updated) {
-          await this.telegram.send(this.telegram.outcomeMessage(updated));
-          await this.store.updateTrade(trade.id, { exit_alert_sent: true });
-          log(`CLOSED ${trade.symbol}: ${updated.exit_reason} ${Number(updated.net_pnl_pct).toFixed(2)}%`);
-        }
-      } catch (error) {
+  }
+
+  async monitorLoop() {
+    while (!this.stopping) {
+      const started = Date.now();
+      try { await this.manageOpenTrades(); }
+      catch (error) {
         this.metrics.dataErrors++;
-        log(`Open-trade monitor failed for ${trade.symbol}: ${error.message}`);
+        log(`Trade monitor failed: ${error.message}`);
       }
+      await sleep(Math.max(1_000, (this.cfg.tradeMonitorIntervalMs ?? 10_000) - (Date.now() - started)));
     }
   }
 
@@ -882,6 +952,7 @@ export class Engine {
       paperMode: this.cfg.paperMode,
       paused: this.paused,
       scanRunning: this.scanRunning,
+      monitorRunning: this.monitorRunning,
       btc: this.btc,
       universe: this.universe.length,
       candidates: this.candidates.size,

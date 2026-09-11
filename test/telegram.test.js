@@ -4,11 +4,12 @@ import { Telegram } from '../src/telegram.js';
 
 const telegram = new Telegram({ botToken: 'test', ownerChatId: '1', paperMode: true });
 
-test('Futures FIRE keeps the visual entry, stop, target and confidence UI', () => {
+test('Futures FIRE keeps the visual entry, stop, target and setup score UI', () => {
   const message = telegram.signalMessage({
     symbol: 'TESTUSDT', entry: 1, initial_sl: 0.99, tp1: 1.02, tp2: 1.04,
     setup_score: 8,
     setup: {
+      entryMin: 0.999, entryMax: 1.001, entryExpiresAt: Date.parse('2026-09-10T12:00:30Z'),
       setupType: 'STEADY_MOMENTUM', retestType: 'SHALLOW_CONSOLIDATION',
       buyRatio1: 0.62, oiChangePct: 0.4, bidDepthUsd: 250_000,
       askDepthUsd: 220_000, spreadBps: 3, netRR: 1.5, manipulationScore: 1,
@@ -19,7 +20,12 @@ test('Futures FIRE keeps the visual entry, stop, target and confidence UI', () =
   assert.match(message, /ENTRY:/);
   assert.match(message, /STOP:/);
   assert.match(message, /TP1:/);
-  assert.match(message, /Confidence/);
+  assert.match(message, /Setup score/);
+  assert.match(message, /Close 100% at TP1/);
+  assert.doesNotMatch(message, /TP2:/);
+  assert.match(message, /Entry zone:/);
+  assert.match(message, /Entry expires: 16:00:30 GST/);
+  assert.match(message, /Skip if expired/);
 });
 
 test('Alpha IGNITION stays visually separate and includes guarded trade levels', () => {
@@ -42,4 +48,12 @@ test('outcome UI gives an explicit close instruction', () => {
   });
   assert.match(message, /Momentum faded/);
   assert.match(message, /lock the remaining profit now/i);
+});
+
+test('stop update tells manual traders how to handle a level already crossed', () => {
+  const message = telegram.stopUpdateMessage({ symbol: 'TESTUSDT', active_sl: 1.0013 });
+  assert.match(message, /STOP UPDATE/);
+  assert.match(message, /already at\/below/);
+  assert.match(message, /never lower/);
+  assert.match(message, /your actual result may differ/);
 });

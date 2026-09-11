@@ -1,125 +1,93 @@
-const executionPrice = (level, exitSlippageBps) => level * (1 - exitSlippageBps / 10_000);
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { evaluateTrade, closeTradeAtMarket, EXECUTION_MODEL } from '../src/trade-evaluator.js';
 
-const closeResult = (trade, rawExit, reason, candle, cfg, mfePct, maePct) => {
-  const exitPrice = executionPrice(rawExit, cfg.exitSlippageBps);
-  const grossPnlPct = (exitPrice - Number(trade.entry)) / Number(trade.entry) * 100;
-  const feePct = 2 * Number(trade.fee_bps ?? cfg.takerFeeBps) / 100;
-  const netPnlPct = grossPnlPct - feePct;
-  const initialRiskPct = Number(trade.risk_per_unit) / Number(trade.entry) * 100 + feePct;
-  const rMultiple = initialRiskPct > 0 ? netPnlPct / initialRiskPct : 0;
-  const outcome = reason === 'TP1' ? 'WIN' : netPnlPct > 0.03 ? 'WIN' : netPnlPct < -0.03 ? 'LOSS' : 'SCRATCH';
-  return {
-    closed: true,
-    patch: {
-      status: 'CLOSED',
-      outcome,
-      exit_price: exitPrice,
-      exit_reason: reason,
-      gross_pnl_pct: grossPnlPct,
-      net_pnl_pct: netPnlPct,
-      r_multiple: rMultiple,
-      mfe_pct: mfePct,
-      mae_pct: maePct,
-      exit_alert_sent: false,
-      last_checked_bar_close: candle.closeTime,
-      closed_at: new Date(candle.closeTime).toISOString(),
-    },
-  };
-};
+const t = Date.parse('2026-09-06T11:35:00Z');
+const cfg = { exitSlippageBps: 3, takerFeeBps: 5, breakevenAtR: 0.75, tradeTimeoutMin: 120, fadeMinNetR: 0.1 };
+const trade = (extra = {}) => ({ entry: 100, active_sl: 99, initial_sl: 99, tp1: 102,
+  risk_per_unit: 1, fee_bps: 5, created_at: new Date(t + 10_000).toISOString(),
+  entry_bar_close: t - 1, ...extra });
+const bar = (offset, extra = {}) => ({ openTime: t + offset * 60_000,
+  closeTime: t + (offset + 1) * 60_000 - 1, open: 100, high: 100.1, low: 99.9, close: 100, ...extra });
+const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
 
-// v6.9.9 FIX (Option A — discussed and approved after the 2026-09-04 TAO
-// MOMENTUM_FADE incident): mirrors closeResult's exact PnL math WITHOUT
-// closing the trade, so the fade gate can check "would this exit actually be
-// net-profitable" using the SAME formula that ends up in the report. Before
-// this, the gate compared raw candle.close against a flat 0.10 floor with no
-// fee/slippage applied — on a tight stop (TAO: 0.156%), that 0.10R of raw
-// cushion was worth less than the ~0.13% round-trip cost, so the gate could
-// fire believing it was locking a profit while the recorded outcome was a
-// net loss (observed: raw currentR ~0.13, reported r_multiple -0.42R).
-const estimateNetRMultiple = (trade, rawPrice, cfg) => {
-  const entry = Number(trade.entry);
-  const exitPrice = executionPrice(rawPrice, cfg.exitSlippageBps);
-  const grossPnlPct = (exitPrice - entry) / entry * 100;
-  const feePct = 2 * Number(trade.fee_bps ?? cfg.takerFeeBps) / 100;
-  const netPnlPct = grossPnlPct - feePct;
-  const initialRiskPct = Number(trade.risk_per_unit) / entry * 100 + feePct;
-  return initialRiskPct > 0 ? netPnlPct / initialRiskPct : 0;
-};
-
-export const evaluateTrade = (trade, closedCandles, cfg) => {
-  const entry = Number(trade.entry);
-  const tp1 = Number(trade.tp1);
-  const initialRisk = Number(trade.risk_per_unit);
-  let activeSl = Number(trade.active_sl);
-  let breakevenArmed = Boolean(trade.breakeven_armed);
-  let mfePct = Number(trade.mfe_pct ?? 0);
-  let maePct = Number(trade.mae_pct ?? 0);
-  let lastChecked = Number(trade.last_checked_bar_close ?? trade.entry_bar_close ?? 0);
-  const createdAt = new Date(trade.created_at).getTime();
-  const bars = closedCandles.filter(c => c.closeTime > lastChecked).sort((a, b) => a.closeTime - b.closeTime);
-  if (!bars.length) return { closed: false, patch: null };
-
-  for (const candle of bars) {
-    const stopHit = candle.low <= activeSl;
-    const targetHit = candle.high >= tp1;
-    // Conservative ordering: if both levels print in the same one-minute bar,
-    // assume the stop happened first. Tick data would be needed to know otherwise.
-    if (stopHit) {
-      maePct = Math.min(maePct, (candle.low - entry) / entry * 100);
-      return closeResult(trade, activeSl, breakevenArmed ? 'BREAKEVEN_STOP' : 'STOP', candle, cfg, mfePct, maePct);
-    }
-    mfePct = Math.max(mfePct, (candle.high - entry) / entry * 100);
-    maePct = Math.min(maePct, (candle.low - entry) / entry * 100);
-    if (targetHit) return closeResult(trade, tp1, 'TP1', candle, cfg, mfePct, maePct);
-
-    // Deterministic closed-bar fade exit: once a trade reached +0.75R, close
-    // at the candle close if it gives back at least 0.50R while still green.
-    // The database outcome and the Telegram instruction therefore stay aligned.
-    const peakR = initialRisk > 0 ? (mfePct / 100 * entry) / initialRisk : 0;
-    const currentR = initialRisk > 0 ? (candle.close - entry) / initialRisk : 0;
-    // v6.9.9: this clause now asks "is exiting HERE still worth it after
-    // real costs" instead of "is raw price still above a raw floor" — see
-    // estimateNetRMultiple above for why that distinction matters.
-    const netCurrentR = estimateNetRMultiple(trade, candle.close, cfg);
-    if (peakR >= 0.75 && peakR - currentR >= 0.50 && netCurrentR > (cfg.fadeMinNetR ?? 0.10)) {
-      return closeResult(trade, candle.close, 'MOMENTUM_FADE', candle, cfg, mfePct, maePct);
-    }
-
-    if (!breakevenArmed && candle.close >= entry + cfg.breakevenAtR * initialRisk) {
-      const costsPct = (2 * cfg.takerFeeBps + cfg.exitSlippageBps) / 100;
-      activeSl = entry * (1 + costsPct / 100);
-      breakevenArmed = true;
-    }
-
-    if (candle.closeTime - createdAt >= cfg.tradeTimeoutMin * 60_000) {
-      return closeResult(trade, candle.close, 'TIMEOUT', candle, cfg, mfePct, maePct);
-    }
-    lastChecked = candle.closeTime;
-  }
-
-  return {
-    closed: false,
-    patch: {
-      active_sl: activeSl,
-      breakeven_armed: breakevenArmed,
-      mfe_pct: mfePct,
-      mae_pct: maePct,
-      last_checked_bar_close: lastChecked,
-    },
-  };
-};
-
-export const closeTradeAtMarket = (trade, rawExit, closeTime, reason, cfg, { mfePct, maePct } = {}) => {
-  const candle = { closeTime };
-  return closeResult(
-    trade,
-    rawExit,
-    reason,
-    candle,
-    cfg,
-    Number(mfePct ?? trade.mfe_pct ?? 0),
-    Number(maePct ?? trade.mae_pct ?? 0),
-  );
-};
-
-
+test('ignores entirely pre-entry candles even when the signal bar is older', () => {
+  const result = evaluateTrade(trade({ entry_bar_close: t - 180_000 }), [bar(-1, { low: 98, high: 103 })], cfg);
+  assert.equal(result.patch, null);
+});
+test('partial entry candle does not reuse pre-entry stop or target extremes', () => {
+  const result = evaluateTrade(trade(), [bar(0, { open: 98, low: 98, high: 103, close: 100.1 })], cfg);
+  assert.equal(result.closed, false);
+  near(result.patch.mfe_pct, 0.1);
+  near(result.patch.mae_pct, 0);
+});
+test('partial entry candle still exits at an observed close below the stop', () => {
+  const result = evaluateTrade(trade(), [bar(0, { open: 100, low: 98, high: 100, close: 98.5 })], cfg);
+  assert.equal(result.patch.exit_reason, 'STOP');
+  near(result.patch.exit_price, 98.5 * 0.9997);
+});
+test('entry on a candle boundary permits that entire candle', () => {
+  const result = evaluateTrade(trade({ created_at: new Date(t).toISOString() }), [bar(0, { low: 98.9 })], cfg);
+  assert.equal(result.patch.exit_reason, 'STOP');
+});
+test('full-bar stop wins when both stop and target touched; excursions end at exit', () => {
+  const result = evaluateTrade(trade(), [bar(1, { low: 95, high: 104 })], cfg);
+  assert.equal(result.patch.exit_reason, 'STOP');
+  near(result.patch.exit_price, 99 * 0.9997);
+  near(result.patch.mae_pct, -1);
+  near(result.patch.mfe_pct, 0);
+});
+test('gap below stop fills at the opening price plus adverse slippage', () => {
+  const result = evaluateTrade(trade(), [bar(1, { open: 98, high: 98.2, low: 97.8, close: 98.1 })], cfg);
+  near(result.patch.exit_price, 98 * 0.9997);
+  assert.ok(result.patch.exit_price < 98.2);
+});
+test('TP1 closes the entire paper trade and caps its recorded favorable excursion', () => {
+  const result = evaluateTrade(trade(), [bar(1, { high: 104, low: 100, close: 103 })], cfg);
+  assert.equal(result.closed, true);
+  assert.equal(result.patch.exit_reason, 'TP1');
+  near(result.patch.mfe_pct, 2);
+  near(result.patch.net_pnl_pct, 1.8694);
+  assert.equal(result.patch.setup.exitExecutionModel, EXECUTION_MODEL);
+});
+test('tight stop does not arm breakeven above the current market', () => {
+  const result = evaluateTrade(trade({ active_sl: 99.88, risk_per_unit: 0.12 }),
+    [bar(1, { high: 100.105, low: 99.99, close: 100.10 })], cfg);
+  assert.equal(result.patch.breakeven_armed, false);
+  assert.equal(result.patch.active_sl, 99.88);
+});
+test('breakeven uses the stored fee and exact slippage formula; gap losses remain possible', () => {
+  const original = trade({ active_sl: 99.88, risk_per_unit: 0.12, fee_bps: 7 });
+  const result = evaluateTrade(original, [bar(1, { high: 100.21, low: 100, close: 100.2 })], cfg);
+  assert.equal(result.patch.breakeven_armed, true);
+  const stop = result.patch.active_sl;
+  near(stop, 100 * 1.0014 / 0.9997);
+  const filled = evaluateTrade({ ...original, ...result.patch }, [bar(2, { open: 100.2, high: 100.2, low: 100.15, close: 100.16 })], cfg);
+  assert.equal(filled.patch.exit_reason, 'BREAKEVEN_STOP');
+  near(filled.patch.net_pnl_pct, 0);
+  const gap = evaluateTrade({ ...original, ...result.patch }, [bar(2, { open: 99.8, high: 99.9, low: 99.7, close: 99.8 })], cfg);
+  assert.equal(gap.patch.outcome, 'LOSS');
+});
+test('never lowers an existing stop when arming breakeven', () => {
+  const result = evaluateTrade(trade({ active_sl: 100.5 }), [bar(1, { open: 100.6, low: 100.6, high: 101, close: 100.9 })], cfg);
+  assert.equal(result.patch.active_sl, 100.5);
+});
+test('momentum fade requires positive net return after costs', () => {
+  const original = trade({ active_sl: 99.84, risk_per_unit: 0.16, mfe_pct: 0.2 });
+  const result = evaluateTrade(original, [bar(1, { high: 100.05, low: 100, close: 100.02 })], cfg);
+  assert.equal(result.closed, false);
+  const profitable = evaluateTrade(trade({ mfe_pct: 1.2 }), [bar(1, { high: 100.6, low: 100.4, close: 100.5 })], cfg);
+  assert.equal(profitable.patch.exit_reason, 'MOMENTUM_FADE');
+  assert.ok(profitable.patch.r_multiple > 0.1);
+});
+test('timeout closes at the observed close; replay ignores already checked bars', () => {
+  const original = trade();
+  const result = evaluateTrade(original, [bar(121)], cfg);
+  assert.equal(result.patch.exit_reason, 'TIMEOUT');
+  assert.equal(evaluateTrade({ ...original, last_checked_bar_close: bar(1).closeTime }, [bar(1)], cfg).patch, null);
+});
+test('market exits use saved fees and preserve setup metadata', () => {
+  const result = closeTradeAtMarket(trade({ fee_bps: 7, setup: { setupType: 'LIQUID_TREND' } }), 101, t + 120_000, 'MANIPULATION_EXIT', cfg);
+  near(result.patch.net_pnl_pct, 0.8297);
+  assert.equal(result.patch.setup.setupType, 'LIQUID_TREND');
+});

@@ -1,3 +1,4 @@
+import { EXECUTION_MODEL } from './trade-evaluator.js';
 import { mean } from './indicators.js';
 
 const SETUP_PROFILES = Object.freeze({
@@ -274,6 +275,17 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
   const entry = Number.isFinite(context.depth.estimatedBuyPrice)
     ? context.depth.estimatedBuyPrice
     : context.depth.bestAsk * (1 + cfg.maxEntrySlippageBps / 10_000);
+  const emaReference = Number.isFinite(features.ema20)
+    ? features.ema20 : last.close - features.extensionAtr * features.atr;
+  const entryCeiling = Math.min(
+    emaReference + extensionLimit * features.atr,
+    candidate.peakPrice + (strongFlowContinuation ? 0.55 : 0.35) * features.atr,
+    candidate.reclaimed ? candidate.reclaimClose + 0.25 * atrAtDetection : Infinity,
+  );
+  const entryFloor = candidate.breakoutLevel - profile.retestCloseAtr * atrAtDetection;
+  if (!(entry > 0) || entry > entryCeiling || entry < entryFloor) {
+    return reject(next, 'live entry outside valid reclaim zone');
+  }
   let stop = Math.min(next.retestLow - 0.10 * features.atr, candidate.breakoutLevel - 0.20 * features.atr);
   if (entry - stop < 0.60 * features.atr) stop = entry - 0.60 * features.atr;
   let riskPerUnit = entry - stop;
@@ -295,6 +307,19 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
   const netRR = (rewardPct - costPct) / (riskPct + costPct);
   if (netRR < cfg.minNetRR) return reject(next, `net R:R ${netRR.toFixed(2)} below ${cfg.minNetRR}`);
 
+  // Upper manual-entry price must preserve the original TP1/stop net R:R.
+  const feeFraction = 2 * cfg.takerFeeBps / 10_000;
+  const slipFactor = 1 - cfg.exitSlippageBps / 10_000;
+  const rewardCeiling = (tp1 + cfg.minNetRR * stop) * slipFactor
+    / ((1 + cfg.minNetRR) * (1 + feeFraction));
+  const manualEntryMax = Math.min(entryCeiling, rewardCeiling);
+  const manualEntryMin = Math.max(entryFloor, stop / (1 - cfg.minStopPctFloor / 100));
+  const priceTolerance = entry * 1e-12;
+  if (entry > manualEntryMax + priceTolerance || entry < manualEntryMin - priceTolerance) {
+    return reject(next, 'live entry outside net reward/risk zone');
+  }
+  const observedAt = Number(context.depth.measuredAt ?? Date.now());
+
   return {
     action: 'SIGNAL',
     candidate: { ...next, state: 'SIGNALED' },
@@ -313,6 +338,11 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
       fee_bps: cfg.takerFeeBps,
       entry_slippage_bps: entryImpactBps,
       setup: {
+        executionModel: EXECUTION_MODEL,
+        entryObservedAt: observedAt,
+        entryExpiresAt: observedAt + Number(cfg.manualEntryTtlSec ?? 30) * 1_000,
+        entryMin: manualEntryMin,
+        entryMax: manualEntryMax,
         breakoutLevel: candidate.breakoutLevel,
         structureLevel: candidate.structureLevel,
         setupType: candidate.setupType,
