@@ -57,6 +57,7 @@ export const loadConfig = (env = process.env) => {
     supabaseUrl: required(env, 'SUPABASE_URL').replace(/\/+$/, ''),
     supabaseKey: required(env, 'SUPABASE_SERVICE_ROLE_KEY'),
     paperMode: boolFrom(env, 'PAPER_MODE', true),
+    paper100Test: boolFrom(env, 'PAPER_100_TEST', false),
     port: numberFrom(env, 'PORT', 3000, { min: 1, max: 65535 }),
     scanIntervalMs: numberFrom(env, 'SCAN_INTERVAL_MS', 30_000, { min: 15_000, max: 300_000 }),
     tradeMonitorIntervalMs: numberFrom(env, 'TRADE_MONITOR_INTERVAL_MS', 10_000, { min: 5_000, max: 60_000 }),
@@ -203,7 +204,15 @@ export const loadConfig = (env = process.env) => {
     btcBiasBlockLongs: boolFromWarn(env, 'BTC_BIAS_BLOCK_LONGS', false),
   };
 
+  if (cfg.paper100Test) {
+    if (!cfg.paperMode) throw new Error('PAPER_100_TEST requires PAPER_MODE=true; no live execution is implemented');
+    // Fixed experiment policy; old Railway overrides cannot weaken its caps.
+    cfg.maxOpenTrades = 1;
+    cfg.maxTradesPerDay = 5;
+    cfg.maxConsecutiveLosses = 3;
+    cfg.scanConcurrency = 1;
+    cfg.assumedOrderNotionalUsd = 200;
+  }
   return Object.freeze(cfg);
 };
-
 

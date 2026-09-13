@@ -104,6 +104,7 @@ try {
   alphaMover.start();
   await telegram.send(`🟢 <b>NEXIO v${APP_VERSION} started</b>\n` +
     `Mode: ${cfg.paperMode ? 'PAPER' : 'ALERT-ONLY'}\n` +
+    (cfg.paper100Test ? `🧪 VIRTUAL $100 TEST ON · 1 position · planned risk ≤$1 · /paperstats · no Binance orders\n` : '') +
     `[FUTURES] Closed 1m candles · setup-aware retest · reclaim/book recovery\n` +
     `BTC: ${engine.btc.regime} · Universe: ${engine.universe.length}\n` +
     `BTC gate: HTF trend + ${cfg.enableRealtimeShock ? `${cfg.realtimeShockDropPct}%/${Math.round(cfg.realtimeShockWindowMs / 1000)}s realtime shock guard` : 'realtime guard disabled'}\n` +

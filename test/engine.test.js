@@ -1076,3 +1076,29 @@ test('failed insertion releases the entry-delivery monitor guard', async () => {
   await assert.rejects(x.engine.scanSymbol({ symbol: 'ETHUSDT' }), /insert down/);
   assert.equal(x.engine.pendingEntrySymbols.size, 0);
 });
+
+test('paper FIRE is sized and timestamped before persistence; a missing filter never creates it', async () => {
+  const x = deliveryFixture();
+  x.engine.cfg = { ...x.engine.cfg, paper100Test: true, paperMode: true };
+  x.engine.store.riskSnapshot = async () => ({ allowed: true, reasons: [], balance: 100, riskBudget: 1 });
+  x.engine.symbolInfo = new Map([['ETHUSDT', { filters: [
+    { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001', maxQty: '1000' },
+    { filterType: 'MIN_NOTIONAL', notional: '5' },
+    { filterType: 'PRICE_FILTER', tickSize: '0.001' },
+  ] }]]);
+  const result = await x.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(result.action, 'SIGNAL');
+  assert.equal(x.created.length, 1);
+  const trade = x.created[0], p = trade.setup.paperTest;
+  assert.equal(p.id, 'paper100-runner-v1');
+  assert.ok(Number.isFinite(p.ledger[0].time));
+  assert.equal(p.ledger[0].time, Date.parse(trade.created_at));
+  assert.ok(p.riskUsd <= 1);
+  const missing = deliveryFixture();
+  missing.engine.cfg = x.engine.cfg;
+  missing.engine.store.riskSnapshot = x.engine.store.riskSnapshot;
+  const blocked = await missing.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(blocked.action, 'RISK_BLOCK');
+  assert.equal(missing.created.length, 0);
+  assert.equal(missing.engine.gateCounts.PAPER_SIZE_BLOCK, 1);
+});

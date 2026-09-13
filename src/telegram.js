@@ -1,5 +1,6 @@
 import { requestJson } from './http.js';
 import { escapeHtml, formatPrice, gstTime, log, sleep } from './util.js';
+import { isPaperTest } from './paper-account.js';
 
 const confidenceBar = score => {
   const filled = Math.max(0, Math.min(10, Math.round(Number(score) || 0)));
@@ -53,6 +54,18 @@ export class Telegram {
   }
 
   signalMessage(trade, btc) {
+    if (isPaperTest(trade)) {
+      const p = trade.setup.paperTest;
+      return `🧪 <b>VIRTUAL $100 ENTRY — ${escapeHtml(trade.symbol)}</b>\n` +
+        `<b>SIMULATION ONLY — do not enter manually; no Binance order placed.</b>\n` +
+        `Entry: $${formatPrice(trade.entry)} · Stop: $${formatPrice(trade.initial_sl)}\n` +
+        `Quantity: ${p.quantity} · Notional: $${p.notionalUsd.toFixed(2)} · 2x margin estimate: $${p.marginUsd.toFixed(2)}\n` +
+        `Planned risk including assumed costs: $${p.riskUsd.toFixed(2)} (gaps can exceed this)\n` +
+        `Take-profit trigger: $${formatPrice(p.takePrice)} (+1.2 planned net R before partial close)\n` +
+        (p.split ? `Close ${(100 * p.partialQty / p.quantity).toFixed(1)}%; protect and trail the remainder.\n`
+          : `Size too small for a valid split: close 100% at the trigger.\n`) +
+        `Track with /paperstats · Original TP1 is replaced for this experiment.\n⏰ ${gstTime()} GST`;
+    }
     const s = trade.setup ?? {};
     const score = Number(trade.setup_score ?? 0);
     return `🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨\n` +
@@ -87,6 +100,15 @@ export class Telegram {
       `If price is already at/below it, close instead of placing a stop above the market.\n` +
       `Breakeven uses the paper entry and assumed costs; your actual result may differ.\n` +
       `⏰ ${gstTime()} GST`;
+  }
+
+  paperPartialMessage(trade) {
+    const p = trade.setup.paperTest;
+    return `🧪 <b>PAPER PARTIAL — ${escapeHtml(trade.symbol)}</b>\n` +
+      `Simulated partial quantity: ${p.partialQty} · Remaining: ${p.remainingQty}\n` +
+      `Realized cash change so far (all entry fees included): $${p.netUsd.toFixed(2)}\n` +
+      `Runner stop: $${formatPrice(trade.active_sl)}\n` +
+      `<i>Simulation only. Stop assumes costs; gaps can still lose money. No Binance order placed.</i>`;
   }
 
   alphaIgnitionMessage(token, qualification, move, security) {
@@ -133,6 +155,15 @@ export class Telegram {
   }
 
   outcomeMessage(trade) {
+    if (isPaperTest(trade)) {
+      const p = trade.setup.paperTest;
+      return `🧪 <b>PAPER CLOSED — ${escapeHtml(trade.symbol)}</b>\n` +
+        `Reason: ${escapeHtml(trade.exit_reason)} · Partial taken: ${p.partialDone ? 'yes' : 'no'}\n` +
+        `All exits weighted average: $${formatPrice(trade.exit_price)}\n` +
+        `Net result: $${p.netUsd.toFixed(2)} · ${Number(trade.r_multiple).toFixed(2)}R\n` +
+        `Includes assumed entry/exit fees and slippage; excludes funding.\n` +
+        `Simulation only · /paperstats · ${gstTime(new Date(trade.closed_at))} GST`;
+    }
     const icon = trade.outcome === 'WIN' ? '✅' : trade.outcome === 'LOSS' ? '❌' : '➖';
     const action = trade.exit_reason === 'TP1' ? 'TP1 reached—take profit and close the paper position.'
       : trade.exit_reason === 'STOP' || trade.exit_reason === 'BREAKEVEN_STOP' ? 'Stop reached—close the position.'

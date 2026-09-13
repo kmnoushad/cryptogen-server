@@ -1,3 +1,4 @@
+import { isPaperTest, evaluatePaperTrade, closePaperTrade } from './paper-account.js';
 export const EXECUTION_MODEL = 'closed-bar-v2';
 
 const executionPrice = (level, exitSlippageBps) => level * (1 - exitSlippageBps / 10_000);
@@ -50,6 +51,7 @@ const estimateNetRMultiple = (trade, rawPrice, cfg) => {
 };
 
 export const evaluateTrade = (trade, closedCandles, cfg) => {
+  if (isPaperTest(trade)) return evaluatePaperTrade(trade, closedCandles);
   const entry = Number(trade.entry);
   const tp1 = Number(trade.tp1);
   const initialRisk = Number(trade.risk_per_unit);
@@ -131,6 +133,7 @@ export const evaluateTrade = (trade, closedCandles, cfg) => {
 };
 
 export const closeTradeAtMarket = (trade, rawExit, closeTime, reason, cfg, { mfePct, maePct } = {}) => {
+  if (isPaperTest(trade)) return closePaperTrade(trade, rawExit, closeTime, reason);
   const candle = { closeTime };
   return closeResult(
     trade,
@@ -142,5 +145,3 @@ export const closeTradeAtMarket = (trade, rawExit, closeTime, reason, cfg, { mfe
     Number(maePct ?? trade.mae_pct ?? 0),
   );
 };
-
-
