@@ -259,13 +259,21 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
     if (last.close > waitPriceCeiling) {
       return reject(next, 'execution recovery became extended after reclaim');
     }
-    const flowStillPositive = features.buyRatio1 >= 0.50 && features.deltaRatio1 >= 0;
-    if (!executionHealthy || !flowStillPositive) {
+    // A historical reclaim establishes structure, not permanent permission to
+    // enter. Recheck the same profile-specific conditions on the current bar.
+    // Do not demand another breakout candle or reset the original wait deadline.
+    const continuationHealthy = flowConfirmed && momentumConfirmed
+      && volumeHealthy && notExtended && oiConfirmed;
+    if (!executionHealthy || !continuationHealthy) {
       return {
         action: 'HOLD',
         candidate: next,
         reason: [
-          !flowStillPositive && 'post-reclaim taker flow weak',
+          !flowConfirmed && 'post-reclaim taker flow weak',
+          !momentumConfirmed && 'post-reclaim trend momentum faded',
+          !volumeHealthy && 'post-reclaim volume unhealthy',
+          !notExtended && 'post-reclaim entry extended',
+          !oiConfirmed && 'post-reclaim OI contracting',
           !executionHealthy && 'spread/depth/impact stability waiting',
         ].filter(Boolean).join(', '),
       };
@@ -339,6 +347,8 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
       entry_slippage_bps: entryImpactBps,
       setup: {
         executionModel: EXECUTION_MODEL,
+        entryValidationModel: 'revalidated-reclaim-v1',
+        entryRevalidatedAfterWait: Boolean(candidate.reclaimed),
         entryObservedAt: observedAt,
         entryExpiresAt: observedAt + Number(cfg.manualEntryTtlSec ?? 30) * 1_000,
         entryMin: manualEntryMin,
@@ -369,5 +379,4 @@ export const advanceCandidate = (candidate, features, context, cfg) => {
     },
   };
 };
-
 

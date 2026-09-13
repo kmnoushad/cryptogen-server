@@ -2,6 +2,88 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { advanceCandidate, armCandidate } from '../src/strategy.js';
 
+const waitingCandidate = {
+  symbol: 'TESTUSDT', setupType: 'LIQUID_TREND', state: 'RECLAIMED_WAIT_BOOK',
+  detectedBarClose: 60_000, expiresBarClose: 1_500_000, breakoutLevel: 100.8,
+  peakPrice: 102, impulseAvgQuoteVolume: 1000, atrAtDetection: 1, setupScore: 8,
+  retested: true, retestLow: 101, retestBarClose: 120_000, reclaimed: true,
+  reclaimBarClose: 180_000, reclaimClose: 101.7, reclaimLow: 101.1,
+  executionWaitUntil: 360_000, candidateLow: 101, barsObserved: 3,
+};
+const continuationFeatures = {
+  last: { closeTime: 240_000, open: 101.6, low: 101, high: 101.8, close: 101.4, quoteVolume: 1000 },
+  previous: { high: 101.9 }, atr: 1, ret1m: -0.2, ret3m: 0.1, ret5m: 0.1,
+  // Continued buying need not produce a second fresh breakout candle.
+  green: false, bodyPct: 25, upperWickPct: 25, buyRatio1: 0.60,
+  buyRatio3: 0.55, buyRatio15: 0.54, deltaRatio1: 0.20,
+  quoteVolumeRatio: 1, extensionAtr: 0.4, ema20: 101, ema20Slope5Pct: 0.03,
+};
+const continuationContext = {
+  risk: { terminalRisk: false, entryBlocked: false, score: 0, reasons: [] },
+  oi: { changePct: 0.4 },
+  depth: { estimatedBuyPrice: 101.45, bestAsk: 101.45, spreadBps: 4,
+    bidNotional05: 300000, askNotional05: 250000, imbalance: 1, entryImpactBps: 0 },
+};
+
+test('historical reclaim cannot authorize FIRE after momentum, volume, flow and OI deteriorate', () => {
+  const faded = { ...continuationFeatures, ema20Slope5Pct: -0.10, ema20: 101.5,
+    ret5m: -0.2, quoteVolumeRatio: 0.3, buyRatio1: 0.50, buyRatio3: 0.45,
+    buyRatio15: 0.45, deltaRatio1: 0 };
+  const result = advanceCandidate(waitingCandidate, faded,
+    { ...continuationContext, oi: { changePct: -2 } }, cfg);
+  assert.equal(result.action, 'HOLD');
+  for (const reason of ['taker flow weak', 'trend momentum faded', 'volume unhealthy', 'OI contracting']) {
+    assert.ok(result.reason.includes(reason), result.reason);
+  }
+  assert.equal(result.trade, undefined);
+  assert.equal(result.candidate.executionWaitUntil, waitingCandidate.executionWaitUntil);
+});
+
+for (const [name, overrides, contextOverride, reason] of [
+  ['flow', { buyRatio1: 0.50, deltaRatio1: 0 }, {}, 'taker flow weak'],
+  ['multi-bar flow', { buyRatio3: 0.49 }, {}, 'taker flow weak'],
+  ['momentum', { ema20Slope5Pct: -0.1 }, {}, 'trend momentum faded'],
+  ['volume collapse', { quoteVolumeRatio: 0.3 }, {}, 'volume unhealthy'],
+  ['volume climax', { quoteVolumeRatio: 4 }, {}, 'volume unhealthy'],
+  ['extension', { extensionAtr: 2 }, {}, 'entry extended'],
+  ['OI contraction', {}, { oi: { changePct: -2 } }, 'OI contracting'],
+  ['missing OI', {}, { oi: {} }, 'OI contracting'],
+]) {
+  test(`waiting reclaim rechecks ${name} independently`, () => {
+    const result = advanceCandidate(waitingCandidate, { ...continuationFeatures, ...overrides },
+      { ...continuationContext, ...contextOverride }, cfg);
+    assert.equal(result.action, 'HOLD');
+    assert.ok(result.reason.includes(reason), result.reason);
+  });
+}
+
+test('waiting candidate may recover without another breakout, but its deadline never renews', () => {
+  const held = advanceCandidate(waitingCandidate,
+    { ...continuationFeatures, quoteVolumeRatio: 0.3 }, continuationContext, cfg);
+  const recovery = { ...continuationFeatures,
+    last: { ...continuationFeatures.last, closeTime: 300_000 } };
+  const result = advanceCandidate(held.candidate, recovery, continuationContext, cfg);
+  assert.equal(result.action, 'SIGNAL');
+  assert.equal(result.trade.setup.entryValidationModel, 'revalidated-reclaim-v1');
+  assert.equal(result.trade.setup.entryRevalidatedAfterWait, true);
+  const expired = advanceCandidate(held.candidate,
+    { ...recovery, last: { ...recovery.last, closeTime: 420_000 } }, continuationContext, cfg);
+  assert.equal(expired.action, 'REJECT');
+  assert.match(expired.reason, /execution book did not recover/);
+});
+
+for (const setupType of ['FAST_BREAKOUT', 'STEADY_MOMENTUM']) {
+  test(`${setupType} wait also rechecks original flow, volume and OI requirements`, () => {
+    const candidate = { ...waitingCandidate, setupType };
+    assert.equal(advanceCandidate(candidate, continuationFeatures, continuationContext, cfg).action, 'SIGNAL');
+    for (const [features, contextNow] of [
+      [{ ...continuationFeatures, buyRatio1: 0.5, deltaRatio1: 0 }, continuationContext],
+      [{ ...continuationFeatures, quoteVolumeRatio: 0.7 }, continuationContext],
+      [continuationFeatures, { ...continuationContext, oi: { changePct: -2 } }],
+    ]) assert.equal(advanceCandidate(candidate, features, contextNow, cfg).action, 'HOLD');
+  });
+}
+
 const cfg = {
   maxEntrySlippageBps: 8,
   takerFeeBps: 5,

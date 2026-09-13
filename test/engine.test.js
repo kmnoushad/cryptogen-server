@@ -1077,6 +1077,19 @@ test('failed insertion releases the entry-delivery monitor guard', async () => {
   assert.equal(x.engine.pendingEntrySymbols.size, 0);
 });
 
+test('waiting reclaim with deteriorated OI cannot persist or send FIRE', async () => {
+  const x = deliveryFixture();
+  const healthyContext = x.engine.context;
+  x.engine.context = async () => ({ ...await healthyContext(), oi: { changePct: -2 } });
+  const result = await x.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(result.action, 'HOLD');
+  assert.match(result.reason, /post-reclaim OI contracting/);
+  assert.equal(x.created.length, 0);
+  assert.equal(x.messages.length, 0);
+  assert.equal(x.engine.metrics.signaled, 0);
+  assert.equal(x.engine.candidates.has('ETHUSDT'), true);
+});
+
 test('paper FIRE is sized and timestamped before persistence; a missing filter never creates it', async () => {
   const x = deliveryFixture();
   x.engine.cfg = { ...x.engine.cfg, paper100Test: true, paperMode: true };
