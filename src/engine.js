@@ -5,6 +5,7 @@ import { advanceCandidate, armCandidate } from './strategy.js';
 import { closeTradeAtMarket, evaluateTrade } from './trade-evaluator.js';
 import { escapeHtml, formatPrice, gstTime, log, mapLimit, sleep } from './util.js';
 import { APP_VERSION } from './version.js';
+import { sizePaperTrade, isPaperTest, PAPER_TEST_ID } from './paper-account.js';
 
 export const FUTURES_EXCLUDED = new Set([
   'BTCUSDT',
@@ -468,6 +469,7 @@ export class Engine {
 
   async refreshUniverse() {
     const [info, tickers] = await Promise.all([this.binance.exchangeInfo(), this.binance.ticker24h()]);
+    this.symbolInfo = new Map((info.symbols ?? []).map(s => [s.symbol, s]));
     const now = Date.now();
     const snapshotAge = this.tickerSnapshot.ts ? now - this.tickerSnapshot.ts : 0;
     const acceleration = new Map();
@@ -736,6 +738,15 @@ export class Engine {
 
     const quoteIsStale = () => Date.now() - decision.trade.setup.entryObservedAt
       > (this.cfg.maxEntryQuoteAgeMs ?? 5_000);
+    if (this.cfg.paper100Test) {
+      try {
+        decision.trade = sizePaperTrade(decision.trade, limits, this.symbolInfo?.get(symbol), this.cfg);
+      } catch (error) {
+        this.countGate('PAPER_SIZE_BLOCK');
+        this.candidates.delete(symbol);
+        return { action: 'RISK_BLOCK', reason: error.message };
+      }
+    }
     if (quoteIsStale()) {
       this.countGate('STALE_ENTRY_QUOTE');
       return { action: 'HOLD', reason: 'entry quote expired before persistence' };
@@ -857,7 +868,7 @@ export class Engine {
         const result = evaluateTrade(trade, candles, this.cfg);
         let updated = trade;
         if (result.patch) {
-          if (!result.closed && !trade.breakeven_armed && result.patch.breakeven_armed) {
+          if (!isPaperTest(trade) && !result.closed && !trade.breakeven_armed && result.patch.breakeven_armed) {
             result.patch.setup = { ...trade.setup, stopAlertPending: true };
           }
           // Save deterministic exits/progress before an optional live-risk request
@@ -899,6 +910,13 @@ export class Engine {
           }
         }
         // Retry after restarts/send failures, even when there is no new candle.
+        if (updated.status !== 'CLOSED' && updated.setup?.paperTest?.partialAlertPending) {
+          await this.telegram.send(this.telegram.paperPartialMessage(updated));
+          updated = await this.store.updateTrade(trade.id, {
+            setup: { ...updated.setup, paperTest: { ...updated.setup.paperTest, partialAlertPending: false } },
+          });
+          if (!updated) throw new Error('Paper partial acknowledgement returned no row');
+        }
         if (updated.status !== 'CLOSED' && updated.setup?.stopAlertPending) {
           await this.telegram.send(this.telegram.stopUpdateMessage(updated));
           await this.store.updateTrade(trade.id, {
@@ -1027,7 +1045,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /diagnostics /audit /stats /events /scan /alphascan /pause /resume /help');
+        '/version /status /why /btc /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1042,7 +1060,9 @@ export class Engine {
         `BTC: ${escapeHtml(this.btc.regime)} ${this.btc.allowed ? '✅' : '⛔'}${btcTechnicalSummary(this.btc)}\n` +
         `Universe: ${this.universe.length} · Candidates: ${this.candidates.size}\n` +
         `Open: ${risk.openTrades} · Today: ${risk.tradesToday}/${this.cfg.maxTradesPerDay}\n` +
-        `Daily PnL: ${risk.dailyPnlPct.toFixed(2)}% · Weekly: ${risk.weeklyPnlPct.toFixed(2)}%\n` +
+        (this.cfg.paper100Test
+          ? `PAPER $100 test · Cash ledger: $${risk.balance.toFixed(2)} (excludes open PnL)\nDaily realized: $${risk.daily.toFixed(2)} · Rolling 7d: $${risk.weekly.toFixed(2)}\n`
+          : `Daily PnL: ${risk.dailyPnlPct.toFixed(2)}% · Weekly: ${risk.weeklyPnlPct.toFixed(2)}%\n`) +
         `Paused: ${this.paused ? 'YES' : 'NO'} · Last scan: ${this.lastScanDurationMs}ms\n` +
         `Engine: ${this.metrics.scans} scans · ${this.metrics.armed} armed · ${this.metrics.signaled} FIRE · ${this.metrics.dataErrors} errors\n` +
         `Alpha: ${this.alpha?.health().enabled ? `✅ ${this.alpha.active().length} active` : 'disabled'}\n` +
@@ -1156,6 +1176,21 @@ export class Engine {
         `${line('[FUTURES]', audit.futures)}\n${line('[ALPHA]', audit.alpha)}\n\n` +
         `<b>Latest closes:</b>\n${recent.length ? recent.join('\n') : 'No monitored trades have closed yet.'}\n\n` +
         `<i>Only bot-issued, database-monitored entries are counted.</i>`);
+    } else if (text === '/paperstats' || text === '/statsnew' || (text === '/stats' && this.cfg.paper100Test)) {
+      const s = await this.store.paperTestAccount();
+      const fmt = (value, suffix = '') => value == null ? 'N/A' : Number.isFinite(value) ? `${value.toFixed(2)}${suffix}` : '∞';
+      await this.telegram.send(`🧪 <b>VIRTUAL $100 — PARTIAL/RUNNER TEST</b>\n` +
+        `Mode: ${this.cfg.paper100Test ? 'enabled' : 'disabled; history retained'} · No Binance orders\n` +
+        `Cohort: ${PAPER_TEST_ID}\n` +
+        `Cash ledger: $${s.balance.toFixed(2)} · Realized change: $${s.realized.toFixed(2)}\n` +
+        `Open: ${s.open} (unrealized PnL excluded) · Today: ${s.today}/5\n` +
+        `Closed: ${s.total} · ${s.wins}W/${s.losses}L/${s.scratches} scratch\n` +
+        `Win rate: ${fmt(s.winRate, '%')} · Dollar PF: ${fmt(s.profitFactor)}\n` +
+        `Expectancy: ${fmt(s.expectancyR, 'R')} · Realized-ledger drawdown: $${s.drawdown.toFixed(2)}\n` +
+        `Daily realized: $${s.daily.toFixed(2)} · Rolling 7d: $${s.weekly.toFixed(2)}\n` +
+        `Limits: ${escapeHtml(s.reasons.join('; ') || 'clear')}\n` +
+        `<i>Estimated fees/slippage included; funding and intrabar equity drawdown excluded. ` +
+        `Closed-bar simulation, not exchange fills or proof of profitability. 100 trades alone do not validate an edge.</i>`);
     } else if (text === '/stats') {
       const s = await this.store.statistics(200);
       const pf = Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : '∞';

@@ -1,5 +1,6 @@
 import { HttpError, requestJson } from './http.js';
 import { consecutiveLosses, dubaiDayBounds, sleep } from './util.js';
+import { PAPER_TEST_ID, paperAccount } from './paper-account.js';
 
 // PostgREST "table missing" signatures: 404 from the REST router, PGRST205
 // (table not in schema cache), 42P01 (undefined table).
@@ -86,9 +87,10 @@ export class Store {
     ]);
   }
 
-  recentClosed(limit = 200) {
+  recentClosed(limit = 200, excludePaperTest = false) {
     return this.get('nexio_trades', [
       ['status', 'eq.CLOSED'],
+      ...(excludePaperTest ? [['or', `(setup->paperTest->>id.is.null,setup->paperTest->>id.neq.${PAPER_TEST_ID})`]] : []),
       ['select', '*'],
       ['order', 'closed_at.desc'],
       ['limit', String(limit)],
@@ -255,6 +257,15 @@ export class Store {
   }
 
   async riskSnapshot(cfg, now = new Date()) {
+    if (cfg.paper100Test) {
+      const [account, open] = await Promise.all([this.paperTestAccount(now), this.listOpenTrades()]);
+      const reasons = [...account.reasons];
+      if (open.length) reasons.push('paper global one-position limit (includes older open trades)');
+      return { ...account, allowed: reasons.length === 0, reasons,
+        day: dubaiDayBounds(now).label, tradesToday: account.today,
+        dailyPnlPct: account.daily, weeklyPnlPct: account.weekly,
+        consecutiveLosses: account.consecutive, openTrades: open.length };
+    }
     const day = dubaiDayBounds(now);
     const weekStart = new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString();
     const [openedToday, closedToday, weekly, open, recent] = await Promise.all([
@@ -319,8 +330,25 @@ export class Store {
     };
   }
 
+  async paperTestAccount(now = new Date()) {
+    // PostgREST responses are capped; page the entire immutable experiment,
+    // never derive the virtual balance from just the most recent 200 trades.
+    const rows = [];
+    for (let offset = 0; ; offset += 500) {
+      const page = await this.get('nexio_trades', [
+        ['setup->paperTest->>id', `eq.${PAPER_TEST_ID}`], ['status', 'neq.CANCELLED'],
+        ['select', 'id,status,setup,created_at,closed_at,r_multiple'],
+        ['order', 'created_at.asc,id.asc'], ['offset', String(offset)], ['limit', '500'],
+      ]);
+      if (!Array.isArray(page)) throw Error('Paper account query returned invalid data');
+      rows.push(...page);
+      if (page.length < 500) break;
+    }
+    return paperAccount(rows, now);
+  }
+
   async statistics(limit = 200) {
-    const trades = await this.recentClosed(limit);
+    const trades = await this.recentClosed(limit, true);
     const wins = trades.filter(t => t.outcome === 'WIN');
     const losses = trades.filter(t => t.outcome === 'LOSS');
     const scratches = trades.filter(t => t.outcome === 'SCRATCH');
