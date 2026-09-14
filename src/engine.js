@@ -1027,6 +1027,7 @@ export class Engine {
       btcBias: this.btcBias?.health() ?? { enabled: false },
       btcRecorder: this.btcRecorder?.health() ?? { enabled: false },
       fastMover: this.fastMover?.health() ?? { enabled: false },
+      pumpFade: this.pumpFade?.health() ?? { enabled: false },
       alphaMover: this.alphaMover?.health() ?? { enabled: false },
     };
   }
@@ -1050,6 +1051,12 @@ export class Engine {
       lines.push(`Trending mover: ${trending.metrics?.trendingAlerts ?? 0} alerts/${trending.metrics?.trendingTriggers ?? 0} triggers · ${trending.trackedSymbols ?? 0} tracked`);
     }
     return lines.join('\n');
+  }
+
+  pumpFadeStatusLine() {
+    const h = this.pumpFade?.health();
+    if (!h?.enabled) return 'Pump fade: disabled';
+    return `Pump fade: ${h.lastError ? '⚠️ ' + escapeHtml(h.lastError) : h.lastPollAt ? '✅ scanning' : 'warming up'} · ${h.alerts} warnings · ${h.checked} checks · last poll ${h.lastPollAt ?? 'pending'} · alerts only`;
   }
 
   // /why variant: the per-tier status lines plus the top-2 suppression reasons
@@ -1094,6 +1101,7 @@ export class Engine {
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
         `BTC gate: HTF trend + realtime ${this.cfg.realtimeShockDropPct}%/${Math.round(this.cfg.realtimeShockWindowMs / 1000)}s shock guard\n` +
         `Recovery: ${paperRecoveryEnabled(this.cfg) ? 'virtual-$100 only; BTC recovery + fresh liquid-alt breadth' : 'disabled'}\n` +
+        `Pump fade: ${this.cfg.enablePumpFadeAlerts ? 'downside warning alerts enabled' : 'disabled'}\n` +
         `Calendar: live Finnhub high-impact US reminders\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/status') {
@@ -1116,6 +1124,7 @@ export class Engine {
         `${this.eventGuardStatusLine()}\n` +
         `Realtime BTC: ${!shockHealth.enabled ? 'disabled' : shockHealth.blocked ? `⛔ SHOCK ${Number(shockHealth.lastShockDropPct).toFixed(2)}%` : shockHealth.connected && !shockHealth.stale ? '✅ connected' : '⚠️ reconnecting · REST gate active'}\n` +
         `${this.fastMoverStatusLine()}\n` +
+        `${this.pumpFadeStatusLine()}\n` +
         `${this.alphaMoverStatusLine()}\n` +
         `${this.btcBiasStatusLine()}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
@@ -1154,6 +1163,7 @@ export class Engine {
         `<b>Top candidate REJECT reasons:</b>\n${linesOf(rejectTop, 'No candidate rejections since restart.')}\n\n` +
         `<b>Active candidates (${this.candidates.size}):</b>\n${candidateLines}\n\n` +
         `${this.fastMoverWhyLines().join('\n')}\n` +
+        `${this.pumpFadeStatusLine()}\n` +
         `${this.alphaMoverStatusLine()}\n` +
         `<i>Gate counts are internal evaluations, not missed guaranteed trades.</i>`);
     } else if (text === '/diagnostics' || text === '/diag') {
