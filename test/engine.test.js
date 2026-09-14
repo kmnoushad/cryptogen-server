@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Engine, FUTURES_EXCLUDED } from '../src/engine.js';
 import { EventGuard } from '../src/event-guard.js';
+import { summarizeBreadth } from '../src/paper-recovery.js';
 
 test('deep non-meme Binance Futures contracts remain eligible', () => {
   for (const symbol of ['ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT', 'TRXUSDT']) {
@@ -1054,6 +1055,37 @@ const deliveryFixture = ({ quoteAge = 0, expireDuringInsert = false, failInsert 
     executionWaitUntil: now + 3 * 60_000, barsObserved: 5 });
   return { engine, created, updates, messages };
 };
+
+for (const expireDuringInsert of [false, true]) test(`recovery entry delivery revalidates breadth: expire=${expireDuringInsert}`, async () => {
+  const x = deliveryFixture();
+  const now = Date.now();
+  x.engine.cfg = { ...x.engine.cfg, paper100Test: true, paperMode: true, enablePaperBtcRecovery: true };
+  x.engine.store.riskSnapshot = async () => ({ allowed: true, reasons: [], balance: 100, riskBudget: 1 });
+  x.engine.symbolInfo = new Map([['ETHUSDT', { filters: [
+    { filterType: 'LOT_SIZE', stepSize: '0.001', minQty: '0.001', maxQty: '1000' },
+    { filterType: 'MIN_NOTIONAL', notional: '5' },
+    { filterType: 'PRICE_FILTER', tickSize: '0.001' },
+  ] }]]);
+  x.engine.btc = { allowed: false, regime: 'NO_LONG_EDGE', recoveryCandidate: true,
+    recoveryBlockReasons: [], barCloseTime: now - 1000, hourBarCloseTime: now - 1000 };
+  x.engine.realtimeShock = { blocked: () => false, health: () => ({ enabled: true,
+    connected: true, stale: false, blocked: false, lastMessageAt: new Date().toISOString() }) };
+  const symbols = Array.from({ length: 30 }, (_, i) => `ALT${i}`);
+  x.engine.breadth.snapshot = summarizeBreadth(symbols, Array(30).fill(0.2), now, now);
+  const create = x.engine.store.createTrade;
+  x.engine.store.createTrade = async trade => {
+    const inserted = await create(trade);
+    if (expireDuringInsert) x.engine.breadth.snapshot.observedAt = now - 90001;
+    return inserted;
+  };
+  const result = await x.engine.scanSymbol({ symbol: 'ETHUSDT' });
+  assert.equal(result.action, expireDuringInsert ? 'CANCELLED' : 'SIGNAL');
+  assert.equal(x.created.length, 1);
+  assert.equal(x.created[0].btc_regime.regime, 'BULLISH_RECOVERY');
+  assert.equal(x.created[0].setup.marketGateModel, 'paper-breadth-recovery-v1');
+  assert.equal(x.messages.length, expireDuringInsert ? 0 : 1);
+  if (expireDuringInsert) assert.equal(x.updates[0].status, 'CANCELLED');
+});
 
 test('stale book cannot create or send FIRE', async () => {
   const x = deliveryFixture({ quoteAge: 6000 });

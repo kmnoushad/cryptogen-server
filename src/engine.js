@@ -6,6 +6,7 @@ import { closeTradeAtMarket, evaluateTrade } from './trade-evaluator.js';
 import { escapeHtml, formatPrice, gstTime, log, mapLimit, sleep } from './util.js';
 import { APP_VERSION } from './version.js';
 import { sizePaperTrade, isPaperTest, PAPER_TEST_ID } from './paper-account.js';
+import { AltcoinBreadth, applyPaperRecovery, paperRecoveryEnabled, RECOVERY_MODEL } from './paper-recovery.js';
 
 export const FUTURES_EXCLUDED = new Set([
   'BTCUSDT',
@@ -55,6 +56,7 @@ export class Engine {
   constructor({ cfg, binance, store, telegram, alpha = null, calendar = null, realtimeShock = null, fastMover = null, alphaMover = null, eventGuard = null, btcFeed = null, btcBias = null, btcRecorder = null }) {
     this.cfg = cfg;
     this.binance = binance;
+    this.breadth = new AltcoinBreadth(binance);
     this.store = store;
     this.telegram = telegram;
     this.alpha = alpha;
@@ -195,6 +197,7 @@ export class Engine {
     this.btc = await this.binance.btcRegime();
     await this.refreshUniverse();
     await this.manageOpenTrades();
+    await this.refreshRecoveryData();
     if (this.alpha) await this.alpha.initialize();
     log(`Initialized: BTC=${this.btc.regime}, universe=${this.universe.length}, paper=${this.cfg.paperMode}`);
   }
@@ -470,6 +473,7 @@ export class Engine {
   async refreshUniverse() {
     const [info, tickers] = await Promise.all([this.binance.exchangeInfo(), this.binance.ticker24h()]);
     this.symbolInfo = new Map((info.symbols ?? []).map(s => [s.symbol, s]));
+    this.breadth.setUniverse(info, tickers, this.cfg.min24hQuoteVolumeUsd, FUTURES_EXCLUDED);
     const now = Date.now();
     const snapshotAge = this.tickerSnapshot.ts ? now - this.tickerSnapshot.ts : 0;
     const acceleration = new Map();
@@ -585,6 +589,7 @@ export class Engine {
     const candles = closedCandles(parseKlines(rows));
     const features = buildFeatures(candles);
     if (!features) throw new Error(`Feature data incomplete for ${symbol}`);
+    this.updateRecoveryGate();
     if (this.lastBarSeen.get(symbol) === features.last.closeTime) return { action: 'NO_NEW_BAR' };
     // Event Window Guard freeze: while a window is active an EXISTING
     // candidate is frozen, and lastBarSeen is deliberately NOT advanced for
@@ -627,6 +632,10 @@ export class Engine {
         return { action: 'NONE' };
       }
       const context = await this.context(symbol, features);
+      if (!this.updateRecoveryGate().allowed) {
+        this.countGate('BTC_BLOCK');
+        return { action: 'NONE' };
+      }
       if (context.risk.hardBlock) {
         this.countGate('ARM_BLOCK: manipulation/liquidity risk');
         await this.warnRisk(symbol, features, context);
@@ -704,7 +713,7 @@ export class Engine {
       return decision;
     }
 
-    if (!this.btc.allowed) {
+    if (!this.updateRecoveryGate().allowed) {
       this.candidates.delete(symbol);
       this.btcBlockCancelled++;
       return { action: 'REJECT', reason: `BTC changed to ${this.btc.regime}` };
@@ -751,6 +760,11 @@ export class Engine {
       this.countGate('STALE_ENTRY_QUOTE');
       return { action: 'HOLD', reason: 'entry quote expired before persistence' };
     }
+    if (!this.updateRecoveryGate().allowed) {
+      this.countGate('BTC_BLOCK');
+      return { action: 'HOLD', reason: 'BTC/recovery gate closed before persistence' };
+    }
+    decision.trade.setup.marketGateModel = paperRecoveryEnabled(this.cfg) ? RECOVERY_MODEL : 'legacy-btc-v1';
     decision.trade.btc_regime = this.btc;
     // The independent monitor must not evaluate an entry still being delivered.
     this.pendingEntrySymbols.add(symbol);
@@ -764,7 +778,7 @@ export class Engine {
 
       let delivered = false;
       try {
-        if (quoteIsStale() || this.realtimeShock?.blocked() || this.eventGuard?.activeWindow()) {
+        if (quoteIsStale() || !this.updateRecoveryGate().allowed || this.realtimeShock?.blocked() || this.eventGuard?.activeWindow()) {
           await this.store.updateTrade(inserted.trade.id, {
             status: 'CANCELLED', exit_reason: 'ENTRY_INVALID_BEFORE_DELIVERY', closed_at: new Date().toISOString(),
           });
@@ -813,6 +827,7 @@ export class Engine {
       if (Date.now() - this.lastUniverseRefresh >= this.cfg.universeRefreshMs) await this.refreshUniverse();
       try {
         this.btc = await this.binance.btcRegime();
+        await this.refreshRecoveryData();
       } catch (error) {
         this.btc = { regime: 'DATA_BLOCK', allowed: false, reason: error.message };
         this.metrics.dataErrors++;
@@ -855,6 +870,32 @@ export class Engine {
     } finally {
       this.monitorRunning = false;
     }
+  }
+
+  updateRecoveryGate(now = Date.now()) {
+    this.btc = applyPaperRecovery(this.btc, this.breadth.snapshot, this.cfg, this.realtimeShock?.health?.(), now);
+    return this.btc;
+  }
+
+  async refreshRecoveryData() {
+    if (paperRecoveryEnabled(this.cfg) && this.btc.recoveryCandidate === true) await this.breadth.refresh();
+    return this.updateRecoveryGate();
+  }
+
+  btcGateDetails() {
+    const b = this.updateRecoveryGate();
+    const number = n => Number.isFinite(n) ? n.toFixed(2) : 'N/A';
+    const relation = Number.isFinite(b.ema50) && Number.isFinite(b.ema200)
+      ? b.ema50 > b.ema200 ? 'above' : b.ema50 < b.ema200 ? 'below' : 'equal to' : 'unknown vs';
+    const breadth = this.breadth.snapshot;
+    return `Hourly EMA50 $${number(b.ema50)} ${relation} EMA200 $${number(b.ema200)}\n` +
+      `BTC 5m/15m/1h: ${number(b.fiveMinuteReturn)}% / ${number(b.fifteenMinuteReturn)}% / ${number(b.oneHourReturn)}%\n` +
+      `Legacy BTC gate: ${b.baseAllowed ?? b.allowed ? 'passes' : escapeHtml((b.blockReasons ?? [b.reason ?? 'inputs unavailable']).join('; '))}\n` +
+      (paperRecoveryEnabled(this.cfg)
+        ? `Paper recovery: ${b.recoveryActive ? '✅ BULLISH_RECOVERY' : b.baseAllowed ?? b.allowed ? 'not needed — legacy gate passes' : escapeHtml((b.recoveryReasons ?? []).join('; '))}\n`
+        : 'Paper recovery: disabled outside enabled $100 test, or by configuration\n') +
+      (breadth ? `Alt breadth (15m): ${breadth.up}/${breadth.valid} rising · ${breadth.valid}/${breadth.requested} valid · median ${number(breadth.medianPct)}% · sample age ${Math.max(0, Math.floor((Date.now() - breadth.observedAt) / 1000))}s\n`
+        : 'Alt breadth (15m): not sampled; required only for recovery\n');
   }
 
   async monitorTradesOnce() {
@@ -964,6 +1005,7 @@ export class Engine {
   }
 
   health() {
+    this.updateRecoveryGate();
     return {
       ok: true,
       version: APP_VERSION,
@@ -1042,6 +1084,7 @@ export class Engine {
       if (text === '/start') await this.telegram.send('This is a private paper-research bot.', chatId);
       return;
     }
+    this.updateRecoveryGate();
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
@@ -1050,14 +1093,17 @@ export class Engine {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
         `BTC gate: HTF trend + realtime ${this.cfg.realtimeShockDropPct}%/${Math.round(this.cfg.realtimeShockWindowMs / 1000)}s shock guard\n` +
+        `Recovery: ${paperRecoveryEnabled(this.cfg) ? 'virtual-$100 only; BTC recovery + fresh liquid-alt breadth' : 'disabled'}\n` +
         `Calendar: live Finnhub high-impact US reminders\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/status') {
       const risk = await this.store.riskSnapshot(this.cfg);
+      this.updateRecoveryGate();
       const calendarHealth = this.calendar?.health() ?? { configured: false, loaded: 0, lastError: null };
       const shockHealth = this.realtimeShock?.health() ?? { enabled: false };
       await this.telegram.send(`🩺 <b>NEXIO v${APP_VERSION} STATUS</b>\n` +
         `BTC: ${escapeHtml(this.btc.regime)} ${this.btc.allowed ? '✅' : '⛔'}${btcTechnicalSummary(this.btc)}\n` +
+        this.btcGateDetails() +
         `Universe: ${this.universe.length} · Candidates: ${this.candidates.size}\n` +
         `Open: ${risk.openTrades} · Today: ${risk.tradesToday}/${this.cfg.maxTradesPerDay}\n` +
         (this.cfg.paper100Test
@@ -1075,9 +1121,10 @@ export class Engine {
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/btc') {
-      await this.telegram.send(this.btcBiasReport());
+      await this.telegram.send(this.btcGateDetails() + this.btcBiasReport());
     } else if (text === '/why') {
       const risk = await this.store.riskSnapshot(this.cfg);
+      this.updateRecoveryGate();
       const topFrom = (counts, limit = 5) => Object.entries(counts)
         .sort((a, b) => b[1] - a[1])
         .slice(0, limit);
@@ -1097,6 +1144,7 @@ export class Engine {
       const btcBlockedMin = this.btcBlockedSince === null ? null : Math.floor((Date.now() - this.btcBlockedSince) / 60_000);
       await this.telegram.send(`❓ <b>WHY IS NEXIO QUIET?</b>\n` +
         `BTC: ${escapeHtml(this.btc.regime)} ${this.btc.allowed ? '✅ longs allowed' : '⛔ LONG GATE CLOSED'}${btcTechnicalSummary(this.btc)}\n` +
+        this.btcGateDetails() +
         `${btcBlockedMin !== null ? `⛔ BTC gate has blocked Futures entries for ${btcBlockedMin} min.\n` : ''}` +
         `${this.eventGuardWhyLine()}\n` +
         `${this.btcBiasWhyLine() ? `${this.btcBiasWhyLine()}\n` : ''}` +
@@ -1110,6 +1158,7 @@ export class Engine {
         `<i>Gate counts are internal evaluations, not missed guaranteed trades.</i>`);
     } else if (text === '/diagnostics' || text === '/diag') {
       const persisted = await this.store.futuresGateSummaries(24);
+      this.updateRecoveryGate();
       const persistedCounts = {};
       for (const row of persisted) {
         for (const [name, count] of Object.entries(row.payload?.gates ?? {})) {
@@ -1148,6 +1197,7 @@ export class Engine {
       }, {})).map(([name, count]) => `${escapeHtml(name)} ${count}`).join(' · ') || 'none';
       await this.telegram.send(`🔬 <b>FUTURES DIAGNOSTICS</b>\n` +
         `BTC: ${escapeHtml(this.btc.regime)} ${this.btc.allowed ? '✅' : '⛔'}${btcTechnicalSummary(this.btc)}\n` +
+        this.btcGateDetails() +
         `<b>Funnel:</b> ${this.metrics.armed} armed → ${this.metrics.retested} retested → ${this.metrics.reclaimed} reclaimed → ${this.metrics.signaled} FIRE\n` +
         `Rejected: ${this.metrics.rejected} · Expired/book timeout: ${this.metrics.expired} · Errors: ${this.metrics.dataErrors}\n` +
         `Active: ${this.candidates.size} (${activeStates})\n` +
@@ -1210,7 +1260,10 @@ export class Engine {
     } else if (text === '/scan') {
       await this.telegram.send('Running one manual scan…');
       const result = await this.scanOnce({ manual: true });
-      await this.telegram.send(`Scan complete: ${result.processed ?? 0} symbols in ${result.durationMs ?? 0}ms`);
+      await this.telegram.send(result.skipped
+        ? result.skipped === 'already running' ? 'Scan already running; manual scan was not started.'
+          : `Scan skipped: ${escapeHtml(result.skipped)}. Open-trade monitoring remains active.`
+        : `Scan complete: ${result.processed ?? 0} symbols in ${result.durationMs ?? 0}ms`);
     } else if (text === '/alphascan') {
       if (!this.alpha?.health().enabled) {
         await this.telegram.send('Alpha signals are disabled in configuration.');
