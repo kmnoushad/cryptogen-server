@@ -1,6 +1,6 @@
 {
   "name": "nexio-v6",
-  "version": "6.9.15",
+  "version": "6.9.16",
   "private": true,
   "type": "module",
   "description": "Separated Futures and Alpha engine with phase-aware candidate survival and streaming BTC shock protection",
@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test",
+    "fade:preflight": "node scripts/fade-preflight.js",
     "check": "node --check src/index.js && node --test",
     "smoke": "node scripts/binance-smoke.js",
     "smoke:ws": "node scripts/websocket-smoke.js",

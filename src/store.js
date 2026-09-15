@@ -38,6 +38,17 @@ export class Store {
     return true;
   }
 
+  async fadeRpc(name, body) {
+    const rows = await requestJson(`${this.base}/rpc/${name}`, { method: 'POST', headers: this.headers,
+      body: JSON.stringify(body), retries: 0, timeoutMs: 7000 });
+    if (!Array.isArray(rows) || rows.length !== 1) throw Error('Fade execution lease/revision unavailable');
+    return rows[0];
+  }
+  fadeLease(scope, owner) { return this.fadeRpc('nexio_fade_lease', { p_scope: scope, p_owner: owner }); }
+  fadeSave(scope, owner, revision, state) {
+    return this.fadeRpc('nexio_fade_save', { p_scope: scope, p_owner: owner, p_revision: revision, p_state: state });
+  }
+
   async createTrade(trade) {
     try {
       const rows = await requestJson(this.url('nexio_trades'), {

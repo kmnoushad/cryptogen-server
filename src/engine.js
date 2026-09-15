@@ -1028,6 +1028,7 @@ export class Engine {
       btcRecorder: this.btcRecorder?.health() ?? { enabled: false },
       fastMover: this.fastMover?.health() ?? { enabled: false },
       pumpFade: this.pumpFade?.health() ?? { enabled: false },
+      fadeExecution: this.fadeExecutor?.health() ?? { enabled: false },
       alphaMover: this.alphaMover?.health() ?? { enabled: false },
     };
   }
@@ -1095,13 +1096,14 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadepause /faderesume /fadecloseall /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
         `BTC gate: HTF trend + realtime ${this.cfg.realtimeShockDropPct}%/${Math.round(this.cfg.realtimeShockWindowMs / 1000)}s shock guard\n` +
         `Recovery: ${paperRecoveryEnabled(this.cfg) ? 'virtual-$100 only; BTC recovery + fresh liquid-alt breadth' : 'disabled'}\n` +
         `Pump fade: ${this.cfg.enablePumpFadeAlerts ? 'downside warning alerts enabled' : 'disabled'}\n` +
+        `Fade auto: ${this.cfg.enableFadeExecution ? escapeHtml(this.cfg.fadeEnvironment) + ' · /fadeauto' : 'disabled'}\n` +
         `Calendar: live Finnhub high-impact US reminders\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/status') {
@@ -1129,6 +1131,11 @@ export class Engine {
         `${this.btcBiasStatusLine()}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
+    } else if (text === '/fadeauto') {
+      await this.telegram.send(this.fadeExecutor?.status() ?? 'Fade execution unavailable.');
+    } else if (['/fadepause', '/faderesume', '/fadecloseall'].includes(text)) {
+      const action = text === '/fadepause' ? 'pause' : text === '/faderesume' ? 'resume' : 'close';
+      await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.control(action) : 'Fade execution unavailable.');
     } else if (text === '/market' || text === '/mood') {
       await this.telegram.send('Checking BTC, liquid-altcoin breadth and event-calendar status…');
       await this.telegram.send(this.marketMood ? await this.marketMood.report() : 'Market mood is unavailable in this instance.');
