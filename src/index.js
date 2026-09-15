@@ -7,6 +7,8 @@ import { Telegram } from './telegram.js';
 import { Engine, FUTURES_EXCLUDED } from './engine.js';
 import { PumpFadeRadar } from './pump-fade.js';
 import { MarketMood } from './market-mood.js';
+import { FadeExchange } from './fade-orders.js';
+import { FadeExecutor } from './fade-executor.js';
 import { AlphaRadar } from './alpha.js';
 import { EconomicCalendar } from './calendar.js';
 import { EventGuard } from './event-guard.js';
@@ -69,6 +71,10 @@ const pumpFade = new PumpFadeRadar({ cfg, binance, store, telegram,
   excluded: FUTURES_EXCLUDED, isPaused: () => engine.paused });
 engine.pumpFade = pumpFade;
 engine.marketMood = new MarketMood({ cfg, binance, btcBias, calendar, excluded: FUTURES_EXCLUDED });
+const fadeExecutor = new FadeExecutor({ cfg, store, telegram, isPaused: () => engine.paused,
+  exchange: new FadeExchange({ key: cfg.binanceApiKey, secret: cfg.binanceApiSecret, environment: cfg.fadeEnvironment }) });
+engine.fadeExecutor = fadeExecutor;
+pumpFade.onSignal = (symbol, signal) => fadeExecutor.onSignal(symbol, signal);
 
 const server = http.createServer((request, response) => {
   if (request.url === '/health' || request.url === '/') {
@@ -87,6 +93,7 @@ const shutdown = signal => {
   realtimeShock.stop();
   fastMover.stop();
   pumpFade.stop();
+  fadeExecutor.stop();
   alphaMover.stop();
   telegram.stop();
   server.close(() => process.exit(0));
@@ -109,6 +116,7 @@ try {
   realtimeShock.start();
   fastMover.start();
   pumpFade.start();
+  fadeExecutor.start();
   alphaMover.start();
   await telegram.send(`🟢 <b>NEXIO v${APP_VERSION} started</b>\n` +
     `Mode: ${cfg.paperMode ? 'PAPER' : 'ALERT-ONLY'}\n` +
@@ -119,6 +127,7 @@ try {
     `[FAST MOVER] ${cfg.enableFastMoverAlerts ? '✅ ON · live pump radar (info alerts only)' : 'disabled'}\n` +
     `[PUMP FADE] ${cfg.enablePumpFadeAlerts ? '✅ ON · downside warnings only' : 'disabled'}\n` +
     `[MARKET MOOD] /market · BTC + alt breadth + positioning + event risk\n` +
+    `[FADE AUTO] ${cfg.enableFadeExecution ? cfg.fadeEnvironment.toUpperCase() + ' · /fadeauto' : 'disabled'}\n` +
     `[ALPHA] ${cfg.enableAlphaSignals ? '✅ ON · on-chain risk screening active' : 'disabled'}\n` +
     `[ALPHA MOVER] ${cfg.enableAlphaFastMover ? '✅ ON · early runner radar (info alerts only)' : 'disabled'}\n` +
     `[BTC BIAS] ${cfg.enableBtcFeed ? `✅ ON · 15m/30m gauge${cfg.btcBiasBlockLongs ? ' · LONG-BLOCK GATE ON' : ''}` : 'disabled'} · recorder ${cfg.enableBtcRecorder ? '✅' : '⚠️ off'}\n` +
