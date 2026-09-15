@@ -1095,7 +1095,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1129,6 +1129,9 @@ export class Engine {
         `${this.btcBiasStatusLine()}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
+    } else if (text === '/market' || text === '/mood') {
+      await this.telegram.send('Checking BTC, liquid-altcoin breadth and event-calendar status…');
+      await this.telegram.send(this.marketMood ? await this.marketMood.report() : 'Market mood is unavailable in this instance.');
     } else if (text === '/btc') {
       await this.telegram.send(this.btcGateDetails() + this.btcBiasReport());
     } else if (text === '/why') {
