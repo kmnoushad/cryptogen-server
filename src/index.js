@@ -4,7 +4,8 @@ import { loadConfig } from './config.js';
 import { BinanceClient } from './binance.js';
 import { Store } from './store.js';
 import { Telegram } from './telegram.js';
-import { Engine } from './engine.js';
+import { Engine, FUTURES_EXCLUDED } from './engine.js';
+import { PumpFadeRadar } from './pump-fade.js';
 import { AlphaRadar } from './alpha.js';
 import { EconomicCalendar } from './calendar.js';
 import { EventGuard } from './event-guard.js';
@@ -63,6 +64,9 @@ const alphaMover = new AlphaFastMover({
   isEventGuarded: () => Boolean(eventGuard.activeWindow()),
 });
 engine = new Engine({ cfg, binance, store, telegram, alpha, calendar, realtimeShock, fastMover, alphaMover, eventGuard, btcFeed, btcBias, btcRecorder });
+const pumpFade = new PumpFadeRadar({ cfg, binance, store, telegram,
+  excluded: FUTURES_EXCLUDED, isPaused: () => engine.paused });
+engine.pumpFade = pumpFade;
 
 const server = http.createServer((request, response) => {
   if (request.url === '/health' || request.url === '/') {
@@ -80,6 +84,7 @@ const shutdown = signal => {
   btcFeed.stop();
   realtimeShock.stop();
   fastMover.stop();
+  pumpFade.stop();
   alphaMover.stop();
   telegram.stop();
   server.close(() => process.exit(0));
@@ -101,6 +106,7 @@ try {
   btcFeed.start();
   realtimeShock.start();
   fastMover.start();
+  pumpFade.start();
   alphaMover.start();
   await telegram.send(`🟢 <b>NEXIO v${APP_VERSION} started</b>\n` +
     `Mode: ${cfg.paperMode ? 'PAPER' : 'ALERT-ONLY'}\n` +
@@ -109,6 +115,7 @@ try {
     `BTC: ${engine.btc.regime} · Universe: ${engine.universe.length}\n` +
     `BTC gate: HTF trend + ${cfg.enableRealtimeShock ? `${cfg.realtimeShockDropPct}%/${Math.round(cfg.realtimeShockWindowMs / 1000)}s realtime shock guard` : 'realtime guard disabled'}\n` +
     `[FAST MOVER] ${cfg.enableFastMoverAlerts ? '✅ ON · live pump radar (info alerts only)' : 'disabled'}\n` +
+    `[PUMP FADE] ${cfg.enablePumpFadeAlerts ? '✅ ON · downside warnings only' : 'disabled'}\n` +
     `[ALPHA] ${cfg.enableAlphaSignals ? '✅ ON · on-chain risk screening active' : 'disabled'}\n` +
     `[ALPHA MOVER] ${cfg.enableAlphaFastMover ? '✅ ON · early runner radar (info alerts only)' : 'disabled'}\n` +
     `[BTC BIAS] ${cfg.enableBtcFeed ? `✅ ON · 15m/30m gauge${cfg.btcBiasBlockLongs ? ' · LONG-BLOCK GATE ON' : ''}` : 'disabled'} · recorder ${cfg.enableBtcRecorder ? '✅' : '⚠️ off'}\n` +

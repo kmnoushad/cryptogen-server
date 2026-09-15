@@ -57,9 +57,29 @@ export const classifyBtcRegime = (hourly, five, {
     : allowed ? 'BULLISH_RETEST'
     : 'NO_LONG_EDGE';
 
+  const blockReasons = [];
+  if (shock) blockReasons.push('BTC closed-bar downside shock');
+  if (!majorTrend) {
+    if (!(ema50 > ema200)) blockReasons.push('hourly EMA50 is not above EMA200');
+    if (!(ema50Slope6hPct >= minEma50Slope6hPct)) blockReasons.push(`EMA50 slope below ${minEma50Slope6hPct}%`);
+  }
+  if (!htfTrend && !supportRetest) blockReasons.push('neither higher-timeframe trend nor bounded EMA50 retest qualifies');
+  if (!microTrend && !controlledMicroPullback) blockReasons.push('short-term BTC trend/pullback conditions failed');
+  const recoveryBlockReasons = [];
+  if (!(price > ema50)) recoveryBlockReasons.push('BTC must be above hourly EMA50');
+  if (!(ema50Slope6hPct > 0)) recoveryBlockReasons.push('hourly EMA50 six-hour slope must be positive');
+  if (!(price > ema20Five)) recoveryBlockReasons.push('BTC must be above five-minute EMA20');
+  if (!(fiveMinuteReturn > -0.50)) recoveryBlockReasons.push('BTC five-minute return must exceed -0.50%');
+  if (!(fifteenMinuteReturn > -0.25)) recoveryBlockReasons.push('BTC fifteen-minute return must exceed -0.25%');
+  if (!(oneHourReturn > -0.60)) recoveryBlockReasons.push('BTC one-hour return must exceed -0.60%');
+  if (shock) recoveryBlockReasons.push('BTC closed-bar downside shock');
+
   return {
     regime,
     allowed,
+    blockReasons,
+    recoveryBlockReasons,
+    recoveryCandidate: !allowed && recoveryBlockReasons.length === 0,
     htfTrend,
     supportRetest,
     majorTrend,
@@ -70,6 +90,7 @@ export const classifyBtcRegime = (hourly, five, {
     hourlyClose,
     ema50,
     ema200,
+    ema20Five,
     ema50Slope6hPct,
     distanceFromEma50Pct,
     fiveMinuteReturn,

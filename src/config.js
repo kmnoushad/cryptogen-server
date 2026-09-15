@@ -58,6 +58,9 @@ export const loadConfig = (env = process.env) => {
     supabaseKey: required(env, 'SUPABASE_SERVICE_ROLE_KEY'),
     paperMode: boolFrom(env, 'PAPER_MODE', true),
     paper100Test: boolFrom(env, 'PAPER_100_TEST', false),
+    // Has no effect outside the explicitly enabled virtual-$100 experiment.
+    enablePaperBtcRecovery: boolFrom(env, 'ENABLE_PAPER_BTC_RECOVERY', true),
+    enablePumpFadeAlerts: boolFrom(env, 'ENABLE_PUMP_FADE_ALERTS', true),
     port: numberFrom(env, 'PORT', 3000, { min: 1, max: 65535 }),
     scanIntervalMs: numberFrom(env, 'SCAN_INTERVAL_MS', 30_000, { min: 15_000, max: 300_000 }),
     tradeMonitorIntervalMs: numberFrom(env, 'TRADE_MONITOR_INTERVAL_MS', 10_000, { min: 5_000, max: 60_000 }),
@@ -215,4 +218,3 @@ export const loadConfig = (env = process.env) => {
   }
   return Object.freeze(cfg);
 };
-
