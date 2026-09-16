@@ -103,8 +103,11 @@ export class PumpFadeRadar {
             `Taker buying weakened: ${signal.priorBuyPct.toFixed(0)}% → ${signal.buyPct.toFixed(0)}% (last 3 closed minutes)\n` +
             `Latest closed minute broke the previous two minutes' lows.\n` +
             `A sustained reclaim above $${formatPrice(signal.resistance)} would weaken this warning.\n` +
-            `<i>Possible reversal, not a guaranteed fall or a short-entry signal. No trade opened.</i>\n⏰ ${gstTime()} GST`);
+            `<i>Possible reversal, not a guaranteed fall. Auto-execution, if enabled, is reported separately.</i>\n⏰ ${gstTime()} GST`);
           this.cooldowns.set(t.symbol, this.now()); this.sent.push(this.now()); this.metrics.alerts++;
+          // Only fresh newly delivered pump-fade warnings reach the executor.
+          // Other signal producers and paper FIRE paths have no execution hook.
+          if (this.onSignal) await this.onSignal(t.symbol, signal);
         } catch (error) { this.metrics.errors++; this.lastError = error.message; log(`Pump-fade ${t.symbol}: ${error.message}`); }
       }
       this.lastPollAt = new Date(this.now()).toISOString();

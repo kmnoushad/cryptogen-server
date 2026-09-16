@@ -61,6 +61,11 @@ export const loadConfig = (env = process.env) => {
     // Has no effect outside the explicitly enabled virtual-$100 experiment.
     enablePaperBtcRecovery: boolFrom(env, 'ENABLE_PAPER_BTC_RECOVERY', true),
     enablePumpFadeAlerts: boolFrom(env, 'ENABLE_PUMP_FADE_ALERTS', true),
+    enableFadeExecution: boolFrom(env, 'ENABLE_FADE_EXECUTION', false),
+    fadeEnvironment: String(env.FADE_ENVIRONMENT ?? 'testnet').trim(),
+    fadeLiveAcknowledgement: String(env.FADE_LIVE_ACKNOWLEDGEMENT ?? '').trim(),
+    binanceApiKey: String(env.BINANCE_API_KEY ?? '').trim(),
+    binanceApiSecret: String(env.BINANCE_API_SECRET ?? '').trim(),
     port: numberFrom(env, 'PORT', 3000, { min: 1, max: 65535 }),
     scanIntervalMs: numberFrom(env, 'SCAN_INTERVAL_MS', 30_000, { min: 15_000, max: 300_000 }),
     tradeMonitorIntervalMs: numberFrom(env, 'TRADE_MONITOR_INTERVAL_MS', 10_000, { min: 5_000, max: 60_000 }),
