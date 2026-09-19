@@ -1,9 +1,9 @@
 // Read-only credential/account/schema check. This script never places orders,
 // acquires a runtime lease or changes leverage/margin/account modes.
-import { loadConfig } from '../src/config.js';
+import { loadFadeConfig } from '../src/fade-config.js';
 import { FadeExchange } from '../src/fade-orders.js';
 import { Store } from '../src/store.js';
-const cfg = loadConfig();
+const cfg = loadFadeConfig();
 const exchange = new FadeExchange({ key: cfg.binanceApiKey, secret: cfg.binanceApiSecret, environment: cfg.fadeEnvironment });
 const store = new Store(cfg);
 try {
@@ -11,6 +11,9 @@ try {
   const [mode, assets, account, positions, orders, algos] = await Promise.all([
     exchange.mode(), exchange.assetsMode(), exchange.account(), exchange.positions(), exchange.orders(), exchange.algos(),
     store.get('nexio_fade_runtime', [['select', 'scope,revision'], ['limit', '1']]),
+    store.fadeControl(`${cfg.fadeEnvironment}:primary`),
+    store.get('nexio_fade_worker_status', [['select', 'scope'], ['limit', '1']]),
+    store.fadeSignals(Date.now()),
   ]);
   if (mode.dualSidePosition !== false || assets.multiAssetsMargin !== false) throw Error('Use One-way and Single-Asset mode on a dedicated Futures account');
   if (account.canTrade !== true) throw Error('Account trading is unavailable');

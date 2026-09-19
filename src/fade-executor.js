@@ -8,8 +8,8 @@ const terminal = s => ['FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJ
 const truth = x => x === true || x === 'true';
 
 export class FadeExecutor {
-  constructor({ cfg, exchange, store, telegram, isPaused = () => false, now = () => Date.now() }) {
-    Object.assign(this, { cfg, exchange, store, telegram, isPaused, now });
+  constructor({ cfg, exchange, store, telegram, isPaused = () => false, authorizeEntry = async () => true, now = () => Date.now() }) {
+    Object.assign(this, { cfg, exchange, store, telegram, isPaused, authorizeEntry, now });
     this.owner = randomUUID(); this.scope = `${cfg.fadeEnvironment ?? 'testnet'}:primary`;
     this.busy = false; this.stopped = false; this.timer = null; this.row = null;
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
@@ -70,7 +70,7 @@ export class FadeExecutor {
     finally { this.busy = false; }
   }
   async control(action) {
-    if (!this.enabled()) return 'Fade execution is disabled in Railway.';
+    if (!this.enabled()) return 'Fade execution is disabled on the worker.';
     if (this.busy) return 'Reconciliation is running; retry this command shortly.';
     this.busy = true;
     try {
@@ -249,6 +249,7 @@ export class FadeExecutor {
     if (!this.enabled() || this.busy || this.stopped || this.isPaused()) return;
     this.busy = true;
     try {
+      if (!await this.authorizeEntry()) return;
       await this.ready(); await this.reconcile();
       if (this.row.state.paused) return;
       const jobs = this.row.state.jobs;
@@ -281,7 +282,15 @@ export class FadeExecutor {
         params: { side: 'SELL', type: 'MARKET', quantity: decimal(plan.qty), newOrderRespType: 'RESULT' } };
       await this.save();
       await this.fence();
-      if (this.stopped || this.isPaused() || this.now() - quoteAt > 5000 || this.now() - signal.barCloseTime > 90000) {
+      let authorized;
+      try { authorized = await this.authorizeEntry(); }
+      catch {
+        job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'CONTROL_UNAVAILABLE_BEFORE_SEND';
+        await this.save();
+        throw Error('Control unavailable before entry; no order sent');
+      }
+      await this.fence();
+      if (!authorized || this.stopped || this.isPaused() || this.now() - quoteAt > 5000 || this.now() - signal.barCloseTime > 90000) {
         job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'ENTRY_EXPIRED_BEFORE_SEND'; await this.save(); return;
       }
       try { await originalPlace({ symbol, positionSide: 'BOTH', newClientOrderId: job.actions.e.id, ...job.actions.e.params }); }

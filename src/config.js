@@ -61,7 +61,8 @@ export const loadConfig = (env = process.env) => {
     // Has no effect outside the explicitly enabled virtual-$100 experiment.
     enablePaperBtcRecovery: boolFrom(env, 'ENABLE_PAPER_BTC_RECOVERY', true),
     enablePumpFadeAlerts: boolFrom(env, 'ENABLE_PUMP_FADE_ALERTS', true),
-    enableFadeExecution: boolFrom(env, 'ENABLE_FADE_EXECUTION', false),
+    // Alert process never executes orders, regardless of leftover variables.
+    enableFadeExecution: false,
     fadeEnvironment: String(env.FADE_ENVIRONMENT ?? 'testnet').trim(),
     fadeLiveAcknowledgement: String(env.FADE_LIVE_ACKNOWLEDGEMENT ?? '').trim(),
     binanceApiKey: String(env.BINANCE_API_KEY ?? '').trim(),

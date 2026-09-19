@@ -45,6 +45,24 @@ export class Store {
     return rows[0];
   }
   fadeLease(scope, owner) { return this.fadeRpc('nexio_fade_lease', { p_scope: scope, p_owner: owner }); }
+  async fadeControl(scope) {
+    const rows = await this.get('nexio_fade_control', [['scope', `eq.${scope}`], ['select', '*']]);
+    if (rows.length !== 1) throw Error('Fade worker migration/control missing');
+    return rows[0];
+  }
+  fadeSetControl(scope, action) {
+    return this.fadeRpc('nexio_fade_control_set', { p_scope: scope, p_action: action });
+  }
+  fadeSignals(since) {
+    return this.get('nexio_events', [['event_type', 'eq.FADE_WORKER_SIGNAL_V1'],
+      ['created_at', `gte.${new Date(since).toISOString()}`], ['order', 'created_at.asc,id.asc'], ['limit', '100']]);
+  }
+  fadeHeartbeat(scope, report) {
+    return requestJson(this.url('nexio_fade_worker_status', [['on_conflict', 'scope']]), {
+      method: 'POST', headers: { ...this.headers, prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ scope, report, updated_at: new Date().toISOString() }), retries: 0, timeoutMs: 7000,
+    });
+  }
   fadeSave(scope, owner, revision, state) {
     return this.fadeRpc('nexio_fade_save', { p_scope: scope, p_owner: owner, p_revision: revision, p_state: state });
   }

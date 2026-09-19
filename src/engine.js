@@ -1103,7 +1103,7 @@ export class Engine {
         `BTC gate: HTF trend + realtime ${this.cfg.realtimeShockDropPct}%/${Math.round(this.cfg.realtimeShockWindowMs / 1000)}s shock guard\n` +
         `Recovery: ${paperRecoveryEnabled(this.cfg) ? 'virtual-$100 only; BTC recovery + fresh liquid-alt breadth' : 'disabled'}\n` +
         `Pump fade: ${this.cfg.enablePumpFadeAlerts ? 'downside warning alerts enabled' : 'disabled'}\n` +
-        `Fade auto: ${this.cfg.enableFadeExecution ? escapeHtml(this.cfg.fadeEnvironment) + ' · /fadeauto' : 'disabled'}\n` +
+        `Fade auto: external worker only · /fadeauto\n` +
         `Calendar: live Finnhub high-impact US reminders\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/status') {
@@ -1132,7 +1132,7 @@ export class Engine {
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
     } else if (text === '/fadeauto') {
-      await this.telegram.send(this.fadeExecutor?.status() ?? 'Fade execution unavailable.');
+      await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.status() : 'Fade execution unavailable.');
     } else if (['/fadepause', '/faderesume', '/fadecloseall'].includes(text)) {
       const action = text === '/fadepause' ? 'pause' : text === '/faderesume' ? 'resume' : 'close';
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.control(action) : 'Fade execution unavailable.');
@@ -1295,9 +1295,10 @@ export class Engine {
     } else if (text === '/pause') {
       this.paused = true;
       await this.telegram.send('⏸ New entries paused. Open-trade monitoring remains active.');
+      if (this.fadeExecutor) await this.telegram.send(await this.fadeExecutor.control('pause'));
     } else if (text === '/resume') {
       this.paused = false;
-      await this.telegram.send('▶️ New-entry scanning resumed.');
+      await this.telegram.send('▶️ New-entry scanning resumed. External fade execution requires /faderesume separately.');
     }
   }
 
