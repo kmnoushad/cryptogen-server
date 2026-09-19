@@ -47,7 +47,8 @@ function harness(options = {}) {
     syncTime: async () => {},
     mode: async () => ({ dualSidePosition: !!options.hedge }),
     assetsMode: async () => ({ multiAssetsMargin: false }),
-    account: async () => ({ canTrade: true, assets: [{ asset: 'USDT', availableBalance: '250' }] }),
+    accountPermissions: async () => ({ canTrade: options.canTrade !== false }),
+    account: async () => ({ assets: [{ asset: 'USDT', availableBalance: '250' }] }),
     positions: async () => [...positions].map(([symbol, qty]) => ({ symbol, positionAmt: String(-qty), notional: String(qty * 100), positionSide: 'BOTH' })),
     orders: async () => [...orders.values()].filter(o => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).map(clone),
     algos: async () => [...algos.values()].filter(o => o.algoStatus === 'NEW').map(clone),
@@ -175,6 +176,13 @@ test('manual positions, hedge mode, missing database and lease loss prevent entr
     const h = harness({ [opt]: true }); await h.executor.onSignal('AAAUSDT', signal);
     assert.equal(h.calls.filter(c => c[0] === 'place').length, 0);
   }
+});
+test('V2 trading permission is required while V3 account may omit canTrade', async () => {
+  const allowed = harness(); await allowed.executor.onSignal('AAAUSDT', signal);
+  assert.equal(allowed.calls.filter(c => c[0] === 'place' && c[1].side === 'SELL').length, 1);
+  const blocked = harness({ canTrade: false }); await blocked.executor.onSignal('AAAUSDT', signal);
+  assert.equal(blocked.calls.filter(c => c[0] === 'place').length, 0);
+  assert.match(blocked.executor.lastError, /trading is unavailable/);
 });
 test('pause persists and still manages existing protection; explicit close only closes owned positions', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal); await h.executor.control('pause');

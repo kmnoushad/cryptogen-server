@@ -85,12 +85,13 @@ export class FadeExecutor {
     finally { this.busy = false; }
   }
   async accountState() {
-    const [mode, assets, account, positions, orders, algos] = await Promise.all([
-      this.exchange.mode(), this.exchange.assetsMode(), this.exchange.account(), this.exchange.positions(),
-      this.exchange.orders(), this.exchange.algos(),
+    const [mode, assets, permissions, account, positions, orders, algos] = await Promise.all([
+      this.exchange.mode(), this.exchange.assetsMode(), this.exchange.accountPermissions(),
+      this.exchange.account(), this.exchange.positions(), this.exchange.orders(), this.exchange.algos(),
     ]);
     if (mode.dualSidePosition !== false || assets.multiAssetsMargin !== false) throw Error('Fade execution requires One-way and Single-Asset mode; no account modes were changed');
-    if (account.canTrade !== true || !Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(algos)) throw Error('Account state unavailable');
+    if (permissions.canTrade !== true) throw Error('Account trading is unavailable');
+    if (!Array.isArray(account.assets) || !Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(algos)) throw Error('Account state unavailable');
     const active = positions.filter(p => Number(p.positionAmt) !== 0);
     if (active.some(p => !Number.isFinite(Number(p.positionAmt)))) throw Error('Invalid position quantities');
     return { account, positions: active, orders, algos };

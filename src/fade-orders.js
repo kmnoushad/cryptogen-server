@@ -37,6 +37,9 @@ export class FadeExchange {
     this.offset = data.serverTime - (before + this.now()) / 2;
   }
   account() { return this.request('GET', '/fapi/v3/account'); }
+  // Account Information V3 intentionally omits the canTrade permission flag.
+  // Keep V3 for balances, and query V2 separately before any execution flow.
+  accountPermissions() { return this.request('GET', '/fapi/v2/account'); }
   positions() { return this.request('GET', '/fapi/v3/positionRisk'); }
   mode() { return this.request('GET', '/fapi/v1/positionSide/dual'); }
   assetsMode() { return this.request('GET', '/fapi/v1/multiAssetsMargin'); }
