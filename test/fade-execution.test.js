@@ -14,6 +14,21 @@ const symbolInfo = symbol => ({ symbol, status: 'TRADING', quoteAsset: 'USDT', c
 const signal = { price: 100, resistance: 102, barCloseTime: now - 1000, peakTime: now - 300000 };
 const clone = x => structuredClone(x);
 
+test('remote pause arriving after sizing prevents the entry POST', async () => {
+  const h = harness(); let reads = 0;
+  h.executor.authorizeEntry = async () => ++reads === 1;
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.calls.filter(x => x[0] === 'place').length, 0);
+  assert.equal(h.db().state.jobs[0].phase, 'CLOSED');
+});
+test('remote control outage before POST closes the unsent intent', async () => {
+  const h = harness(); let reads = 0;
+  h.executor.authorizeEntry = async () => { if (++reads > 1) throw Error('offline'); return true; };
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.calls.filter(x => x[0] === 'place').length, 0);
+  assert.equal(h.db().state.jobs[0].phase, 'CLOSED');
+});
+
 function harness(options = {}) {
   let clock = now;
   let db = { revision: 0, state: { jobs: [], paused: false } };

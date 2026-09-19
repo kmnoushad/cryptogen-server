@@ -1,0 +1,23 @@
+[Unit]
+Description=NEXIO external Binance fade worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexio
+Group=nexio
+WorkingDirectory=/opt/nexio
+EnvironmentFile=/etc/nexio-fade.env
+ExecStart=/usr/bin/node /opt/nexio/src/fade-worker.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
