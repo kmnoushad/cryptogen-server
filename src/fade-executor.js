@@ -18,6 +18,7 @@ export class FadeExecutor {
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
     this.lastAudit = -Infinity; this.auditError = null;
     this.balanceSnapshot = null; this.incomeSnapshot = null; this.lastIncomeAttempt = -Infinity;
+    this.incomeInFlight = null;
   }
   enabled() { return this.cfg.enableFadeExecution === true; }
   async notify(message) { try { await this.telegram.send(message); } catch { /* Orders remain monitored if Telegram fails. */ } }
@@ -87,7 +88,12 @@ export class FadeExecutor {
   async run() {
     if (!this.enabled() || this.busy || this.stopped) return;
     this.busy = true;
-    try { await this.ready(); await this.reconcile(this.now() - this.lastAudit >= 60000); await this.refreshIncome(); this.lastError = null; this.lastCheck = new Date(this.now()).toISOString(); }
+    try {
+      await this.ready(); await this.reconcile(this.now() - this.lastAudit >= 60000);
+      // Reporting is optional and must never delay reconciliation, protection or heartbeats.
+      void this.refreshIncome();
+      this.lastError = null; this.lastCheck = new Date(this.now()).toISOString();
+    }
     catch (e) { await this.failed(e); }
     finally { this.busy = false; }
   }
@@ -130,11 +136,10 @@ export class FadeExecutor {
       this.balanceSnapshot = { wallet, unrealized, equity, available, initialMargin, updatedAt: this.now() };
     }
   }
-  async refreshIncome() {
-    if (this.now() - this.lastIncomeAttempt < 300000) return;
+  refreshIncome() {
+    if (this.incomeInFlight || this.now() - this.lastIncomeAttempt < 300000) return this.incomeInFlight;
     this.lastIncomeAttempt = this.now();
-    try {
-      const rows = await this.exchange.income();
+    const pending = Promise.resolve().then(() => this.exchange.income()).then(rows => {
       if (!Array.isArray(rows)) throw Error('Income history unavailable');
       const sums = { REALIZED_PNL: 0, COMMISSION: 0, FUNDING_FEE: 0 };
       for (const row of rows) {
@@ -146,7 +151,10 @@ export class FadeExecutor {
       this.incomeSnapshot = { realized: sums.REALIZED_PNL, commission: sums.COMMISSION,
         funding: sums.FUNDING_FEE, net: sums.REALIZED_PNL + sums.COMMISSION + sums.FUNDING_FEE,
         updatedAt: this.now() };
-    } catch { /* Balance reporting must never interfere with execution or protection. */ }
+    }).catch(() => { /* Balance reporting must never interfere with execution or protection. */ })
+      .finally(() => { if (this.incomeInFlight === pending) this.incomeInFlight = null; });
+    this.incomeInFlight = pending;
+    return pending;
   }
   ownsOrder(o, jobs) {
     const id = o.clientOrderId ?? o.clientAlgoId;
