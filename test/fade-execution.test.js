@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { FadeExecutor } from '../src/fade-executor.js';
-import { FadeExchange, entryPlan, exitPlan, fadeFilters } from '../src/fade-orders.js';
+import { ExchangeError, FadeExchange, entryPlan, exitPlan, fadeFilters } from '../src/fade-orders.js';
 
 const now = Date.parse('2026-09-15T13:00:00Z');
 const symbolInfo = symbol => ({ symbol, status: 'TRADING', quoteAsset: 'USDT', contractType: 'PERPETUAL', filters: [
@@ -30,6 +30,7 @@ test('remote control outage before POST closes the unsent intent', async () => {
 });
 
 function harness(options = {}) {
+  options.algoQueries ??= 0;
   let clock = now;
   let db = { revision: 0, state: { jobs: [], paused: false } };
   const messages = [], calls = [], positions = new Map(), orders = new Map(), algos = new Map();
@@ -57,7 +58,13 @@ function harness(options = {}) {
     isolate: async symbol => { calls.push(['isolate', symbol]); },
     book: async () => ({ bidPrice: String(options.price ?? 100), askPrice: String((options.price ?? 100) + 0.01) }),
     order: async (symbol, id) => { const o = orders.get(id); if (!o) throw Error('order status unknown'); return clone(o); },
-    algo: async id => { const o = algos.get(id); if (!o) throw Error('algo status unknown'); return clone(o); },
+    algo: async id => {
+      options.algoQueries = (options.algoQueries ?? 0) + 1;
+      if ((options.algoMissingReads ?? 0) > 0) {
+        options.algoMissingReads--; throw new ExchangeError(400, -2013);
+      }
+      const o = algos.get(id); if (!o) throw Error('algo status unknown'); return clone(o);
+    },
     place: async params => {
       calls.push(['place', clone(params)]);
       const job = db.state.jobs.find(j => j.symbol === params.symbol);
@@ -81,6 +88,7 @@ function harness(options = {}) {
     placeStop: async (symbol, id, price) => {
       calls.push(['stop', id, price]);
       if (options.stopFails) throw Error('SL rejected');
+      if (options.stopRejected) throw new ExchangeError(400, -2021);
       const o = { symbol, clientAlgoId: id, algoStatus: 'NEW', orderType: 'STOP_MARKET', side: 'BUY', closePosition: true, triggerPrice: String(price) };
       algos.set(id, o); return clone(o);
     },
@@ -88,7 +96,8 @@ function harness(options = {}) {
     cancelStop: async id => { calls.push(['cancelStop', id]); algos.get(id).algoStatus = 'CANCELED'; },
   };
   const cfg = { enableFadeExecution: true, fadeEnvironment: 'testnet' };
-  const make = () => new FadeExecutor({ cfg, exchange, store, now: () => clock, telegram: { send: async text => messages.push(text) } });
+  const make = () => new FadeExecutor({ cfg, exchange, store, now: () => clock, wait: async () => {},
+    telegram: { send: async text => messages.push(text) } });
   return { executor: make(), make, cfg, exchange, store, calls, positions, orders, algos, messages,
     db: () => clone(db), advance: ms => { clock += ms; }, releaseOwner: () => { owner = null; }, options };
 }
@@ -123,6 +132,17 @@ test('accepted entry with lost response is reconciled by ID, never duplicated', 
   const h = harness({ timeoutAfterEntry: true }); await h.executor.onSignal('AAAUSDT', signal); await h.executor.run();
   assert.equal(h.executor.lastError, null); assert.equal(h.positions.size, 1);
   assert.equal(h.calls.filter(c => c[0] === 'place' && c[1].side === 'SELL').length, 1);
+});
+test('accepted stop response avoids immediate query and recent -2013 visibility races are retried', async () => {
+  const h = harness({ algoMissingReads: 2 }); await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.executor.lastError, null); assert.equal(h.options.algoQueries, 0);
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null); assert.equal(h.options.algoQueries, 3);
+  assert.equal(h.positions.size, 1);
+});
+test('definite conditional-order rejection preserves the original Binance code and flattens', async () => {
+  const h = harness({ stopRejected: true }); await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.positions.size, 0); assert.match(h.executor.lastError, /-2021/);
 });
 test('unknown entry acceptance reserves slot and blocks all further entries without retries', async () => {
   const h = harness({ entryUnknown: true }); await h.executor.onSignal('AAAUSDT', signal);

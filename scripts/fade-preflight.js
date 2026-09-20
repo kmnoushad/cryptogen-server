@@ -22,7 +22,7 @@ try {
   const active = positions.filter(p => Number(p.positionAmt) !== 0);
   console.log(`Fade preflight: ${cfg.fadeEnvironment}; account reads and runtime table reachable.`);
   console.log(`Open positions ${active.length}; ordinary orders ${orders.length}; conditional orders ${algos.length}.`);
-  console.log('No orders were placed. Demo order acceptance, stop/partial fills and restart recovery still require exchange testing.');
+  console.log('No orders were placed. Order acceptance, stop/partial fills and restart recovery still require exchange testing.');
 } catch (error) {
   console.error(`Fade preflight failed: ${error.message}`);
   process.exitCode = 1;

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { decimal, down, entryPlan, exitPlan } from './fade-orders.js';
+import { decimal, down, entryPlan, ExchangeError, exitPlan } from './fade-orders.js';
 import { escapeHtml } from './util.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -8,8 +8,9 @@ const terminal = s => ['FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJ
 const truth = x => x === true || x === 'true';
 
 export class FadeExecutor {
-  constructor({ cfg, exchange, store, telegram, isPaused = () => false, authorizeEntry = async () => true, now = () => Date.now() }) {
-    Object.assign(this, { cfg, exchange, store, telegram, isPaused, authorizeEntry, now });
+  constructor({ cfg, exchange, store, telegram, isPaused = () => false, authorizeEntry = async () => true,
+    now = () => Date.now(), wait = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+    Object.assign(this, { cfg, exchange, store, telegram, isPaused, authorizeEntry, now, wait });
     this.owner = randomUUID(); this.scope = `${cfg.fadeEnvironment ?? 'testnet'}:primary`;
     this.busy = false; this.stopped = false; this.timer = null; this.row = null;
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
@@ -121,16 +122,35 @@ export class FadeExecutor {
   }
   async submit(job, key, kind, params) {
     let a = job.actions[key];
+    let placed;
     if (!a) {
       a = job.actions[key] = { id: `nf-${job.id}-${key}`, kind, params, intendedAt: this.now() };
       await this.save(); // Intent durable BEFORE any exchange mutation.
       try {
-        await this.mutate(() => kind === 'stop'
+        placed = await this.mutate(() => kind === 'stop'
           ? this.exchange.placeStop(job.symbol, a.id, params.triggerPrice)
           : this.exchange.place({ symbol: job.symbol, newClientOrderId: a.id, ...params }));
-      } catch { /* Includes timeout-after-accept: query the durable ID, never resubmit it. */ }
+      } catch (e) {
+        // A signed 4xx response is a definite rejection. Network/5xx failures
+        // remain ambiguous and are reconciled by durable ID, never resubmitted.
+        if (e instanceof ExchangeError && e.status < 500) throw e;
+      }
     }
-    const order = kind === 'stop' ? await this.exchange.algo(a.id) : await this.exchange.order(job.symbol, a.id);
+    let order = kind === 'stop' && placed ? placed : null;
+    if (!order) {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          order = kind === 'stop' ? await this.exchange.algo(a.id) : await this.exchange.order(job.symbol, a.id);
+          break;
+        } catch (e) {
+          // Binance may briefly return NO_SUCH_ORDER while a newly accepted
+          // conditional order becomes visible to its query endpoint.
+          const recent = this.now() - a.intendedAt <= 10000;
+          if (e?.code !== -2013 || !recent || attempt === 3) throw e;
+          await this.wait(250 * (2 ** attempt));
+        }
+      }
+    }
     if (!order || (kind === 'stop' ? order.clientAlgoId : order.clientOrderId) !== a.id || order.symbol !== job.symbol) throw Error('Exchange order identity mismatch');
     return order;
   }
