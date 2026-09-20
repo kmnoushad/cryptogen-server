@@ -1,8 +1,12 @@
+export const workerStalled = (worker, now = Date.now(), limit = 45000) => worker.busy
+  && Number.isFinite(worker.tickStartedAt) && now - worker.tickStartedAt > limit;
+
 // Serial polling; one Telegram poller stays on Railway. No scanners run here.
 export class FadeWorkerLoop {
   constructor({ executor, store, now = () => Date.now() }) {
     Object.assign(this, { executor, store, now });
     this.startedAt = now(); this.seen = new Map(); this.busy = false;
+    this.tickStartedAt = null; this.lastCompletedAt = this.startedAt;
     this.control = { paused: true }; this.stopped = false;
     executor.isPaused = () => this.stopped || this.control.paused || this.control.close_requested;
     executor.authorizeEntry = async () => {
@@ -25,7 +29,7 @@ export class FadeWorkerLoop {
   }
   async tick() {
     if (this.busy || this.stopped) return;
-    this.busy = true;
+    this.busy = true; this.tickStartedAt = this.now();
     let error = null;
     try {
       // Protect existing positions even when the signal/control channel fails.
@@ -55,6 +59,7 @@ export class FadeWorkerLoop {
         await this.store.fadeHeartbeat(this.executor.scope,
           this.executor.status().replace(/<[^>]*>/g, '') + (error ? '\nSignal/control channel unavailable; new entries blocked.' : ''));
       } catch { /* An absent heartbeat is surfaced by Railway as stale. */ }
+      this.lastCompletedAt = this.now(); this.tickStartedAt = null;
       this.busy = false;
     }
   }

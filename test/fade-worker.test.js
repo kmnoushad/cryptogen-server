@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { FadeWorkerLoop } from '../src/fade-worker-loop.js';
+import { FadeWorkerLoop, workerStalled } from '../src/fade-worker-loop.js';
 import { FadeRemote } from '../src/fade-remote.js';
 import { loadFadeConfig } from '../src/fade-config.js';
 import { loadConfig } from '../src/config.js';
@@ -54,7 +54,11 @@ test('worker never overlaps polls and stopped worker does not enter', async () =
   const h = harness(); let release;
   h.executor.run = () => new Promise(resolve => { release = resolve; });
   const pending = h.worker.tick(); await h.worker.tick();
-  assert.equal(h.worker.busy, true); h.worker.stop(); release(); await pending;
+  assert.equal(h.worker.busy, true);
+  assert.equal(workerStalled(h.worker, now + 45001), true);
+  h.worker.stop(); release(); await pending;
+  assert.equal(h.worker.tickStartedAt, null);
+  assert.equal(h.worker.lastCompletedAt, now);
   assert.ok(!h.calls.includes('AAAUSDT'));
 });
 test('remote failure is visible and stale status never claims successful closure', async () => {

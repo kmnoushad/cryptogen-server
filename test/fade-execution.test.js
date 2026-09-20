@@ -56,7 +56,7 @@ function harness(options = {}) {
       assets: [{ asset: 'USDT', walletBalance: String(options.wallet ?? 100),
         unrealizedProfit: String(options.unrealized ?? 0), marginBalance: String((options.wallet ?? 100) + (options.unrealized ?? 0)),
         availableBalance: String(options.available ?? 100), initialMargin: String(options.initialMargin ?? 0) }] }),
-    income: async () => options.income ?? [],
+    income: async () => options.incomePending ? new Promise(() => {}) : options.income ?? [],
     positions: async () => [...positions].map(([symbol, qty]) => ({ symbol, positionAmt: String(-qty), notional: String(qty * 100), positionSide: 'BOTH' })),
     orders: async () => [...orders.values()].filter(o => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).map(clone),
     algos: async () => [...algos.values()].filter(o => o.algoStatus === 'NEW').map(clone),
@@ -132,11 +132,21 @@ test('verified account snapshot reports equity progress and seven-day net flows'
       { asset: 'USDT', incomeType: 'FUNDING_FEE', income: '-0.10' },
       { asset: 'USDT', incomeType: 'TRANSFER', income: '100.00' },
     ] });
-  await h.executor.run(); const report = h.executor.balanceReport();
+  await h.executor.run(); await h.executor.incomeInFlight;
+  const report = h.executor.balanceReport();
   assert.match(report, /Wallet \$98\.50 · Open PnL \+\$0\.75 · Equity \$99\.25/);
   assert.match(report, /Progress vs \$100\.00: -\$0\.75 \(-0\.75%\)/);
   assert.match(report, /realized \+\$2\.00 · commission -\$0\.40 · funding -\$0\.10 · net \+\$1\.50/);
   assert.doesNotMatch(report, /100\.00.*net/);
+});
+test('a stuck optional income request cannot block reconciliation or balance updates', async () => {
+  const h = harness({ incomePending: true, wallet: 99 });
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  assert.match(h.executor.balanceReport(), /Wallet \$99\.00/);
+  assert.ok(h.executor.incomeInFlight);
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
 });
 test('fresh fade entry gets native stop before 75% reduce-only limit; restart creates no duplicate', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
