@@ -6,6 +6,8 @@ const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16
 const open = j => j.phase !== 'CLOSED';
 const terminal = s => ['FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'].includes(s);
 const truth = x => x === true || x === 'true';
+const dollars = value => `$${Number(value).toFixed(2)}`;
+const signedDollars = value => `${Number(value) >= 0 ? '+' : '-'}$${Math.abs(Number(value)).toFixed(2)}`;
 
 export class FadeExecutor {
   constructor({ cfg, exchange, store, telegram, isPaused = () => false, authorizeEntry = async () => true,
@@ -15,6 +17,7 @@ export class FadeExecutor {
     this.busy = false; this.stopped = false; this.timer = null; this.row = null;
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
     this.lastAudit = -Infinity; this.auditError = null;
+    this.balanceSnapshot = null; this.incomeSnapshot = null; this.lastIncomeAttempt = -Infinity;
   }
   enabled() { return this.cfg.enableFadeExecution === true; }
   async notify(message) { try { await this.telegram.send(message); } catch { /* Orders remain monitored if Telegram fails. */ } }
@@ -39,7 +42,25 @@ export class FadeExecutor {
   async mutate(action) { await this.fence(); return action(); }
   health() { return { enabled: this.enabled(), environment: this.cfg.fadeEnvironment ?? 'testnet',
     paused: this.row?.state.paused ?? true, active: this.row?.state.jobs.filter(open).length ?? 0,
-    lastCheck: this.lastCheck, lastError: this.lastError }; }
+    lastCheck: this.lastCheck, lastError: this.lastError, balance: this.balanceSnapshot }; }
+  balanceReport() {
+    const b = this.balanceSnapshot;
+    if (!b) return '💰 FADE BALANCE\nBalance snapshot unavailable; worker is awaiting a verified Binance account read.';
+    if (this.now() - b.updatedAt > 120000) return `💰 FADE BALANCE\nBalance snapshot stale since ${new Date(b.updatedAt).toISOString()}; check Binance directly.`;
+    const baseline = Number(this.cfg.fadeStartBalanceUsdt ?? 100);
+    const progress = b.equity - baseline;
+    const pct = progress / baseline * 100;
+    const flow = this.incomeSnapshot;
+    return '💰 FADE BALANCE\n' +
+      `Wallet ${dollars(b.wallet)} · Open PnL ${signedDollars(b.unrealized)} · Equity ${dollars(b.equity)}\n` +
+      `Available ${dollars(b.available)} · Margin in use ${dollars(b.initialMargin)}\n` +
+      `Progress vs ${dollars(baseline)}: ${signedDollars(progress)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)\n` +
+      (flow
+        ? `Last 7d: realized ${signedDollars(flow.realized)} · commission ${signedDollars(flow.commission)} · funding ${signedDollars(flow.funding)} · net ${signedDollars(flow.net)}\n`
+        : 'Last 7d exchange flows: awaiting refresh\n') +
+      `Balance updated: ${new Date(b.updatedAt).toISOString()}\n` +
+      'Deposits or withdrawals change baseline progress.';
+  }
   status() {
     const h = this.health();
     return `🤖 <b>FADE AUTO — ${escapeHtml(h.environment.toUpperCase())}</b>\n` +
@@ -48,7 +69,7 @@ export class FadeExecutor {
       'Planned stop loss $5 · 75% exit targets approximately $3 net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}`).join('\n') ?? '') +
-      `\nLast reconciliation: ${h.lastCheck ?? 'not completed'}\n${h.lastError ? '⚠️ ' + escapeHtml(h.lastError) : ''}\n` +
+      `\n${this.balanceReport()}\n\nLast reconciliation: ${h.lastCheck ?? 'not completed'}\n${h.lastError ? '⚠️ ' + escapeHtml(h.lastError) : ''}\n` +
       '/fadepause stops new entries; protection continues. /fadecloseall closes bot-owned positions.\n' +
       'Realized profit/loss can differ due to fills, fees and funding.';
   }
@@ -66,7 +87,7 @@ export class FadeExecutor {
   async run() {
     if (!this.enabled() || this.busy || this.stopped) return;
     this.busy = true;
-    try { await this.ready(); await this.reconcile(this.now() - this.lastAudit >= 60000); this.lastError = null; this.lastCheck = new Date(this.now()).toISOString(); }
+    try { await this.ready(); await this.reconcile(this.now() - this.lastAudit >= 60000); await this.refreshIncome(); this.lastError = null; this.lastCheck = new Date(this.now()).toISOString(); }
     catch (e) { await this.failed(e); }
     finally { this.busy = false; }
   }
@@ -93,9 +114,39 @@ export class FadeExecutor {
     if (mode.dualSidePosition !== false || assets.multiAssetsMargin !== false) throw Error('Fade execution requires One-way and Single-Asset mode; no account modes were changed');
     if (permissions.canTrade !== true) throw Error('Account trading is unavailable');
     if (!Array.isArray(account.assets) || !Array.isArray(positions) || !Array.isArray(orders) || !Array.isArray(algos)) throw Error('Account state unavailable');
+    this.captureBalance(account);
     const active = positions.filter(p => Number(p.positionAmt) !== 0);
     if (active.some(p => !Number.isFinite(Number(p.positionAmt)))) throw Error('Invalid position quantities');
     return { account, positions: active, orders, algos };
+  }
+  captureBalance(account) {
+    const usdt = account.assets?.find(a => a.asset === 'USDT');
+    const wallet = Number(account.totalWalletBalance ?? usdt?.walletBalance);
+    const unrealized = Number(account.totalUnrealizedProfit ?? usdt?.unrealizedProfit ?? 0);
+    const equity = Number(account.totalMarginBalance ?? usdt?.marginBalance ?? wallet + unrealized);
+    const available = Number(account.availableBalance ?? usdt?.availableBalance);
+    const initialMargin = Number(account.totalInitialMargin ?? usdt?.initialMargin ?? 0);
+    if ([wallet, unrealized, equity, available, initialMargin].every(Number.isFinite)) {
+      this.balanceSnapshot = { wallet, unrealized, equity, available, initialMargin, updatedAt: this.now() };
+    }
+  }
+  async refreshIncome() {
+    if (this.now() - this.lastIncomeAttempt < 300000) return;
+    this.lastIncomeAttempt = this.now();
+    try {
+      const rows = await this.exchange.income();
+      if (!Array.isArray(rows)) throw Error('Income history unavailable');
+      const sums = { REALIZED_PNL: 0, COMMISSION: 0, FUNDING_FEE: 0 };
+      for (const row of rows) {
+        if (row.asset !== 'USDT' || !(row.incomeType in sums)) continue;
+        const amount = Number(row.income);
+        if (!Number.isFinite(amount)) throw Error('Invalid income history amount');
+        sums[row.incomeType] += amount;
+      }
+      this.incomeSnapshot = { realized: sums.REALIZED_PNL, commission: sums.COMMISSION,
+        funding: sums.FUNDING_FEE, net: sums.REALIZED_PNL + sums.COMMISSION + sums.FUNDING_FEE,
+        updatedAt: this.now() };
+    } catch { /* Balance reporting must never interfere with execution or protection. */ }
   }
   ownsOrder(o, jobs) {
     const id = o.clientOrderId ?? o.clientAlgoId;

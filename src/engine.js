@@ -1096,7 +1096,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadepause /faderesume /fadecloseall /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1133,6 +1133,8 @@ export class Engine {
         `⏰ ${gstTime()} GST`);
     } else if (text === '/fadeauto') {
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.status() : 'Fade execution unavailable.');
+    } else if (text === '/fadebalance') {
+      await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.balance() : 'Fade balance unavailable.');
     } else if (['/fadepause', '/faderesume', '/fadecloseall'].includes(text)) {
       const action = text === '/fadepause' ? 'pause' : text === '/faderesume' ? 'resume' : 'close';
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.control(action) : 'Fade execution unavailable.');
