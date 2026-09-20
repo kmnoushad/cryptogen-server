@@ -32,6 +32,20 @@ export class FadeRemote {
         '\nCommands are requests; check worker acknowledgement and Binance.\n/fadepause /faderesume /fadecloseall';
     } catch { return 'External fade status unavailable. Check FADE_ENVIRONMENT and run sql/fade_worker.sql. Railway alerts remain independent.'; }
   }
+  async balance() {
+    try {
+      const rows = await this.store.get('nexio_fade_worker_status', [['scope', `eq.${this.scope()}`], ['select', '*']]);
+      const status = rows[0];
+      const age = status ? Date.now() - Date.parse(status.updated_at) : Infinity;
+      if (!(age >= 0 && age < 60000)) return 'Fade balance unavailable: worker heartbeat is offline or stale. Check Binance directly.';
+      const lines = String(status.report ?? '').split('\n');
+      const start = lines.indexOf('💰 FADE BALANCE');
+      if (start < 0) return 'Fade balance unavailable: update the AWS worker to v6.9.20.';
+      let end = lines.indexOf('', start);
+      if (end < 0) end = lines.length;
+      return escapeHtml(lines.slice(start, end).join('\n'));
+    } catch { return 'Fade balance unavailable. Check the AWS worker, Supabase and Binance directly.'; }
+  }
   async control(action) {
     try {
       await this.store.fadeSetControl(this.scope(), action);

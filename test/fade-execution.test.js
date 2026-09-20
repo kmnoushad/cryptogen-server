@@ -49,7 +49,14 @@ function harness(options = {}) {
     mode: async () => ({ dualSidePosition: !!options.hedge }),
     assetsMode: async () => ({ multiAssetsMargin: false }),
     accountPermissions: async () => ({ canTrade: options.canTrade !== false }),
-    account: async () => ({ assets: [{ asset: 'USDT', availableBalance: '250' }] }),
+    account: async () => ({ totalWalletBalance: String(options.wallet ?? 100),
+      totalUnrealizedProfit: String(options.unrealized ?? 0),
+      totalMarginBalance: String((options.wallet ?? 100) + (options.unrealized ?? 0)),
+      availableBalance: String(options.available ?? 100), totalInitialMargin: String(options.initialMargin ?? 0),
+      assets: [{ asset: 'USDT', walletBalance: String(options.wallet ?? 100),
+        unrealizedProfit: String(options.unrealized ?? 0), marginBalance: String((options.wallet ?? 100) + (options.unrealized ?? 0)),
+        availableBalance: String(options.available ?? 100), initialMargin: String(options.initialMargin ?? 0) }] }),
+    income: async () => options.income ?? [],
     positions: async () => [...positions].map(([symbol, qty]) => ({ symbol, positionAmt: String(-qty), notional: String(qty * 100), positionSide: 'BOTH' })),
     orders: async () => [...orders.values()].filter(o => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).map(clone),
     algos: async () => [...algos.values()].filter(o => o.algoStatus === 'NEW').map(clone),
@@ -116,6 +123,20 @@ test('stale and widened spread entries are refused', () => {
   const input = { signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, now };
   assert.throws(() => entryPlan({ ...input, now: now + 90001 }));
   assert.throws(() => entryPlan({ ...input, ask: 101 }));
+});
+test('verified account snapshot reports equity progress and seven-day net flows', async () => {
+  const h = harness({ wallet: 98.5, unrealized: 0.75, available: 70, initialMargin: 28.5,
+    income: [
+      { asset: 'USDT', incomeType: 'REALIZED_PNL', income: '2.00' },
+      { asset: 'USDT', incomeType: 'COMMISSION', income: '-0.40' },
+      { asset: 'USDT', incomeType: 'FUNDING_FEE', income: '-0.10' },
+      { asset: 'USDT', incomeType: 'TRANSFER', income: '100.00' },
+    ] });
+  await h.executor.run(); const report = h.executor.balanceReport();
+  assert.match(report, /Wallet \$98\.50 · Open PnL \+\$0\.75 · Equity \$99\.25/);
+  assert.match(report, /Progress vs \$100\.00: -\$0\.75 \(-0\.75%\)/);
+  assert.match(report, /realized \+\$2\.00 · commission -\$0\.40 · funding -\$0\.10 · net \+\$1\.50/);
+  assert.doesNotMatch(report, /100\.00.*net/);
 });
 test('fresh fade entry gets native stop before 75% reduce-only limit; restart creates no duplicate', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal);

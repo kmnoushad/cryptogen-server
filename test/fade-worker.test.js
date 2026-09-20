@@ -66,13 +66,26 @@ test('remote failure is visible and stale status never claims successful closure
   assert.match(await remote.control('close'), /failed; no confirmation/);
   cfg.fadeEnvironment = 'bad'; assert.match(await remote.status(), /unavailable/);
 });
+test('remote balance returns only a fresh sanitized worker balance section', async () => {
+  const report = 'FADE AUTO — LIVE\n💰 FADE BALANCE\nWallet $98.50 · Open PnL +$0.75 · Equity $99.25\nAvailable $70.00\n\nLast reconciliation: now';
+  const store = { get: async () => [{ updated_at: new Date().toISOString(), report }] };
+  const remote = new FadeRemote({ cfg: { fadeEnvironment: 'live' }, store });
+  const balance = await remote.balance();
+  assert.match(balance, /FADE BALANCE/); assert.match(balance, /Equity \$99\.25/);
+  assert.doesNotMatch(balance, /Last reconciliation/);
+  store.get = async () => [{ updated_at: '2020-01-01', report }];
+  assert.match(await remote.balance(), /offline or stale/);
+});
 test('Railway ignores execution credentials/settings; worker validates its own minimal config', () => {
   const env = { BOT_TOKEN: 'test', OWNER_CHAT_ID: '1', SUPABASE_URL: 'https://example.com',
     SUPABASE_SERVICE_ROLE_KEY: 'test', BINANCE_API_KEY: 'test', BINANCE_API_SECRET: 'test',
     FADE_ENVIRONMENT: 'broken', ENABLE_FADE_EXECUTION: 'broken' };
   assert.equal(loadConfig(env).enableFadeExecution, false);
   assert.throws(() => loadFadeConfig(env), /FADE_ENVIRONMENT/);
-  assert.equal(loadFadeConfig({ ...env, FADE_ENVIRONMENT: 'testnet', ENABLE_FADE_EXECUTION: 'false' }).enableFadeExecution, false);
+  const workerCfg = loadFadeConfig({ ...env, FADE_ENVIRONMENT: 'testnet', ENABLE_FADE_EXECUTION: 'false' });
+  assert.equal(workerCfg.enableFadeExecution, false); assert.equal(workerCfg.fadeStartBalanceUsdt, 100);
+  assert.throws(() => loadFadeConfig({ ...env, FADE_ENVIRONMENT: 'testnet', ENABLE_FADE_EXECUTION: 'false',
+    FADE_START_BALANCE_USDT: 'zero' }), /FADE_START_BALANCE_USDT/);
   const main = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
   assert.doesNotMatch(main, /FadeExchange|FadeExecutor|fade-orders|fade-executor/);
   const worker = readFileSync(new URL('../src/fade-worker.js', import.meta.url), 'utf8');
