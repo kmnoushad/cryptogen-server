@@ -46,6 +46,10 @@ function harness(options = {}) {
   };
   const exchange = {
     syncTime: async () => {},
+    btcCandles: async () => Array.from({ length: 120 }, (_, i) => {
+      const t = clock - (120 - i) * 60000, c = 60000 - i * 10;
+      return [t, String(c), String(c + 1), String(c - 1), String(c), '1', t + 59999];
+    }),
     mode: async () => ({ dualSidePosition: !!options.hedge }),
     assetsMode: async () => ({ multiAssetsMargin: false }),
     accountPermissions: async () => ({ canTrade: options.canTrade !== false }),
@@ -63,7 +67,7 @@ function harness(options = {}) {
     info: async () => ({ symbols: ['AAAUSDT', 'BBBUSDT', 'CCCUSDT', 'DDDUSDT'].map(symbolInfo) }),
     fees: async () => ({ takerCommissionRate: '0.0005', makerCommissionRate: '0.0002' }),
     isolate: async symbol => { calls.push(['isolate', symbol]); },
-    book: async () => ({ bidPrice: String(options.price ?? 100), askPrice: String((options.price ?? 100) + 0.01) }),
+    book: async symbol => symbol === 'BTCUSDT' ? { bidPrice: '58809', askPrice: '58810' } : ({ bidPrice: String(options.price ?? 100), askPrice: String((options.price ?? 100) + 0.01) }),
     order: async (symbol, id) => { const o = orders.get(id); if (!o) throw Error('order status unknown'); return clone(o); },
     algo: async id => {
       options.algoQueries = (options.algoQueries ?? 0) + 1;
@@ -255,4 +259,24 @@ test('signed client sends correct HMAC and never retries uncertain mutations or 
   const signature = url.searchParams.get('signature'); url.searchParams.delete('signature');
   assert.equal(signature, createHmac('sha256', 'test-secret').update(url.searchParams.toString()).digest('hex'));
   assert.equal(url.host, 'demo-fapi.binance.com'); assert.equal(calls, 1);
+});
+
+test('BTC bullish gate refuses entry without changing existing position protection', async () => {
+  const h = harness();
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.positions.size, 1);
+  h.exchange.btcCandles = async () => [];
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.positions.size, 1);
+  assert.equal(h.executor.btcGate.allowed, false);
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  assert.ok(h.algos.size > 0);
+});
+test('BTC gate changing during preparation prevents the SELL order', async () => {
+  const h = harness(); const candles = h.exchange.btcCandles; let reads = 0;
+  h.exchange.btcCandles = () => ++reads === 1 ? candles() : [];
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.calls.filter(c => c[0] === 'place').length, 0);
+  assert.equal(h.db().state.jobs[0].phase, 'CLOSED');
 });

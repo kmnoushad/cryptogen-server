@@ -45,6 +45,7 @@ export class FadeExchange {
   mode() { return this.request('GET', '/fapi/v1/positionSide/dual'); }
   assetsMode() { return this.request('GET', '/fapi/v1/multiAssetsMargin'); }
   info() { return this.request('GET', '/fapi/v1/exchangeInfo', {}, false); }
+  btcCandles() { return this.request('GET', '/fapi/v1/klines', { symbol: 'BTCUSDT', interval: '1m', limit: 121 }, false); }
   book(symbol) { return this.request('GET', '/fapi/v1/ticker/bookTicker', { symbol }, false); }
   fees(symbol) { return this.request('GET', '/fapi/v1/commissionRate', { symbol }); }
   order(symbol, id) { return this.request('GET', '/fapi/v1/order', { symbol, origClientOrderId: id }); }
