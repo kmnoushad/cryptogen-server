@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { decimal, down, entryPlan, ExchangeError, exitPlan } from './fade-orders.js';
+import { fadeBtcGate } from './fade-btc-gate.js';
 import { escapeHtml } from './util.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -18,7 +19,7 @@ export class FadeExecutor {
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
     this.lastAudit = -Infinity; this.auditError = null;
     this.balanceSnapshot = null; this.incomeSnapshot = null; this.lastIncomeAttempt = -Infinity;
-    this.incomeInFlight = null;
+    this.incomeInFlight = null; this.btcGate = null;
   }
   enabled() { return this.cfg.enableFadeExecution === true; }
   async notify(message) { try { await this.telegram.send(message); } catch { /* Orders remain monitored if Telegram fails. */ } }
@@ -66,6 +67,7 @@ export class FadeExecutor {
     const h = this.health();
     return `🤖 <b>FADE AUTO — ${escapeHtml(h.environment.toUpperCase())}</b>\n` +
       `${h.enabled ? h.paused ? 'Entries paused' : 'Enabled' : 'Disabled'} · ${h.active}/3 active intents\n` +
+      `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       'Budget cap $250 · isolated 2x · max $150 notional each\n' +
       'Planned stop loss $5 · 75% exit targets approximately $3 net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
@@ -325,6 +327,15 @@ export class FadeExecutor {
       throw Error(`Protection/reconciliation issue on ${job.symbol}; emergency close requested: ${e.message}`);
     }
   }
+  async checkBtcGate() {
+    try {
+      const [rows, book] = await Promise.all([this.exchange.btcCandles(), this.exchange.book('BTCUSDT')]);
+      this.btcGate = fadeBtcGate(rows, book, this.now());
+    } catch {
+      this.btcGate = { allowed: false, reason: 'BTC data unavailable; short gate closed', checkedAt: this.now() };
+    }
+    return this.btcGate.allowed;
+  }
   async onSignal(symbol, signal) {
     if (!this.enabled() || this.busy || this.stopped || this.isPaused()) return;
     this.busy = true;
@@ -332,6 +343,7 @@ export class FadeExecutor {
       if (!await this.authorizeEntry()) return;
       await this.ready(); await this.reconcile();
       if (this.row.state.paused) return;
+      if (!await this.checkBtcGate()) return;
       const jobs = this.row.state.jobs;
       if (jobs.filter(open).length >= 3 || jobs.some(j => j.symbol === symbol && (open(j) || this.now() - j.closedAt < 1800000))) return;
       const id = hash(`${this.scope}:${symbol}:${signal.peakTime}`);
@@ -363,7 +375,7 @@ export class FadeExecutor {
       await this.save();
       await this.fence();
       let authorized;
-      try { authorized = await this.authorizeEntry(); }
+      try { authorized = await this.authorizeEntry() && await this.checkBtcGate(); }
       catch {
         job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'CONTROL_UNAVAILABLE_BEFORE_SEND';
         await this.save();
