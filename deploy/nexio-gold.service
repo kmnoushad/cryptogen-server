@@ -1,0 +1,25 @@
+[Unit]
+Description=CryptoNerd Gold Watch paper-only worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexio
+Group=nexio
+WorkingDirectory=/opt/nexio
+EnvironmentFile=/etc/nexio-gold.env
+ExecStart=/usr/bin/node /opt/nexio/src/gold-watch.js
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+StateDirectory=nexio-gold
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+
