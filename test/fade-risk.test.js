@@ -18,6 +18,22 @@ test('GST day boundary and daily cap count net income, not wallet transfers', ()
   assert.equal(fadeRiskDecision({ rows: rows.slice(2), jobs: [], equity: 100, now }).allowed, true);
 });
 
+test('profitable day locks fresh entries after gains are given back net of fees, across restarts', () => {
+  const start = gstDayStart(now);
+  const rows = [row('REALIZED_PNL', 5, start + 1000), row('COMMISSION', -0.5, start + 1000),
+    row('REALIZED_PNL', -1.5, start + 2000), row('COMMISSION', -0.6, start + 2000)];
+  assert.match(fadeRiskDecision({ rows, jobs: [], equity: 100, now }).reason, /profit giveback/);
+  const before = fadeRiskDecision({ rows: rows.slice(0, 2), jobs: [], equity: 100, now });
+  assert.equal(before.allowed, true);
+  assert.equal(before.dailyPeak, 4.5);
+  assert.equal(fadeRiskDecision({ rows: [row('REALIZED_PNL', 4, start + 1000),
+    row('COMMISSION', -1.5, start + 1000), row('REALIZED_PNL', -2, start + 2000)],
+  jobs: [], equity: 100, now }).allowed, true);
+  assert.equal(fadeRiskDecision({ rows, jobs: [], equity: 100, now: start + 86400001 }).allowed, true);
+  const transfer = row('TRANSFER', 200, start + 500);
+  assert.match(fadeRiskDecision({ rows: [transfer, ...rows], jobs: [], equity: 150, now }).reason, /profit giveback/);
+});
+
 test('two verified losing closes block four hours; a verified winner breaks streak', () => {
   const a = job('AAAUSDT', now - 1200000, now - 1000000);
   const b = job('BBBUSDT', now - 600000, now - 400000);

@@ -149,6 +149,20 @@ test('verified account snapshot reports equity progress and seven-day net flows'
   assert.match(report, /realized \+\$2\.00 · commission -\$0\.40 · funding -\$0\.10 · net \+\$1\.50/);
   assert.doesNotMatch(report, /100\.00.*net/);
 });
+test('worker warns once when a profitable day gives back gains without blocking position reconciliation', async () => {
+  const h = harness({ income: [
+    { asset: 'USDT', symbol: 'AAAUSDT', incomeType: 'REALIZED_PNL', income: '4.00', time: now - 60000 },
+    { asset: 'USDT', symbol: 'AAAUSDT', incomeType: 'COMMISSION', income: '-0.20', time: now - 60000 },
+    { asset: 'USDT', symbol: 'BBBUSDT', incomeType: 'REALIZED_PNL', income: '-1.70', time: now - 30000 },
+    { asset: 'USDT', symbol: 'BBBUSDT', incomeType: 'COMMISSION', income: '-0.40', time: now - 30000 },
+  ] });
+  await h.executor.run(); await h.executor.incomeInFlight;
+  assert.match(h.executor.entrySafety.reason, /profit giveback/);
+  assert.equal(h.messages.filter(m => m.includes('profit giveback')).length, 1);
+  h.advance(300001); await h.executor.run(); await h.executor.incomeInFlight;
+  assert.equal(h.messages.filter(m => m.includes('profit giveback')).length, 1);
+  assert.equal(h.executor.lastError, null);
+});
 test('a stuck optional income request cannot block reconciliation or balance updates', async () => {
   const h = harness({ incomePending: true, wallet: 99 });
   await h.executor.run();
@@ -232,6 +246,7 @@ test('profit locks before the 75% limit fills; native replacement is installed f
   assert.equal(h.executor.lastError, null);
   const after = h.db().state.jobs[0];
   assert.equal(after.phase, 'OPEN');
+  assert.ok(after.peakOpenNet > 0);
   assert.ok(after.plan.stop < before.plan.stop && after.plan.stop <= after.plan.breakEven);
   assert.ok(h.calls.findIndex(c => c[0] === 'cancelStop' && c[1] === before.stopId)
     > h.calls.findIndex(c => c[0] === 'stop' && c[1] === after.stopId));
