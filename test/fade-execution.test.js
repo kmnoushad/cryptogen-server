@@ -11,7 +11,7 @@ const symbolInfo = symbol => ({ symbol, status: 'TRADING', quoteAsset: 'USDT', c
   { filterType: 'PRICE_FILTER', tickSize: '0.001', minPrice: '0.001', maxPrice: '100000' },
   { filterType: 'MIN_NOTIONAL', notional: '5' },
 ] });
-const signal = { price: 100, resistance: 102, barCloseTime: now - 1000, peakTime: now - 300000 };
+const signal = { price: 100, resistance: 100.8, barCloseTime: now - 1000, peakTime: now - 300000 };
 const clone = x => structuredClone(x);
 
 test('remote pause arriving after sizing prevents the entry POST', async () => {
@@ -61,6 +61,9 @@ function harness(options = {}) {
         unrealizedProfit: String(options.unrealized ?? 0), marginBalance: String((options.wallet ?? 100) + (options.unrealized ?? 0)),
         availableBalance: String(options.available ?? 100), initialMargin: String(options.initialMargin ?? 0) }] }),
     income: async () => options.incomePending ? new Promise(() => {}) : options.income ?? [],
+    openInterestHistory: async symbol => Array.from({ length: 5 }, (_, i) =>
+      ({ symbol, timestamp: clock - (4 - i) * 300000, sumOpenInterestValue: '1000000' })),
+    funding: async symbol => ({ symbol, lastFundingRate: '0.0001', nextFundingTime: clock + 3600000, time: clock }),
     positions: async () => [...positions].map(([symbol, qty]) => ({ symbol, positionAmt: String(-qty), notional: String(qty * 100), positionSide: 'BOTH' })),
     orders: async () => [...orders.values()].filter(o => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).map(clone),
     algos: async () => [...algos.values()].filter(o => o.algoStatus === 'NEW').map(clone),
@@ -85,7 +88,8 @@ function harness(options = {}) {
       if (params.type === 'LIMIT' && options.tpFails) throw Error('TP rejected');
       const qty = Number(params.quantity), market = params.type === 'MARKET';
       const o = { ...params, clientOrderId: params.newClientOrderId, orderId: orders.size + 1,
-        origQty: String(qty), executedQty: market ? String(qty) : '0', avgPrice: '100', status: market ? 'FILLED' : 'NEW' };
+        origQty: String(qty), executedQty: market ? String(qty) : '0', avgPrice: params.side === 'SELL'
+          ? String(options.entryAvgPrice ?? 100) : '100', status: market ? 'FILLED' : 'NEW' };
       orders.set(o.clientOrderId, o);
       if (params.side === 'SELL') positions.set(params.symbol, qty);
       if (params.side === 'SELL' && options.saveFailsAfterEntry) options.saveFails = true;
@@ -108,23 +112,25 @@ function harness(options = {}) {
   };
   const cfg = { enableFadeExecution: true, fadeEnvironment: 'testnet' };
   const make = () => new FadeExecutor({ cfg, exchange, store, now: () => clock, wait: async () => {},
+    eventGate: options.eventGate ?? { check: async () => ({ allowed: true, reason: 'Test event feed clear' }) },
     telegram: { send: async text => messages.push(text) } });
   return { executor: make(), make, cfg, exchange, store, calls, positions, orders, algos, messages,
     db: () => clone(db), advance: ms => { clock += ms; }, releaseOwner: () => { owner = null; }, options };
 }
 
-test('size cap, rounded partial, $3 net after full entry fees and $5 modeled stop', () => {
-  const p = entryPlan({ signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, now });
+test('size cap preserves invalidation, 0.5% equity risk, and >=1.5R net partial', () => {
+  const p = entryPlan({ signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, equity: 100, now });
   assert.ok(p.qty * p.entry <= 150);
   const net = p.partial * (p.entry - p.target) - p.qty * p.entry * p.fee - p.partial * p.target * p.fee;
-  assert.ok(net >= 3 && net < 3.01);
+  assert.ok(net >= 1.5 * p.riskDollars - 1e-6);
   const loss = p.qty * (p.stop - p.entry) + p.qty * p.entry * p.fee + p.qty * p.stop * (p.fee + 0.0005);
-  assert.ok(loss <= 5 && loss > 4.99);
+  assert.ok(loss <= 0.5 + 1e-6);
+  assert.ok(p.stop < signal.resistance && p.stop > 100.01);
   assert.ok(p.runner > 0);
   assert.throws(() => exitPlan(100, 0.01, 0.0005, fadeFilters(symbolInfo('AAAUSDT'))));
 });
 test('stale and widened spread entries are refused', () => {
-  const input = { signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, now };
+  const input = { signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, equity: 100, now };
   assert.throws(() => entryPlan({ ...input, now: now + 90001 }));
   assert.throws(() => entryPlan({ ...input, ask: 101 }));
 });
@@ -179,6 +185,12 @@ test('definite conditional-order rejection preserves the original Binance code a
   const h = harness({ stopRejected: true }); await h.executor.onSignal('AAAUSDT', signal);
   assert.equal(h.positions.size, 0); assert.match(h.executor.lastError, /-2021/);
 });
+test('adverse fill exceeding original equity risk budget requests a reduce-only flatten', async () => {
+  const h = harness({ entryAvgPrice: 99.5 }); await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.positions.size, 0);
+  assert.match(h.executor.lastError, /exceeded equity risk budget/);
+  assert.ok(h.calls.some(c => c[0] === 'place' && c[1].side === 'BUY' && c[1].reduceOnly === 'true'));
+});
 test('unknown entry acceptance reserves slot and blocks all further entries without retries', async () => {
   const h = harness({ entryUnknown: true }); await h.executor.onSignal('AAAUSDT', signal);
   await h.executor.run(); await h.executor.onSignal('BBBUSDT', signal);
@@ -211,6 +223,45 @@ test('full partial exit transitions to runner; stop only tightens and old stop i
   assert.ok(h.calls.findIndex(c => c[0] === 'cancelStop' && c[1] === job.stopId)
     > h.calls.findIndex(c => c[0] === 'stop' && c[1] === updated.stopId));
   h.options.price = 97.1; await h.executor.run(); assert.ok(h.db().state.jobs[0].plan.stop <= updated.plan.stop);
+});
+test('profit locks before the 75% limit fills; native replacement is installed first', async () => {
+  const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
+  const before = h.db().state.jobs[0];
+  h.options.price = 99;
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  const after = h.db().state.jobs[0];
+  assert.equal(after.phase, 'OPEN');
+  assert.ok(after.plan.stop < before.plan.stop && after.plan.stop <= after.plan.breakEven);
+  assert.ok(h.calls.findIndex(c => c[0] === 'cancelStop' && c[1] === before.stopId)
+    > h.calls.findIndex(c => c[0] === 'stop' && c[1] === after.stopId));
+  assert.equal(h.calls.filter(c => c[0] === 'place' && c[1].type === 'LIMIT').length, 1);
+});
+test('event, OI and funding feed failures block entry but do not disable existing protection', async () => {
+  const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
+  h.options.eventGate = { check: async () => ({ allowed: false, reason: 'High-impact event window' }) };
+  h.executor.eventGate = h.options.eventGate;
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.positions.size, 1);
+  assert.match(h.executor.entrySafety.reason, /event window/);
+  h.executor.eventGate = { check: async () => ({ allowed: true }) };
+  h.exchange.openInterestHistory = async () => [];
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.positions.size, 1);
+  assert.match(h.executor.entrySafety.reason, /OI\/funding/);
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  assert.equal((await h.exchange.algos()).length, 1);
+});
+test('new live code refuses fresh orders until demo acceptance, but protects old jobs', async () => {
+  const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
+  h.cfg.fadeEnvironment = 'live'; h.cfg.fadeLiveAcknowledgement = 'I_ACCEPT_LIVE_FADE_ORDERS';
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.positions.size, 1);
+  assert.match(h.executor.entrySafety.reason, /demo acceptance/);
+  await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  assert.equal((await h.exchange.algos()).length, 1);
 });
 test('partially filled 75% order is not booked twice', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal); const job = h.db().state.jobs[0];

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { decimal, down, entryPlan, ExchangeError, exitPlan } from './fade-orders.js';
+import { decimal, down, entryPlan, ExchangeError, exitPlan, structuralFadeStop } from './fade-orders.js';
 import { fadeBtcGate } from './fade-btc-gate.js';
+import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
+import { readFadeRisk } from './fade-risk.js';
 import { escapeHtml } from './util.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -12,7 +14,7 @@ const signedDollars = value => `${Number(value) >= 0 ? '+' : '-'}$${Math.abs(Num
 
 export class FadeExecutor {
   constructor({ cfg, exchange, store, telegram, isPaused = () => false, authorizeEntry = async () => true,
-    now = () => Date.now(), wait = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+    now = () => Date.now(), wait = ms => new Promise(resolve => setTimeout(resolve, ms)), eventGate = null }) {
     Object.assign(this, { cfg, exchange, store, telegram, isPaused, authorizeEntry, now, wait });
     this.owner = randomUUID(); this.scope = `${cfg.fadeEnvironment ?? 'testnet'}:primary`;
     this.busy = false; this.stopped = false; this.timer = null; this.row = null;
@@ -20,6 +22,8 @@ export class FadeExecutor {
     this.lastAudit = -Infinity; this.auditError = null;
     this.balanceSnapshot = null; this.incomeSnapshot = null; this.lastIncomeAttempt = -Infinity;
     this.incomeInFlight = null; this.btcGate = null;
+    this.eventGate = eventGate ?? new FadeEventGate({ cfg, now });
+    this.entrySafety = { allowed: false, reason: 'Entry safety awaiting verification' };
   }
   enabled() { return this.cfg.enableFadeExecution === true; }
   async notify(message) { try { await this.telegram.send(message); } catch { /* Orders remain monitored if Telegram fails. */ } }
@@ -68,8 +72,10 @@ export class FadeExecutor {
     return `🤖 <b>FADE AUTO — ${escapeHtml(h.environment.toUpperCase())}</b>\n` +
       `${h.enabled ? h.paused ? 'Entries paused' : 'Enabled' : 'Disabled'} · ${h.active}/3 active intents\n` +
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
-      'Budget cap $250 · isolated 2x · max $150 notional each\n' +
-      'Planned stop loss $5 · 75% exit targets approximately $3 net · 25% runner\n' +
+      `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
+      'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
+      'Daily net loss limit 2% equity · two-loss cooldown 4h (GST day)\n' +
+      'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}`).join('\n') ?? '') +
       `\n${this.balanceReport()}\n\nLast reconciliation: ${h.lastCheck ?? 'not completed'}\n${h.lastError ? '⚠️ ' + escapeHtml(h.lastError) : ''}\n` +
@@ -291,8 +297,15 @@ export class FadeExecutor {
     const average = Number(entry.avgPrice);
     try {
       if (!(average > 0)) throw Error('Entry fill price unknown');
-      if (!job.plan || job.plan.entry !== average || job.plan.qty !== filled) {
-        job.plan = exitPlan(average, filled, job.fee, job.filters); await this.save();
+      if (!job.plan || job.plan.entry !== average || job.plan.qty !== filled || !(job.plan.riskDollars > 0)) {
+        // Preserve the structural invalidation across partial fills/restarts.
+        // Legacy jobs with wider stops tighten to below resistance before proceeding.
+        const stop = Math.min(job.plan?.stop ?? Infinity, structuralFadeStop(job.signal.resistance, job.filters));
+        job.plan = exitPlan(average, filled, job.fee, job.filters, stop);
+        if (Number.isFinite(job.riskBudget) && job.plan.riskDollars > job.riskBudget + 1e-7) {
+          throw Error('Actual entry fill exceeded equity risk budget');
+        }
+        await this.save();
       }
       if (job.closeRequested) { await this.close(job, job.closeReason ?? 'OWNER_CLOSE'); return; }
       const book = await this.exchange.book(job.symbol);
@@ -316,7 +329,15 @@ export class FadeExecutor {
         const nextStop = down(Math.min(job.plan.stop, job.plan.breakEven, job.lowAsk * 1.0075), job.filters.tick);
         if (ask >= nextStop) { await this.close(job, 'RUNNER_STOP_REACHED'); return; }
         if (nextStop < job.plan.stop - job.filters.tick / 2) await this.ensureStop(job, nextStop);
-      } else job.phase = 'OPEN';
+      } else {
+        job.phase = 'OPEN';
+        const netAfterCosts = filled * (average - ask) - filled * average * job.fee
+          - filled * ask * (job.fee + 0.0005);
+        if (netAfterCosts >= 0.5 * job.plan.riskDollars && ask < job.plan.breakEven
+          && job.plan.breakEven < job.plan.stop - job.filters.tick / 2) {
+          await this.ensureStop(job, job.plan.breakEven);
+        }
+      }
       // New stop is verified before previous stops are canceled; reduce-only
       // TP and close-all BUY stop cannot reverse the position if they race.
       await this.cancelOwned(job, [job.stopId, job.actions.tp.id]); await this.save();
@@ -336,6 +357,23 @@ export class FadeExecutor {
     }
     return this.btcGate.allowed;
   }
+  async checkEntrySafety(symbol, equity, jobs) {
+    if (this.cfg.fadeEnvironment === 'live' && this.cfg.fadeV2DemoAcceptance !== 'I_TESTED_FADE_V2_ON_DEMO') {
+      this.entrySafety = { allowed: false, reason: 'Live entries blocked until v2 demo acceptance' }; return false;
+    }
+    try {
+      const risk = await readFadeRisk(this.exchange, jobs, equity, this.now());
+      if (!risk.allowed) { this.entrySafety = risk; return false; }
+      const event = await this.eventGate.check();
+      if (!event.allowed) { this.entrySafety = event; return false; }
+      const [oi, funding] = await Promise.all([this.exchange.openInterestHistory(symbol), this.exchange.funding(symbol)]);
+      const positioning = fadePositioningGate(oi, funding, symbol, this.now());
+      this.entrySafety = positioning.allowed ? { allowed: true, reason: 'Risk, events, OI and funding clear' } : positioning;
+      return this.entrySafety.allowed;
+    } catch {
+      this.entrySafety = { allowed: false, reason: 'Risk, event or positioning source unavailable' }; return false;
+    }
+  }
   async onSignal(symbol, signal) {
     if (!this.enabled() || this.busy || this.stopped || this.isPaused()) return;
     this.busy = true;
@@ -352,6 +390,8 @@ export class FadeExecutor {
       if (snapshot.positions.length >= 3) return;
       const usdt = snapshot.account.assets?.find(a => a.asset === 'USDT');
       if (!usdt || !(Number(usdt.availableBalance) > 10)) throw Error('Insufficient USDT balance');
+      const equity = Number(snapshot.account.totalMarginBalance ?? usdt.marginBalance);
+      if (!(equity > 0) || !await this.checkEntrySafety(symbol, equity, jobs)) return;
       const totalNotional = snapshot.positions.reduce((s, p) => s + Math.abs(Number(p.notional)), 0);
       if (!Number.isFinite(totalNotional) || totalNotional + 150 > 450.01) throw Error('Fade notional budget exhausted');
       const info = (await this.exchange.info()).symbols.find(s => s.symbol === symbol);
@@ -364,8 +404,9 @@ export class FadeExecutor {
       if (snapshot.positions.some(p => p.symbol === symbol)) throw Error('Symbol already has a position');
       const book = await this.exchange.book(symbol), quoteAt = this.now();
       const plan = entryPlan({ signal, bid: Number(book.bidPrice), ask: Number(book.askPrice), info, fee,
-        available: Number(snapshot.account.assets.find(a => a.asset === 'USDT')?.availableBalance), now: this.now() });
-      const job = { id, symbol, phase: 'SUBMITTING', signal, fee, filters: plan.filters, createdAt: this.now(), actions: {}, plan };
+        available: Number(snapshot.account.assets.find(a => a.asset === 'USDT')?.availableBalance), equity, now: this.now() });
+      const job = { id, symbol, phase: 'SUBMITTING', signal, fee, filters: plan.filters,
+        riskBudget: equity * 0.005, createdAt: this.now(), actions: {}, plan };
       jobs.push(job);
       // The journal is persisted inside submit before the signed entry request.
       const originalPlace = this.exchange.place.bind(this.exchange);
@@ -375,7 +416,8 @@ export class FadeExecutor {
       await this.save();
       await this.fence();
       let authorized;
-      try { authorized = await this.authorizeEntry() && await this.checkBtcGate(); }
+      try { authorized = await this.authorizeEntry() && await this.checkBtcGate()
+        && await this.checkEntrySafety(symbol, equity, jobs.filter(j => j !== job)); }
       catch {
         job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'CONTROL_UNAVAILABLE_BEFORE_SEND';
         await this.save();

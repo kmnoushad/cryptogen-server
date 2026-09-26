@@ -40,12 +40,14 @@ export class FadeExchange {
   // Account Information V3 intentionally omits the canTrade permission flag.
   // Keep V3 for balances, and query V2 separately before any execution flow.
   accountPermissions() { return this.request('GET', '/fapi/v2/account'); }
-  income() { return this.request('GET', '/fapi/v1/income', { limit: 1000 }); }
+  income(params = {}) { return this.request('GET', '/fapi/v1/income', { limit: 1000, ...params }); }
   positions() { return this.request('GET', '/fapi/v3/positionRisk'); }
   mode() { return this.request('GET', '/fapi/v1/positionSide/dual'); }
   assetsMode() { return this.request('GET', '/fapi/v1/multiAssetsMargin'); }
   info() { return this.request('GET', '/fapi/v1/exchangeInfo', {}, false); }
   btcCandles() { return this.request('GET', '/fapi/v1/klines', { symbol: 'BTCUSDT', interval: '1m', limit: 121 }, false); }
+  openInterestHistory(symbol) { return this.request('GET', '/futures/data/openInterestHist', { symbol, period: '5m', limit: 5 }, false); }
+  funding(symbol) { return this.request('GET', '/fapi/v1/premiumIndex', { symbol }, false); }
   book(symbol) { return this.request('GET', '/fapi/v1/ticker/bookTicker', { symbol }, false); }
   fees(symbol) { return this.request('GET', '/fapi/v1/commissionRate', { symbol }); }
   order(symbol, id) { return this.request('GET', '/fapi/v1/order', { symbol, origClientOrderId: id }); }
@@ -77,7 +79,6 @@ export class FadeExchange {
 
 export const decimal = n => Number(n).toFixed(12).replace(/0+$/, '').replace(/\.$/, '');
 export const down = (n, step) => Number((Math.floor(n / step + 1e-9) * step).toFixed(12));
-const up = (n, step) => Number((Math.ceil(n / step - 1e-9) * step).toFixed(12));
 
 export function fadeFilters(info) {
   const f = Object.fromEntries((info?.filters ?? []).map(x => [x.filterType, x]));
@@ -93,30 +94,45 @@ export function fadeFilters(info) {
   return result;
 }
 
-export function exitPlan(entry, qty, fee, f) {
-  const partial = down(qty * 0.75, f.step), runner = down(qty - partial, f.step);
-  // Reserve 5 bps of stop-market slippage; profit order is a resting limit.
-  const stop = down((5 / qty + entry * (1 - fee)) / (1 + fee + 0.0005), f.tick);
-  // Recover the entire original entry commission before booking $3 cash net.
-  const target = down((entry - (3 + entry * qty * fee) / partial) / (1 + fee), f.tick);
-  const breakEven = down(entry * (1 - fee) / (1 + fee + 0.0005), f.tick);
-  if (![entry, qty, fee, partial, runner, stop, target, breakEven].every(Number.isFinite)
-    || qty <= 0 || fee < 0 || fee > 0.01 || partial < f.min || runner < f.min
-    || target <= f.minPrice || target >= entry || stop <= entry || stop > f.maxPrice
-    || partial * target < f.notional || runner * target < f.notional) throw Error('Position too small or invalid for 75%/25% exits');
-  return { entry, qty, partial, runner, stop, target, breakEven, fee, filters: f };
+export function structuralFadeStop(resistance, f) {
+  if (!(resistance > 0)) throw Error('Fade resistance missing');
+  const stop = down(resistance - f.tick, f.tick);
+  if (!(stop > f.minPrice && stop < resistance && stop <= f.maxPrice)) throw Error('Fade stop cannot fit below resistance');
+  return stop;
 }
 
-export function entryPlan({ signal, bid, ask, info, fee, available, now = Date.now() }) {
+export function modeledFadeLoss(entry, stop, qty, fee) {
+  return qty * (stop * (1 + fee + 0.0005) - entry * (1 - fee));
+}
+
+export function exitPlan(entry, qty, fee, f, stop) {
+  const partial = down(qty * 0.75, f.step), runner = down(qty - partial, f.step);
+  const riskDollars = modeledFadeLoss(entry, stop, qty, fee);
+  // The 75% limit must earn at least 1.5x the FULL position's modeled risk,
+  // after entry and partial-exit fees. The runner is additional, never assumed.
+  const target = down((entry - (riskDollars * 1.5 + entry * qty * fee) / partial) / (1 + fee), f.tick);
+  const breakEven = down(entry * (1 - fee) / (1 + fee + 0.0005), f.tick);
+  if (![entry, qty, fee, partial, runner, stop, target, breakEven, riskDollars].every(Number.isFinite)
+    || qty <= 0 || fee < 0 || fee > 0.01 || partial < f.min || runner < f.min
+    || target <= f.minPrice || target >= entry || riskDollars <= 0 || stop <= entry || stop > f.maxPrice
+    || partial * target < f.notional || runner * target < f.notional) throw Error('Position too small or invalid for 75%/25% exits');
+  return { entry, qty, partial, runner, stop, target, breakEven, riskDollars, fee, filters: f };
+}
+
+export function entryPlan({ signal, bid, ask, info, fee, available, equity, now = Date.now() }) {
   const f = fadeFilters(info);
-  if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask)
-    || (ask / bid - 1) * 10000 > 10 || Math.abs(bid / signal.price - 1) > 0.005
+  if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask && equity > 0)
+    || (ask / bid - 1) * 10000 > 10 || Math.abs(bid / signal.price - 1) > 0.0015
+    || 1 - bid / signal.resistance > 0.01
     || !(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw Error('Stale, extended or illiquid fade entry');
-  const structuralStop = up(signal.resistance * 1.001, f.tick);
-  const perUnitRisk = structuralStop * (1 + fee + 0.0005) - bid * (1 - fee);
-  // $75 margin per position at 2x; $25 remains unallocated at full size.
-  const qty = down(Math.min(5 / perUnitRisk, 150 / bid, Math.max(0, available - 10) * 2 / bid, f.max), f.step);
-  const p = exitPlan(bid, qty, fee, f);
-  if (qty < f.min || qty * bid < f.notional || p.stop < structuralStop - f.tick) throw Error('Insufficient budget for structural stop');
+  const stop = structuralFadeStop(signal.resistance, f);
+  if (!(stop > ask)) throw Error('Fade invalidation already reached; entry skipped');
+  const perUnitRisk = modeledFadeLoss(bid, stop, 1, fee);
+  if (!(perUnitRisk > 0)) throw Error('Fade stop cannot cover execution costs');
+  const riskBudget = equity * 0.005;
+  // Bound quantity by 0.5% of verified equity, available isolated margin and notional.
+  const qty = down(Math.min(riskBudget / perUnitRisk, 150 / bid, Math.max(0, available - 10) * 2 / bid, f.max), f.step);
+  const p = exitPlan(bid, qty, fee, f, stop);
+  if (qty < f.min || qty * bid < f.notional || p.riskDollars > riskBudget + 1e-7) throw Error('Insufficient budget for structural stop');
   return p;
 }
