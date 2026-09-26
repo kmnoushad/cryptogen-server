@@ -253,12 +253,20 @@ test('event, OI and funding feed failures block entry but do not disable existin
   assert.equal(h.executor.lastError, null);
   assert.equal((await h.exchange.algos()).length, 1);
 });
-test('new live code refuses fresh orders until demo acceptance, but protects old jobs', async () => {
+test('explicit untested-live acknowledgement permits new entries without falsely claiming demo testing', async () => {
+  const h = harness(); h.cfg.fadeEnvironment = 'live';
+  h.cfg.fadeLiveAcknowledgement = 'I_ACCEPT_LIVE_FADE_ORDERS';
+  h.cfg.fadeUntestedLiveAcknowledgement = 'I_ACCEPT_UNTESTED_FADE_V2_LIVE';
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.executor.lastError, null);
+  assert.equal(h.positions.size, 1);
+});
+test('new live code refuses fresh orders without demo or untested-live acceptance, but protects old jobs', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
   h.cfg.fadeEnvironment = 'live'; h.cfg.fadeLiveAcknowledgement = 'I_ACCEPT_LIVE_FADE_ORDERS';
   await h.executor.onSignal('BBBUSDT', signal);
   assert.equal(h.positions.size, 1);
-  assert.match(h.executor.entrySafety.reason, /demo acceptance/);
+  assert.match(h.executor.entrySafety.reason, /untested-live acknowledgement/);
   await h.executor.run();
   assert.equal(h.executor.lastError, null);
   assert.equal((await h.exchange.algos()).length, 1);

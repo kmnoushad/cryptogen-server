@@ -358,8 +358,9 @@ export class FadeExecutor {
     return this.btcGate.allowed;
   }
   async checkEntrySafety(symbol, equity, jobs) {
-    if (this.cfg.fadeEnvironment === 'live' && this.cfg.fadeV2DemoAcceptance !== 'I_TESTED_FADE_V2_ON_DEMO') {
-      this.entrySafety = { allowed: false, reason: 'Live entries blocked until v2 demo acceptance' }; return false;
+    if (this.cfg.fadeEnvironment === 'live' && this.cfg.fadeV2DemoAcceptance !== 'I_TESTED_FADE_V2_ON_DEMO'
+      && this.cfg.fadeUntestedLiveAcknowledgement !== 'I_ACCEPT_UNTESTED_FADE_V2_LIVE') {
+      this.entrySafety = { allowed: false, reason: 'Live entries require tested-demo OR explicit untested-live acknowledgement' }; return false;
     }
     try {
       const risk = await readFadeRisk(this.exchange, jobs, equity, this.now());
