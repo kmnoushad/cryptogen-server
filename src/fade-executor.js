@@ -74,7 +74,7 @@ export class FadeExecutor {
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
-      'Daily net loss limit 2% equity · realized profit giveback lock · two-loss cooldown 4h (GST day)\n' +
+      'Daily 2% loss/giveback lock · seven-day loss/giveback lock · two-loss cooldown 4h\n' +
       'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}`).join('\n') ?? '') +
@@ -165,7 +165,7 @@ export class FadeExecutor {
       const b = this.balanceSnapshot;
       if (b && capturedAt - b.updatedAt <= 120000 && this.row?.state?.jobs) {
         const decision = fadeRiskDecision({ rows, jobs: this.row.state.jobs, equity: b.equity, now: capturedAt });
-        if (!decision.allowed && /^(Daily net loss|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
+        if (!decision.allowed && /^(Daily net loss|Daily realized profit giveback|Rolling seven-day|Two consecutive losses)/.test(decision.reason)) {
           this.entrySafety = decision;
           const key = `${gstDayStart(capturedAt)}:${decision.reason}`;
           if (key !== this.lastRiskNotice) {

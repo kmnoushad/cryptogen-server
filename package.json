@@ -1,6 +1,6 @@
 {
   "name": "nexio-v6",
-  "version": "6.9.24",
+  "version": "6.9.25",
   "private": true,
   "type": "module",
   "description": "Separated Futures and Alpha engine with phase-aware candidate survival and streaming BTC shock protection",
