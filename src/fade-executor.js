@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { decimal, down, entryPlan, ExchangeError, exitPlan, structuralFadeStop } from './fade-orders.js';
 import { fadeBtcGate } from './fade-btc-gate.js';
 import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
-import { readFadeRisk } from './fade-risk.js';
+import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk } from './fade-risk.js';
 import { escapeHtml } from './util.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -21,7 +21,7 @@ export class FadeExecutor {
     this.lastError = null; this.lastCheck = null; this.lastNotice = 0;
     this.lastAudit = -Infinity; this.auditError = null;
     this.balanceSnapshot = null; this.incomeSnapshot = null; this.lastIncomeAttempt = -Infinity;
-    this.incomeInFlight = null; this.btcGate = null;
+    this.incomeInFlight = null; this.btcGate = null; this.lastRiskNotice = null;
     this.eventGate = eventGate ?? new FadeEventGate({ cfg, now });
     this.entrySafety = { allowed: false, reason: 'Entry safety awaiting verification' };
   }
@@ -61,7 +61,7 @@ export class FadeExecutor {
       `Wallet ${dollars(b.wallet)} · Open PnL ${signedDollars(b.unrealized)} · Equity ${dollars(b.equity)}\n` +
       `Available ${dollars(b.available)} · Margin in use ${dollars(b.initialMargin)}\n` +
       `Progress vs ${dollars(baseline)}: ${signedDollars(progress)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)\n` +
-      (flow
+      (flow && this.now() - flow.updatedAt <= 900000
         ? `Last 7d: realized ${signedDollars(flow.realized)} · commission ${signedDollars(flow.commission)} · funding ${signedDollars(flow.funding)} · net ${signedDollars(flow.net)}\n`
         : 'Last 7d exchange flows: awaiting refresh\n') +
       `Balance updated: ${new Date(b.updatedAt).toISOString()}\n` +
@@ -74,7 +74,7 @@ export class FadeExecutor {
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
-      'Daily net loss limit 2% equity · two-loss cooldown 4h (GST day)\n' +
+      'Daily net loss limit 2% equity · realized profit giveback lock · two-loss cooldown 4h (GST day)\n' +
       'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}`).join('\n') ?? '') +
@@ -147,8 +147,9 @@ export class FadeExecutor {
   refreshIncome() {
     if (this.incomeInFlight || this.now() - this.lastIncomeAttempt < 300000) return this.incomeInFlight;
     this.lastIncomeAttempt = this.now();
-    const pending = Promise.resolve().then(() => this.exchange.income()).then(rows => {
-      if (!Array.isArray(rows)) throw Error('Income history unavailable');
+    const capturedAt = this.now();
+    const pending = Promise.resolve().then(() => readFadeIncome(this.exchange, capturedAt - 7 * 86400000, capturedAt))
+      .then(async rows => {
       const sums = { REALIZED_PNL: 0, COMMISSION: 0, FUNDING_FEE: 0 };
       for (const row of rows) {
         if (row.asset !== 'USDT' || !(row.incomeType in sums)) continue;
@@ -159,6 +160,20 @@ export class FadeExecutor {
       this.incomeSnapshot = { realized: sums.REALIZED_PNL, commission: sums.COMMISSION,
         funding: sums.FUNDING_FEE, net: sums.REALIZED_PNL + sums.COMMISSION + sums.FUNDING_FEE,
         updatedAt: this.now() };
+      // Optional background observation: never delay native stop reconciliation.
+      // Signal-time checks still read fresh risk data immediately before orders.
+      const b = this.balanceSnapshot;
+      if (b && capturedAt - b.updatedAt <= 120000 && this.row?.state?.jobs) {
+        const decision = fadeRiskDecision({ rows, jobs: this.row.state.jobs, equity: b.equity, now: capturedAt });
+        if (!decision.allowed && /^(Daily net loss|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
+          this.entrySafety = decision;
+          const key = `${gstDayStart(capturedAt)}:${decision.reason}`;
+          if (key !== this.lastRiskNotice) {
+            this.lastRiskNotice = key;
+            await this.notify(`⚠️ FADE AUTO: ${escapeHtml(decision.reason)}. New entries blocked; existing position protection continues. /fadeauto`);
+          }
+        }
+      }
     }).catch(() => { /* Balance reporting must never interfere with execution or protection. */ })
       .finally(() => { if (this.incomeInFlight === pending) this.incomeInFlight = null; });
     this.incomeInFlight = pending;
@@ -333,6 +348,7 @@ export class FadeExecutor {
         job.phase = 'OPEN';
         const netAfterCosts = filled * (average - ask) - filled * average * job.fee
           - filled * ask * (job.fee + 0.0005);
+        if (partialFilled === 0) job.peakOpenNet = Math.max(job.peakOpenNet ?? 0, netAfterCosts);
         if (netAfterCosts >= 0.5 * job.plan.riskDollars && ask < job.plan.breakEven
           && job.plan.breakEven < job.plan.stop - job.filters.tick / 2) {
           await this.ensureStop(job, job.plan.breakEven);

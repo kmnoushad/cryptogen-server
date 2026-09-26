@@ -7,14 +7,27 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
   const blocked = reason => ({ allowed: false, reason });
   if (!(equity > 0) || !Array.isArray(rows) || !Array.isArray(jobs)) return blocked('Risk data unavailable');
   const dayStart = gstDayStart(now);
-  let dailyNet = 0;
+  let dailyNet = 0, dailyPeak = 0;
+  const byTime = new Map();
   for (const row of rows) {
     if (!KINDS.has(row.incomeType)) continue;
     const amount = Number(row.income), time = Number(row.time);
     if (row.asset !== 'USDT' || !Number.isFinite(amount) || !Number.isFinite(time)) return blocked('Risk income incomplete or not USDT');
-    if (time >= dayStart && time <= now) dailyNet += amount;
+    if (time >= dayStart && time <= now) byTime.set(time, (byTime.get(time) ?? 0) + amount);
+  }
+  // Group same-timestamp realized PnL and commission to avoid treating a
+  // gross fill as a profit peak before its simultaneously posted fee.
+  for (const [, amount] of [...byTime].sort((a, b) => a[0] - b[0])) {
+    dailyNet += amount;
+    dailyPeak = Math.max(dailyPeak, dailyNet);
   }
   if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached');
+  // New entries stop after a real, fee-adjusted profitable day gives back
+  // meaningful gains. This does not liquidate open positions or guarantee PnL.
+  if (dailyPeak >= Math.max(3, equity * 0.02)
+    && dailyPeak - dailyNet >= Math.max(2, equity * 0.01)) {
+    return blocked('Daily realized profit giveback limit reached');
+  }
   const lastClosed = jobs.filter(j => j.phase === 'CLOSED' && Number(j.filledQty) > 0)
     .sort((a, b) => b.closedAt - a.closedAt).slice(0, 2);
   if (lastClosed.some(j => !Number.isFinite(j.closedAt))) return blocked('Closed-trade accounting unavailable');
@@ -34,7 +47,19 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
   if (outcomes.length === 2 && outcomes.every(n => n < 0) && now - recent[0].closedAt < cooldownMs) {
     return blocked('Two consecutive losses; four-hour cooldown');
   }
-  return { allowed: true, reason: 'Daily net and loss streak clear', dailyNet };
+  return { allowed: true, reason: 'Daily net, profit giveback and loss streak clear', dailyNet, dailyPeak };
+}
+
+export async function readFadeIncome(exchange, startTime, now, maxPages = 5) {
+  if (!Number.isFinite(startTime) || !Number.isFinite(now) || startTime > now || maxPages < 1) throw Error('Invalid fade income window');
+  const rows = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await exchange.income({ startTime, endTime: now, page, limit: 1000 });
+    if (!Array.isArray(batch) || batch.length > 1000) throw Error('Risk income response invalid');
+    rows.push(...batch);
+    if (batch.length < 1000) return rows;
+  }
+  throw Error('Risk income pagination exceeded');
 }
 
 export async function readFadeRisk(exchange, jobs, equity, now) {
@@ -45,13 +70,7 @@ export async function readFadeRisk(exchange, jobs, equity, now) {
     ? lastClosed.filter(j => Number.isFinite(j.closedAt) && now - j.closedAt <= 7 * 86400000) : [];
   const startTime = Math.min(gstDayStart(now), ...recent.map(j => j.createdAt));
   if (!Number.isFinite(startTime) || startTime < now - 7 * 86400000) return { allowed: false, reason: 'Risk history older than seven days' };
-  const rows = [];
   // Page until strictly fewer than 1000 rows; a truncated window is never safe.
-  for (let page = 1; page <= 5; page++) {
-    const batch = await exchange.income({ startTime, endTime: now, page, limit: 1000 });
-    if (!Array.isArray(batch)) return { allowed: false, reason: 'Risk income response invalid' };
-    rows.push(...batch);
-    if (batch.length < 1000) return fadeRiskDecision({ rows, jobs, equity, now });
-  }
-  return { allowed: false, reason: 'Risk income pagination exceeded' };
+  try { return fadeRiskDecision({ rows: await readFadeIncome(exchange, startTime, now), jobs, equity, now }); }
+  catch { return { allowed: false, reason: 'Risk income unavailable or incomplete' }; }
 }
