@@ -13,9 +13,23 @@ test('GST day boundary and daily cap count net income, not wallet transfers', ()
   const start = gstDayStart(now);
   assert.equal(start, Date.parse('2026-09-25T20:00:00Z'));
   const rows = [row('REALIZED_PNL', -2, start + 1), row('COMMISSION', -1, start + 2),
-    row('REALIZED_PNL', -100, start - 1), row('TRANSFER', 1000, start + 2)];
+    row('REALIZED_PNL', -1, start - 1), row('TRANSFER', 1000, start + 2)];
   assert.match(fadeRiskDecision({ rows, jobs: [], equity: 100, now }).reason, /Daily net loss/);
   assert.equal(fadeRiskDecision({ rows: rows.slice(2), jobs: [], equity: 100, now }).allowed, true);
+});
+
+test('rolling seven-day profit giveback stops a multi-day reversal even with deposits', () => {
+  const sixDaysAgo = now - 6 * 86400000;
+  const week = [row('TRANSFER', 70, sixDaysAgo - 10),
+    row('REALIZED_PNL', 22, sixDaysAgo), row('COMMISSION', -1, sixDaysAgo),
+    row('REALIZED_PNL', -40, now - 86400000), row('COMMISSION', -12, now - 86400000)];
+  assert.match(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89, now }).reason,
+    /Rolling seven-day realized profit giveback/);
+  const belowPeak = [row('REALIZED_PNL', -11, now - 2 * 86400000)];
+  assert.match(fadeRiskDecision({ rows: belowPeak, jobs: [], equity: 138.89, now }).reason,
+    /Rolling seven-day realized loss/);
+  assert.equal(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89,
+    now: now + 8 * 86400000 }).allowed, true);
 });
 
 test('profitable day locks fresh entries after gains are given back net of fees, across restarts', () => {
