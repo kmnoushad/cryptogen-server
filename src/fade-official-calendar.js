@@ -2,8 +2,8 @@
 // formats never turn a calendar outage into an all-clear.
 import { requestJson } from './http.js';
 
-const BLS_URL = 'https://www.bls.gov/schedule/news_release/bls.ics';
-const BEA_URL = 'https://apps.bea.gov/API/signup/release_dates.json';
+export const BLS_URL = 'https://www.bls.gov/schedule/news_release/bls.ics';
+export const BEA_URL = 'https://apps.bea.gov/API/signup/release_dates.json';
 const BLS_HIGH_IMPACT = /employment situation|consumer price index|producer price index|job openings|employment cost index/i;
 const BEA_HIGH_IMPACT = /gross domestic product|personal income and outlays|international trade in goods and services/i;
 // Published Fed meeting end dates. Block each decision day in UTC;
