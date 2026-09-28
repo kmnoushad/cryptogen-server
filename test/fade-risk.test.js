@@ -92,7 +92,7 @@ test('OI spike, stale samples, stale or extreme funding and settlement block ent
   assert.equal(fadePositioningGate(oi, f, 'AAAUSDT', now + 11 * 60000).allowed, false);
 });
 
-test('economic feed outages and event windows block, no key never means clear', async () => {
+test('economic feed outages block unless official schedules verify coverage; event windows block', async () => {
   const feed = { economicCalendar: [{ country: 'US', impact: 'high', event: 'US CPI', time: new Date(now + 30 * 60000).toISOString() }] };
   const gate = new FadeEventGate({ cfg: { finnhubKey: 'fake-test-key' }, now: () => now, fetcher: async () => feed });
   assert.match((await gate.check()).reason, /US CPI/);
@@ -100,12 +100,25 @@ test('economic feed outages and event windows block, no key never means clear', 
     fetcher: async () => ({ economicCalendar: [{ country: 'US', impact: 'high', event: 'US jobs', time: new Date(now + 2 * 3600000).toISOString() }] }) });
   assert.equal((await clear.check()).allowed, true);
   const empty = new FadeEventGate({ cfg: { finnhubKey: 'fake-test-key' }, now: () => now,
-    fetcher: async () => ({ economicCalendar: [] }) });
+    fetcher: async () => ({ economicCalendar: [] }), officialLoader: async () => { throw Error('offline'); } });
   assert.equal((await empty.check()).allowed, false);
   const failed = new FadeEventGate({ cfg: { finnhubKey: 'fake-test-key' }, now: () => now,
-    fetcher: async () => { throw Error('401'); } });
+    fetcher: async () => { throw Error('401'); }, officialLoader: async () => { throw Error('offline'); } });
   assert.equal((await failed.check()).allowed, false);
-  assert.equal((await new FadeEventGate({ cfg: {}, now: () => now }).check()).allowed, false);
+  assert.equal((await new FadeEventGate({ cfg: {}, now: () => now,
+    officialLoader: async () => { throw Error('offline'); } }).check()).allowed, false);
+  const official = new FadeEventGate({ cfg: {}, now: () => now,
+    officialLoader: async () => [{ name: 'BEA GDP', eventTime: now + 2 * 3600000 }] });
+  assert.match((await official.check()).reason, /BLS\/BEA/);
+  const fallback = new FadeEventGate({ cfg: { finnhubKey: 'bad' }, now: () => now,
+    fetcher: async () => { throw Error('401'); }, officialLoader: async () => [
+      { name: 'BLS jobs', eventTime: now + 30 * 60000 }] });
+  assert.match((await fallback.check()).reason, /BLS jobs/);
+  const fedDay = new FadeEventGate({ cfg: {}, now: () => Date.parse('2026-10-28T04:00:00Z'),
+    officialLoader: async () => [] });
+  assert.match((await fedDay.check()).reason, /Federal Reserve/);
+  assert.match((await new FadeEventGate({ cfg: {}, now: () => Date.parse('2028-01-01T00:00:00Z') }).check()).reason,
+    /schedule unverified/);
 });
 
 test('late chase is skipped rather than moving stop above the peak', () => {
