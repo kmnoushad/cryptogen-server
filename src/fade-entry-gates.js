@@ -1,6 +1,7 @@
 import { parseFinnhubCalendar } from './calendar.js';
 import { EventGuard } from './event-guard.js';
 import { requestJson } from './http.js';
+import { fedDecisionDay, loadOfficialSchedules } from './fade-official-calendar.js';
 
 export function fadePositioningGate(oi, funding, symbol, now) {
   const blocked = reason => ({ allowed: false, reason });
@@ -19,31 +20,47 @@ export function fadePositioningGate(oi, funding, symbol, now) {
 }
 
 export class FadeEventGate {
-  constructor({ cfg, fetcher = requestJson, now = () => Date.now() }) {
-    this.cfg = cfg; this.fetcher = fetcher; this.now = now;
+  constructor({ cfg, fetcher = requestJson, officialLoader = loadOfficialSchedules, now = () => Date.now() }) {
+    this.cfg = cfg; this.fetcher = fetcher; this.officialLoader = officialLoader; this.now = now;
     this.events = []; this.loadedAt = null;
+    this.source = null;
     this.guard = new EventGuard({ cfg: { enableEventGuard: true,
       eventGuardManual: cfg.fadeManualEvents ?? '', eventGuardPreMin: 60, eventGuardPostMin: 30 }, calendar: this, now });
   }
   async check() {
     const now = this.now();
-    if (!this.cfg.finnhubKey) return { allowed: false, reason: 'High-impact event feed not configured' };
+    try {
+      const fedDay = fedDecisionDay(now);
+      if (fedDay) return { allowed: false, reason: fedDay };
+    } catch { return { allowed: false, reason: 'Federal Reserve meeting schedule unverified' }; }
     if (!this.loadedAt || now - this.loadedAt > 15 * 60000) {
       try {
-        const from = new Date(now).toISOString().slice(0, 10);
-        const to = new Date(now + 14 * 86400000).toISOString().slice(0, 10);
-        const url = `https://finnhub.io/api/v1/calendar/economic?${new URLSearchParams({ from, to, token: this.cfg.finnhubKey })}`;
-        const result = await this.fetcher(url, { timeoutMs: 7000, retries: 0 });
-        if (!Array.isArray(result?.economicCalendar)) throw Error('Invalid event calendar');
-        const events = parseFinnhubCalendar(result);
-        // A green 200 carrying an empty/incomplete calendar is not evidence
-        // that the next fourteen days are event-free.
-        if (!events.some(e => e.eventTime >= now && e.eventTime <= now + 14 * 86400000)) throw Error('High-impact calendar coverage unverified');
-        this.events = events; this.loadedAt = now;
-      } catch { this.loadedAt = null; return { allowed: false, reason: 'High-impact event feed unavailable' }; }
+        let events;
+        let source = 'Finnhub';
+        if (this.cfg.finnhubKey) {
+          try {
+            const from = new Date(now).toISOString().slice(0, 10);
+            const to = new Date(now + 14 * 86400000).toISOString().slice(0, 10);
+            const url = `https://finnhub.io/api/v1/calendar/economic?${new URLSearchParams({ from, to, token: this.cfg.finnhubKey })}`;
+            const result = await this.fetcher(url, { timeoutMs: 7000, retries: 0 });
+            if (!Array.isArray(result?.economicCalendar)) throw Error('Invalid event calendar');
+            events = parseFinnhubCalendar(result);
+            if (!events.some(e => e.eventTime >= now && e.eventTime <= now + 14 * 86400000)) throw Error('Finnhub calendar coverage unverified');
+          } catch { events = null; }
+        }
+        if (!events) {
+          events = await this.officialLoader(now);
+          source = 'BLS/BEA';
+          if (!Array.isArray(events)) throw Error('Official calendar coverage unverified');
+        }
+        this.events = events; this.loadedAt = now; this.source = source;
+      } catch {
+        this.loadedAt = null; this.source = null; this.events = [];
+        return { allowed: false, reason: 'High-impact event feeds unavailable or coverage unverified (Finnhub, BLS/BEA)' };
+      }
     }
     const active = this.guard.activeWindow(now);
     return active ? { allowed: false, reason: `High-impact event window: ${active.name}` }
-      : { allowed: true, reason: 'High-impact event window clear' };
+      : { allowed: true, reason: `High-impact event window clear (${this.source})` };
   }
 }
