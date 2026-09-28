@@ -50,13 +50,13 @@ export class FadeEventGate {
         }
         if (!events) {
           events = await this.officialLoader(now);
-          source = 'BLS/BEA';
+          source = events.source ?? 'BLS/BEA';
           if (!Array.isArray(events)) throw Error('Official calendar coverage unverified');
         }
         this.events = events; this.loadedAt = now; this.source = source;
       } catch {
         this.loadedAt = null; this.source = null; this.events = [];
-        return { allowed: false, reason: 'High-impact event feeds unavailable or coverage unverified (Finnhub, BLS/BEA)' };
+        return { allowed: false, reason: 'High-impact event feeds unavailable or coverage unverified (Finnhub, BLS, NYFed, BEA)' };
       }
     }
     const active = this.guard.activeWindow(now);

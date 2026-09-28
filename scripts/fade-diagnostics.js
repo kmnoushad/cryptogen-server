@@ -4,7 +4,8 @@ import { loadFadeConfig } from '../src/fade-config.js';
 import { FadeExchange } from '../src/fade-orders.js';
 import { fadeBtcGate } from '../src/fade-btc-gate.js';
 import { FadeEventGate } from '../src/fade-entry-gates.js';
-import { BLS_URL, BEA_URL, parseOfficialSchedules } from '../src/fade-official-calendar.js';
+import { BLS_URL, BEA_URL, parseOfficialSchedules, parseFedSchedules,
+  fedCalendarMonths, fedCalendarUrl } from '../src/fade-official-calendar.js';
 import { readFadeRisk } from '../src/fade-risk.js';
 import { Store } from '../src/store.js';
 import { requestJson } from '../src/http.js';
@@ -89,6 +90,26 @@ if (event && !event.allowed && /feeds unavailable|coverage unverified/.test(even
         const start = block.match(/^DTSTART[^\r\n]*/m)?.[0]?.slice(0, 100) ?? 'DTSTART missing';
         console.log(`BLS public event format: ${summary} · ${start}`);
       }
+    }
+  }
+  if (!bls && bea) {
+    const pages = await Promise.all(fedCalendarMonths(now).map(async month => {
+      const label = 'NYFed ' + month.toISOString().slice(0, 7);
+      return check(label, async () => {
+        const response = await fetch(fedCalendarUrl(month), { signal: AbortSignal.timeout(7000) });
+        if (!response.ok) throw Error('HTTP ' + response.status);
+        if (Number(response.headers.get('content-length') ?? 0) > 2_000_000) throw Error('size limit exceeded');
+        const body = await response.text();
+        if (body.length > 2_000_000) throw Error('size limit exceeded');
+        console.log(label + ': HTTP ' + response.status + ' · ' + body.length + ' characters');
+        return body;
+      });
+    }));
+    if (pages.every(Boolean)) {
+      try {
+        const parsed = parseFedSchedules(pages, bea, Date.now());
+        console.log('NYFed/BEA calendar parse: OK · ' + parsed.length + ' selected releases in the next 14 days');
+      } catch (error) { console.log('NYFed/BEA calendar parse: ' + error.message); }
     }
   }
 }
