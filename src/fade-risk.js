@@ -7,25 +7,19 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
   const blocked = reason => ({ allowed: false, reason });
   if (!(equity > 0) || !Array.isArray(rows) || !Array.isArray(jobs)) return blocked('Risk data unavailable');
   const dayStart = gstDayStart(now);
-  const weekStart = now - 7 * 86400000;
-  let dailyNet = 0, dailyPeak = 0, weeklyNet = 0, weeklyPeak = 0;
-  const byTime = new Map(), weeklyByTime = new Map();
+  let dailyNet = 0, dailyPeak = 0;
+  const byTime = new Map();
   for (const row of rows) {
     if (!KINDS.has(row.incomeType)) continue;
     const amount = Number(row.income), time = Number(row.time);
     if (row.asset !== 'USDT' || !Number.isFinite(amount) || !Number.isFinite(time)) return blocked('Risk income incomplete or not USDT');
     if (time >= dayStart && time <= now) byTime.set(time, (byTime.get(time) ?? 0) + amount);
-    if (time >= weekStart && time <= now) weeklyByTime.set(time, (weeklyByTime.get(time) ?? 0) + amount);
   }
   // Group same-timestamp realized PnL and commission to avoid treating a
   // gross fill as a profit peak before its simultaneously posted fee.
   for (const [, amount] of [...byTime].sort((a, b) => a[0] - b[0])) {
     dailyNet += amount;
     dailyPeak = Math.max(dailyPeak, dailyNet);
-  }
-  for (const [, amount] of [...weeklyByTime].sort((a, b) => a[0] - b[0])) {
-    weeklyNet += amount;
-    weeklyPeak = Math.max(weeklyPeak, weeklyNet);
   }
   if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached');
   // New entries stop after a real, fee-adjusted profitable day gives back
@@ -34,16 +28,9 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
     && dailyPeak - dailyNet >= Math.max(2, equity * 0.01)) {
     return blocked('Daily realized profit giveback limit reached');
   }
-  // A good week must not silently turn into a large multi-day loss. A negative
-  // seven-day net also stops continuous reload-and-retry behavior. Both limits
-  // gate fresh entries only; 7-day history expires on a rolling basis.
-  if (weeklyPeak >= Math.max(10, equity * 0.05)
-    && weeklyPeak - weeklyNet >= Math.max(5, equity * 0.03)) {
-    return blocked('Rolling seven-day realized profit giveback limit reached');
-  }
-  if (weeklyNet <= -Math.max(10, equity * 0.05)) {
-    return blocked('Rolling seven-day realized loss limit reached');
-  }
+  // Keep a seven-day read for verified trade outcomes; the seven-day net is
+  // informational only. Entry lockouts are bounded to the GST day or four
+  // hours after two verified losses, so old losses cannot veto a later regime.
   const lastClosed = jobs.filter(j => j.phase === 'CLOSED' && Number(j.filledQty) > 0)
     .sort((a, b) => b.closedAt - a.closedAt).slice(0, 2);
   if (lastClosed.some(j => !Number.isFinite(j.closedAt))) return blocked('Closed-trade accounting unavailable');
@@ -63,7 +50,7 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
   if (outcomes.length === 2 && outcomes.every(n => n < 0) && now - recent[0].closedAt < cooldownMs) {
     return blocked('Two consecutive losses; four-hour cooldown');
   }
-  return { allowed: true, reason: 'Daily and seven-day realized risk clear', dailyNet, dailyPeak, weeklyNet, weeklyPeak };
+  return { allowed: true, reason: 'Daily limits and loss cooldown clear', dailyNet, dailyPeak };
 }
 
 export async function readFadeIncome(exchange, startTime, now, maxPages = 5) {
