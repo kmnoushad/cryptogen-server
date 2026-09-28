@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { decimal, down, entryPlan, ExchangeError, exitPlan, structuralFadeStop } from './fade-orders.js';
 import { fadeBtcGate } from './fade-btc-gate.js';
+import { fadeAdverseQuote, fadeAdverseEntryBlocked } from './fade-adverse.js';
 import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
 import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk } from './fade-risk.js';
 import { escapeHtml } from './util.js';
@@ -73,11 +74,17 @@ export class FadeExecutor {
       `${h.enabled ? h.paused ? 'Entries paused' : 'Enabled' : 'Disabled'} · ${h.active}/3 active intents\n` +
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
+      `Fade setup gate: ${fadeAdverseEntryBlocked(this.row?.state.jobs ?? [], this.now()) ? 'HOLD — active short near planned stop' : 'clear'}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
       'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · 7d PnL information only\n' +
       'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
-      (this.row?.state.jobs.filter(open).map(j => `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}`).join('\n') ?? '') +
+      (this.row?.state.jobs.filter(open).map(j => {
+        const near = j.lastQuoteAt && this.now() - j.lastQuoteAt < 60000
+          ? fadeAdverseQuote(j, j.lastObservedAsk) : null;
+        return `${escapeHtml(j.symbol)} · ${escapeHtml(j.phase)}${j.plan ? ` · stop ${j.plan.stop} · partial target ${j.plan.target}` : ''}` +
+          (near?.state === 'NEAR_STOP' ? ` · ⚠️ ask ${j.lastObservedAsk} near stop (${(near.used * 100).toFixed(0)}% of entry-to-stop distance)` : '');
+      }).join('\n') ?? '') +
       `\n${this.balanceReport()}\n\nLast reconciliation: ${h.lastCheck ?? 'not completed'}\n${h.lastError ? '⚠️ ' + escapeHtml(h.lastError) : ''}\n` +
       '/fadepause stops new entries; protection continues. /fadecloseall closes bot-owned positions.\n' +
       'Realized profit/loss can differ due to fills, fees and funding.';
@@ -330,6 +337,7 @@ export class FadeExecutor {
       const ask = Number(book.askPrice);
       if (!(ask > 0)) throw Error('Exit quote unavailable');
       if (ask >= job.plan.stop) { await this.close(job, 'STOP_PRICE_REACHED'); return; }
+      job.lastObservedAsk = ask; job.lastQuoteAt = this.now();
       // Install protection first. Profit booking never takes precedence over SL.
       await this.ensureStop(job, job.plan.stop);
       const tp = await this.submit(job, 'tp', 'order', { side: 'BUY', type: 'LIMIT', timeInForce: 'GTC',
@@ -349,6 +357,13 @@ export class FadeExecutor {
         if (nextStop < job.plan.stop - job.filters.tick / 2) await this.ensureStop(job, nextStop);
       } else {
         job.phase = 'OPEN';
+        const adverse = fadeAdverseQuote(job, ask);
+        job.adverseChecks = adverse?.state === 'NEAR_STOP' ? Math.min(3, (job.adverseChecks ?? 0) + 1) : 0;
+        if (job.adverseChecks === 3 && !job.adverseNoticeSent) {
+          job.adverseNoticeSent = true;
+          await this.save();
+          await this.notify(`⚠️ FADE AUTO ${escapeHtml(job.symbol)}: short is close to its planned stop (${(adverse.used * 100).toFixed(0)}% of entry-to-stop distance). Native stop remains active; no hedge opened. Check Binance.`);
+        }
         const netAfterCosts = filled * (average - ask) - filled * average * job.fee
           - filled * ask * (job.fee + 0.0005);
         if (partialFilled === 0) job.peakOpenNet = Math.max(job.peakOpenNet ?? 0, netAfterCosts);
@@ -403,6 +418,10 @@ export class FadeExecutor {
       if (this.row.state.paused) return;
       if (!await this.checkBtcGate()) return;
       const jobs = this.row.state.jobs;
+      if (fadeAdverseEntryBlocked(jobs, this.now())) {
+        this.entrySafety = { allowed: false, reason: 'Active fade short nearing its stop; new entries withheld until recovery' };
+        return;
+      }
       if (jobs.filter(open).length >= 3 || jobs.some(j => j.symbol === symbol && (open(j) || this.now() - j.closedAt < 1800000))) return;
       const id = hash(`${this.scope}:${symbol}:${signal.peakTime}`);
       if (jobs.some(j => j.id === id)) return;

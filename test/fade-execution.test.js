@@ -252,6 +252,24 @@ test('profit locks before the 75% limit fills; native replacement is installed f
     > h.calls.findIndex(c => c[0] === 'stop' && c[1] === after.stopId));
   assert.equal(h.calls.filter(c => c[0] === 'place' && c[1].type === 'LIMIT').length, 1);
 });
+test('sustained approach to fade stop warns once and holds new entries until price recovers', async () => {
+  const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
+  h.options.price = 100.65;
+  for (let i = 0; i < 3; i++) await h.executor.run();
+  assert.equal(h.executor.lastError, null);
+  assert.equal(h.db().state.jobs[0].adverseChecks, 3);
+  assert.equal(h.messages.filter(x => x.includes('close to its planned stop')).length, 1);
+  await h.executor.run();
+  assert.equal(h.messages.filter(x => x.includes('close to its planned stop')).length, 1);
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.calls.filter(x => x[0] === 'place' && x[1].side === 'SELL').length, 1);
+  assert.equal(h.positions.size, 1);
+  h.options.price = 100;
+  await h.executor.run();
+  assert.equal(h.db().state.jobs[0].adverseChecks, 0);
+  await h.executor.onSignal('BBBUSDT', signal);
+  assert.equal(h.calls.filter(x => x[0] === 'place' && x[1].side === 'SELL').length, 2);
+});
 test('event, OI and funding feed failures block entry but do not disable existing protection', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
   h.options.eventGate = { check: async () => ({ allowed: false, reason: 'High-impact event window' }) };
