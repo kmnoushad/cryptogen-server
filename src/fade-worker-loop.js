@@ -1,6 +1,10 @@
 export const workerStalled = (worker, now = Date.now(), limit = 45000) => worker.busy
   && Number.isFinite(worker.tickStartedAt) && now - worker.tickStartedAt > limit;
 
+// Stay well within the 30s database lease and 60s remote heartbeat window.
+// Active exchange positions continue to receive the original 5s protection loop.
+export const workerPollDelay = worker => worker.executor.row?.state?.jobs?.some(j => j.phase !== 'CLOSED') ? 5000 : 10000;
+
 // Serial polling; one Telegram poller stays on Railway. No scanners run here.
 export class FadeWorkerLoop {
   constructor({ executor, store, now = () => Date.now() }) {
