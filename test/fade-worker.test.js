@@ -1,12 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { FadeWorkerLoop, workerStalled } from '../src/fade-worker-loop.js';
+import { FadeWorkerLoop, workerPollDelay, workerStalled } from '../src/fade-worker-loop.js';
 import { FadeRemote } from '../src/fade-remote.js';
 import { loadFadeConfig } from '../src/fade-config.js';
 import { loadConfig } from '../src/config.js';
 
 const now = Date.parse('2026-09-19T12:00:00Z');
+test('idle polling halves routine database traffic while active positions retain five-second protection', () => {
+  const worker = { executor: { row: { state: { jobs: [{ phase: 'CLOSED' }] } } } };
+  assert.equal(workerPollDelay(worker), 10000);
+  worker.executor.row.state.jobs.push({ phase: 'OPEN' });
+  assert.equal(workerPollDelay(worker), 5000);
+  worker.executor.row.state.jobs[1].phase = 'RUNNER';
+  assert.equal(workerPollDelay(worker), 5000);
+  worker.executor.row = null;
+  assert.equal(workerPollDelay(worker), 10000);
+});
 const event = (key = 'one', patch = {}) => ({ event_key: key, symbol: 'AAAUSDT',
   event_type: 'FADE_WORKER_SIGNAL_V1', created_at: new Date(now).toISOString(),
   payload: { model: 'pump-fade-v1', price: 100, resistance: 102, peakTime: now - 300000, barCloseTime: now - 1000 }, ...patch });
