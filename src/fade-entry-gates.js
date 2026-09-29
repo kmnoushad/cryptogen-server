@@ -6,11 +6,13 @@ import { fedDecisionDay, loadOfficialSchedules } from './fade-official-calendar.
 export function fadePositioningGate(oi, funding, symbol, now) {
   const blocked = reason => ({ allowed: false, reason });
   if (!Array.isArray(oi) || oi.length < 4 || oi.length > 5 || funding?.symbol !== symbol) return blocked('OI/funding context unavailable');
-  const points = oi.map(r => ({ time: Number(r.timestamp), value: Number(r.sumOpenInterestValue), symbol: r.symbol }));
-  if (points.some(p => p.symbol !== symbol || !(p.value > 0) || !Number.isFinite(p.time))
+  // Use open contract quantity. The quote value rises with price even when no
+  // additional contracts are opened, which falsely labels pumps as OI expansion.
+  const points = oi.map(r => ({ time: Number(r.timestamp), contracts: Number(r.sumOpenInterest), symbol: r.symbol }));
+  if (points.some(p => p.symbol !== symbol || !(p.contracts > 0) || !Number.isFinite(p.time))
     || points.some((p, i) => i && p.time <= points[i - 1].time)
     || now - points.at(-1).time > 600000 || points.at(-1).time > now) return blocked('OI history stale or invalid');
-  if (points.at(-1).value > points[0].value * 1.03) return blocked('OI expansion; squeeze risk');
+  if (points.at(-1).contracts > points[0].contracts * 1.03) return blocked('OI contract expansion; squeeze risk');
   const rate = Number(funding.lastFundingRate), next = Number(funding.nextFundingTime), captured = Number(funding.time);
   if (!Number.isFinite(rate) || !Number.isFinite(next) || !Number.isFinite(captured)
     || captured > now || now - captured > 90000 || next < captured) return blocked('Funding context stale or invalid');
