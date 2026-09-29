@@ -82,10 +82,16 @@ test('exchange income is paged and a truncated history fails closed', async () =
 
 test('OI spike, stale samples, stale or extreme funding and settlement block entry', () => {
   const oi = Array.from({ length: 5 }, (_, i) => ({ symbol: 'AAAUSDT', timestamp: now - (4 - i) * 300000,
-    sumOpenInterestValue: String(1000 + i) }));
+    sumOpenInterest: String(1000 + i), sumOpenInterestValue: String(1000 + i) }));
   const f = { symbol: 'AAAUSDT', time: now, lastFundingRate: '0.0001', nextFundingTime: now + 3600000 };
   assert.equal(fadePositioningGate(oi, f, 'AAAUSDT', now).allowed, true);
-  assert.match(fadePositioningGate(oi.map((x, i) => ({ ...x, sumOpenInterestValue: i === 4 ? 1100 : x.sumOpenInterestValue })), f, 'AAAUSDT', now).reason, /OI expansion/);
+  assert.match(fadePositioningGate(oi.map((x, i) => ({ ...x, sumOpenInterest: i === 4 ? '1100' : x.sumOpenInterest })), f, 'AAAUSDT', now).reason, /OI contract expansion/);
+  // Actual MARSCOIN window: quote value rose ~4% while open contracts rose <1%.
+  const contracts = [196726815, 196052070, 196812127, 197428135, 198576946];
+  const values = [30177494, 30305729, 30803084, 31023385, 31371418];
+  const priceDriven = oi.map((x, i) => ({ ...x, sumOpenInterest: String(contracts[i]), sumOpenInterestValue: String(values[i]) }));
+  assert.equal(fadePositioningGate(priceDriven, f, 'AAAUSDT', now).allowed, true);
+  assert.match(fadePositioningGate(oi.map(x => ({ ...x, sumOpenInterest: undefined })), f, 'AAAUSDT', now).reason, /invalid/);
   assert.equal(fadePositioningGate(oi, { ...f, lastFundingRate: '0.0008' }, 'AAAUSDT', now).allowed, false);
   assert.equal(fadePositioningGate(oi, { ...f, nextFundingTime: now + 60000 }, 'AAAUSDT', now).allowed, false);
   assert.equal(fadePositioningGate(oi, { ...f, time: now - 100000 }, 'AAAUSDT', now).allowed, false);

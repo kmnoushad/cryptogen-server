@@ -62,7 +62,7 @@ function harness(options = {}) {
         availableBalance: String(options.available ?? 100), initialMargin: String(options.initialMargin ?? 0) }] }),
     income: async () => options.incomePending ? new Promise(() => {}) : options.income ?? [],
     openInterestHistory: async symbol => Array.from({ length: 5 }, (_, i) =>
-      ({ symbol, timestamp: clock - (4 - i) * 300000, sumOpenInterestValue: '1000000' })),
+      ({ symbol, timestamp: clock - (4 - i) * 300000, sumOpenInterest: '1000000', sumOpenInterestValue: '1000000' })),
     funding: async symbol => ({ symbol, lastFundingRate: '0.0001', nextFundingTime: clock + 3600000, time: clock }),
     positions: async () => [...positions].map(([symbol, qty]) => ({ symbol, positionAmt: String(-qty), notional: String(qty * 100), positionSide: 'BOTH' })),
     orders: async () => [...orders.values()].filter(o => ['NEW', 'PARTIALLY_FILLED'].includes(o.status)).map(clone),
