@@ -24,3 +24,4 @@ test('five slots, aggregate risk, wrong-side stops and exchange minimum fail clo
   assert.match(planFuturesAutoTrade({ ...input, direction: 'SHORT', stop: 99 }).reason, /wrong side/);
   assert.match(planFuturesAutoTrade({ ...input, direction: 'LONG', stop: 99, minNotional: 200 }).reason, /minimum/);
 });
+

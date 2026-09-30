@@ -24,12 +24,16 @@ export function planFuturesAutoTrade({ direction, entry, stop, equity, available
   const marginBudget = Math.min(available, equity * limits.maxMarginFraction - committedMargin);
   if (!(riskBudget > 0 && marginBudget > 0)) return reject('Equity risk or margin budget exhausted');
   const exitSlip = 0.0005;
+  // Reserve entry slippage before sizing; otherwise a tiny unfavorable market
+  // fill would exceed a fully consumed risk budget and cause immediate churn.
+  const modeledEntry = entry * (direction === 'LONG' ? 1.0015 : 0.9985);
+  const maxEntry = entry * 1.0015;
   const perUnitLoss = direction === 'LONG'
-    ? entry * (1 + feeRate) - stop * (1 - feeRate - exitSlip)
-    : stop * (1 + feeRate + exitSlip) - entry * (1 - feeRate);
+    ? modeledEntry * (1 + feeRate) - stop * (1 - feeRate - exitSlip)
+    : stop * (1 + feeRate + exitSlip) - modeledEntry * (1 - feeRate);
   if (!(perUnitLoss > 0)) return reject('Invalid modeled stop loss');
   const qty = floorStep(Math.min(riskBudget / perUnitLoss,
-    limits.maxNotionalUsd / entry, marginBudget * limits.leverage / entry), qtyStep);
+    limits.maxNotionalUsd / maxEntry, marginBudget * limits.leverage / maxEntry), qtyStep);
   if (!(qty >= minQty && qty * entry >= minNotional)) return reject('Safe size below exchange minimum');
   const plannedLossUsd = qty * perUnitLoss;
   // The $5 target is on the whole position, after modeled entry/exit fees and
@@ -43,3 +47,4 @@ export function planFuturesAutoTrade({ direction, entry, stop, equity, available
     plannedLossUsd, riskBudget, marginUsd: qty * entry / limits.leverage,
     notionalUsd: qty * entry, openSlotsLeft: limits.maxOpen - open.length - 1 };
 }
+

@@ -1,3 +1,4 @@
+import { FuturesAutoRemote } from './futures-auto-remote.js';
 import dns from 'node:dns';
 import http from 'node:http';
 import { loadConfig } from './config.js';
@@ -72,6 +73,7 @@ engine.pumpFade = pumpFade;
 engine.marketMood = new MarketMood({ cfg, binance, btcBias, calendar, excluded: FUTURES_EXCLUDED });
 const fadeExecutor = new FadeRemote({ cfg, store });
 engine.fadeExecutor = fadeExecutor;
+engine.futuresAuto = new FuturesAutoRemote({ cfg });
 pumpFade.onSignal = (symbol, signal) => fadeExecutor.publish(symbol, signal);
 
 const server = http.createServer((request, response) => {
