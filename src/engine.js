@@ -1096,7 +1096,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /futuresauto /futurespause /futuresresume /futurescloseall /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1131,6 +1131,11 @@ export class Engine {
         `${this.btcBiasStatusLine()}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
+    } else if (text === '/futuresauto') {
+      await this.telegram.send(this.futuresAuto ? await this.futuresAuto.status() : 'Futures auto unavailable.');
+    } else if (['/futurespause', '/futuresresume', '/futurescloseall'].includes(text)) {
+      const action = text === '/futurespause' ? 'pause' : text === '/futuresresume' ? 'resume' : 'close';
+      await this.telegram.send(this.futuresAuto ? await this.futuresAuto.control(action) : 'Futures auto unavailable.');
     } else if (text === '/fadeauto') {
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.status() : 'Fade execution unavailable.');
     } else if (text === '/fadebalance') {
@@ -1309,3 +1314,4 @@ export class Engine {
     this.calendar?.stop();
   }
 }
+

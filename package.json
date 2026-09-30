@@ -1,6 +1,6 @@
 {
   "name": "nexio-v6",
-  "version": "6.9.35",
+  "version": "6.9.36",
   "private": true,
   "type": "module",
   "description": "Separated Futures and Alpha engine with phase-aware candidate survival and streaming BTC shock protection",
@@ -15,10 +15,12 @@
     "fade:performance": "node scripts/fade-performance.js",
     "fade:diagnostics": "node scripts/fade-diagnostics.js",
     "fade:retest-review": "node scripts/fade-retest-review.js",
-    "check": "node --check src/index.js && node --check src/fade-worker.js && node --test",
+    "check": "node --check src/index.js && node --check src/fade-worker.js && node --check src/futures-auto-worker.js && node --test",
     "smoke": "node scripts/binance-smoke.js",
     "smoke:ws": "node scripts/websocket-smoke.js",
-    "audit:futures": "node scripts/futures-live-audit.js"
+    "audit:futures": "node scripts/futures-live-audit.js",
+    "start:futures": "node src/futures-auto-worker.js",
+    "futures:preflight": "node scripts/futures-auto-preflight.js"
   },
   "dependencies": {
     "ws": "^8.18.3"
