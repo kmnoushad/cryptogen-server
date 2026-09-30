@@ -121,10 +121,11 @@ export function exitPlan(entry, qty, fee, f, stop) {
 
 export function entryPlan({ signal, bid, ask, info, fee, available, equity, now = Date.now() }) {
   const f = fadeFilters(info);
-  if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask && equity > 0)
-    || (ask / bid - 1) * 10000 > 10 || Math.abs(bid / signal.price - 1) > 0.0015
-    || 1 - bid / signal.resistance > 0.01
-    || !(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw Error('Stale, extended or illiquid fade entry');
+  if (!(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw Error('Fade entry expired: closed bar older than 90 seconds');
+  if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask && equity > 0)) throw Error('Fade entry quote, resistance or equity invalid');
+  if ((ask / bid - 1) * 10000 > 10) throw Error('Fade entry spread exceeds 10 bps');
+  if (Math.abs(bid / signal.price - 1) > 0.0015) throw Error('Fade entry price moved more than 0.15% since alert');
+  if (1 - bid / signal.resistance > 0.01) throw Error('Fade entry more than 1% below failed high; structural stop too far');
   const stop = structuralFadeStop(signal.resistance, f);
   if (!(stop > ask)) throw Error('Fade invalidation already reached; entry skipped');
   const perUnitRisk = modeledFadeLoss(bid, stop, 1, fee);

@@ -138,5 +138,5 @@ test('late chase is skipped rather than moving stop above the peak', () => {
   const plan = entryPlan({ signal, bid: 100, ask: 100.01, info, fee: 0.0005, available: 100, equity: 100, now });
   assert.ok(plan.stop < signal.resistance && plan.riskDollars <= 0.5);
   assert.throws(() => entryPlan({ signal: { ...signal, price: 99, resistance: 100.8 }, bid: 99,
-    ask: 99.01, info, fee: 0.0005, available: 100, equity: 100, now }), /Stale, extended/);
+    ask: 99.01, info, fee: 0.0005, available: 100, equity: 100, now }), /more than 1% below failed high/);
 });
