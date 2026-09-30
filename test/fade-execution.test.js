@@ -131,8 +131,11 @@ test('size cap preserves invalidation, 0.5% equity risk, and >=1.5R net partial'
 });
 test('stale and widened spread entries are refused', () => {
   const input = { signal, bid: 100, ask: 100.01, info: symbolInfo('AAAUSDT'), fee: 0.0005, available: 250, equity: 100, now };
-  assert.throws(() => entryPlan({ ...input, now: now + 90001 }));
-  assert.throws(() => entryPlan({ ...input, ask: 101 }));
+  assert.throws(() => entryPlan({ ...input, now: now + 90001 }), /older than 90 seconds/);
+  assert.throws(() => entryPlan({ ...input, ask: 100.2 }), /spread exceeds 10 bps/);
+  assert.throws(() => entryPlan({ ...input, bid: 100.2, ask: 100.21 }), /price moved more than 0.15%/);
+  const qnt = { ...signal, price: 288.12, resistance: 293.96, barCloseTime: now };
+  assert.throws(() => entryPlan({ ...input, signal: qnt, bid: 288.12, ask: 288.13 }), /more than 1% below failed high/);
 });
 test('verified account snapshot reports equity progress and seven-day net flows', async () => {
   const h = harness({ wallet: 98.5, unrealized: 0.75, available: 70, initialMargin: 28.5,

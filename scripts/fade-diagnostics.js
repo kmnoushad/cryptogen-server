@@ -17,14 +17,24 @@ const store = new Store(cfg);
 const exchange = new FadeExchange({ key: cfg.binanceApiKey, secret: cfg.binanceApiSecret, environment: cfg.fadeEnvironment });
 const since = new Date(now - 24 * 3600000).toISOString();
 const countEvents = async type => {
-  let count = 0, latest = null;
+  let count = 0, latest = null, withinDistance = 0, beyondDistance = 0, unknownDistance = 0;
+  const recent = [];
   for (let offset = 0; ; offset += 500) {
     const page = await store.get('nexio_events', [['event_type', `eq.${type}`], ['created_at', `gte.${since}`],
-      ['select', 'created_at'], ['order', 'created_at.desc'], ['limit', '500'], ['offset', String(offset)]]);
+      ['select', type === 'FADE_WORKER_SIGNAL_V1' ? 'created_at,symbol,payload' : 'created_at'],
+      ['order', 'created_at.desc'], ['limit', '500'], ['offset', String(offset)]]);
     if (!Array.isArray(page)) throw Error('Fade event history unavailable');
     if (offset === 0) latest = page[0]?.created_at ?? null;
+    if (type === 'FADE_WORKER_SIGNAL_V1') for (const row of page) {
+      const price = Number(row.payload?.price), resistance = Number(row.payload?.resistance);
+      const distance = price > 0 && resistance > price ? (1 - price / resistance) * 100 : NaN;
+      if (!Number.isFinite(distance)) unknownDistance++;
+      else if (distance <= 1) withinDistance++;
+      else beyondDistance++;
+      if (recent.length < 5) recent.push({ symbol: row.symbol, at: row.created_at, distance });
+    }
     count += page.length;
-    if (page.length < 500) return { count, latest };
+    if (page.length < 500) return { count, latest, withinDistance, beyondDistance, unknownDistance, recent };
     if (offset >= 10000) throw Error('Fade event history exceeds diagnostic limit');
   }
 };
@@ -46,6 +56,11 @@ const [warnings, signals, state, control, btcRows, btcBook, account] = await Pro
 ]);
 if (warnings) console.log(`Railway fade warnings: ${warnings.count} · latest ${warnings.latest ?? 'none'}`);
 if (signals) console.log(`AWS handoff events: ${signals.count} · latest ${signals.latest ?? 'none'}`);
+if (signals) {
+  console.log(`At alert price: ${signals.withinDistance} within the 1% entry-distance limit · ${signals.beyondDistance} already too far below the failed high · ${signals.unknownDistance} invalid/unknown`);
+  for (const row of signals.recent) console.log(`Recent handoff: ${row.at} · ${row.symbol} · ${Number.isFinite(row.distance) ? row.distance.toFixed(2) + '% below high' : 'distance unavailable'}`);
+  console.log('Distance is one entry prerequisite at alert price; live quote, BTC, OI, funding, risk and events can still block.');
+}
 if (warnings && signals && warnings.count > signals.count) console.log('Some warnings had no worker handoff (or occurred before the handoff feature was enabled).');
 if (control) console.log(`Requested entries: ${control.paused ? 'PAUSED' : 'enabled'}${control.close_requested ? ' · close requested' : ''}`);
 if (btcRows && btcBook) {
