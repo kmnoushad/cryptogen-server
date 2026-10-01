@@ -76,7 +76,7 @@ export class FadeExecutor {
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
       `Fade setup gate: ${fadeAdverseEntryBlocked(this.row?.state.jobs ?? [], this.now()) ? 'HOLD — active short near planned stop' : 'clear'}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
-      'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · 7d PnL information only\n' +
+      'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · rolling 7d net loss lock (-$10 or 5%)\n' +
       'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => {
