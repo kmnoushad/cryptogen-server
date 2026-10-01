@@ -136,7 +136,7 @@ test('risk policy enforces five, aggregate, fees, margin and minimums in both di
     assert.equal(planFuturesAutoTrade({ ...input, available: .1 }).allowed, false);
     const x = futuresExitPlan(direction, p.entry, p.qty, p.stop, input.feeRate, .001);
     const net = direction === 'LONG' ? p.qty * (x.target * .999 - p.entry * 1.0005) : p.qty * (p.entry * .9995 - x.target * 1.001);
-    assert.ok(net >= 5 - 1e-8);
+    assert.ok(net >= 1.5 * x.plannedLossUsd - 1e-6 && net - 1.5 * x.plannedLossUsd < 0.05);
   }
 });
 test('separate credentials required; fade credentials never serve as fallback', () => {
@@ -212,3 +212,32 @@ test('ordinary small adverse market fills fit the reserved slippage budget', asy
     assert.equal(h.positions.size, 1); assert.ok(h.db().state.jobs[0].plan.plannedLossUsd <= 1);
   }
 });
+
+test('v6.9.37: target scales with risk (1.5R net), not a fixed dollar amount', () => {
+  for (const [direction, entry, stop] of [['LONG', 100, 99.5], ['SHORT', 100, 100.5], ['LONG', 2500, 2487.5]]) {
+    for (const qty of [0.05, 1, 20]) {
+      const x = futuresExitPlan(direction, entry, qty, stop, .0005, .001);
+      const net = direction === 'LONG' ? qty * (x.target * .999 - entry * 1.0005) : qty * (entry * .9995 - x.target * 1.001);
+      assert.ok(net >= 1.5 * x.plannedLossUsd - 1e-6, `${direction} qty ${qty}`);
+      // Distance to target stays within a few multiples of the stop distance at any size.
+      assert.ok(Math.abs(x.target - entry) / Math.abs(entry - stop) < 4);
+    }
+  }
+});
+test('v6.9.37: small account gets a reachable target (was an 18% move at $30 equity)', () => {
+  const p = planFuturesAutoTrade({ direction: 'LONG', entry: 2500, stop: 2487.5, equity: 29.94, available: 29.94,
+    feeRate: .0005, qtyStep: .001, minQty: .001, minNotional: 20 });
+  assert.ok(p.allowed); assert.ok(p.targetMovePct < 2, `target move ${p.targetMovePct}%`);
+});
+for (const direction of ['LONG', 'SHORT']) {
+  test(`${direction}: v6.9.37 break-even waits for +1R (not 0.5R)`, async () => {
+    const h = harness(); await h.ex.onSignal('ETHUSDT', signal(direction)); const initial = h.db().state.jobs[0].plan.stop;
+    h.opt.price = direction === 'LONG' ? 100.5 : 99.5; await h.ex.run();
+    assert.equal(h.db().state.jobs[0].plan.stop, initial);
+  });
+  test(`${direction}: v6.9.37 position older than the max hold window is closed`, async () => {
+    const h = harness(); await h.ex.onSignal('ETHUSDT', signal(direction)); assert.equal(h.positions.size, 1);
+    h.advance(4 * 3600000 + 5000); await h.ex.run(); await h.ex.run();
+    assert.equal(h.positions.size, 0); assert.equal(h.db().state.jobs[0].closeReason, 'MAX_HOLD_TIME');
+  });
+}

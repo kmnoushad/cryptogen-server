@@ -12,15 +12,17 @@ const terminal = s => ['FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJ
 const truth = x => x === true || x === 'true';
 const up = (n, tick) => Number((Math.ceil(n / tick - 1e-9) * tick).toFixed(12));
 const exitSide = j => j.direction === 'LONG' ? 'SELL' : 'BUY';
-export function futuresExitPlan(direction, entry, qty, stop, fee, tick) {
+export const FUTURES_TARGET_R = 1.5, FUTURES_BREAKEVEN_R = 1, FUTURES_MAX_HOLD_MS = 4 * 3600000;
+export function futuresExitPlan(direction, entry, qty, stop, fee, tick, targetR = FUTURES_TARGET_R) {
   const long = direction === 'LONG';
   if (!['LONG', 'SHORT'].includes(direction) || ![entry, qty, stop, fee, tick].every(Number.isFinite)
     || !(entry > 0 && qty > 0 && stop > 0 && fee >= 0 && fee <= .01 && tick > 0)
     || (long ? stop >= entry : stop <= entry)) throw Error('Invalid actual-fill exit plan');
   const loss = qty * (long ? entry * (1 + fee) - stop * (1 - fee - .0005)
     : stop * (1 + fee + .0005) - entry * (1 - fee));
-  const raw = long ? (5 / qty + entry * (1 + fee)) / (1 - fee - .0005)
-    : (entry * (1 - fee) - 5 / qty) / (1 + fee + .0005);
+  // Net profit at target = targetR x modeled loss (both after fees/slippage).
+  const raw = long ? (targetR * loss / qty + entry * (1 + fee)) / (1 - fee - .0005)
+    : (entry * (1 - fee) - targetR * loss / qty) / (1 + fee + .0005);
   const target = long ? up(raw, tick) : down(raw, tick);
   const breakEven = long ? up(entry * (1 + fee) / (1 - fee - .0005), tick)
     : down(entry * (1 - fee) / (1 + fee + .0005), tick);
@@ -64,7 +66,7 @@ export class FuturesAutoExecutor extends FadeExecutor {
       `${!this.cfg.enabled ? 'New entries disabled; protection active' : this.row?.state.paused !== false ? 'Entries paused' : 'Enabled'} · ${jobs.length}/5 active intents\n` +
       `Last entry/scan: ${this.reason}\n` +
       'LONG + SHORT · isolated 2x · max $150 notional each\n' +
-      'Whole-position target ~$5 modeled net · stop ≤ min($5, 1% equity)\n' +
+      'Target 1.5R net · break-even at +1R · 4h max hold · stop ≤ min($5, 1% equity)\n' +
       'Aggregate risk ≤3% equity · margin ≤50% equity\nDaily 2% loss/giveback lock · two-loss cooldown 4h\n' +
       jobs.map(j => `${j.symbol} ${j.direction} · ${j.phase} · stop ${j.plan.stop} · target ${j.plan.target}`).join('\n') +
       (b ? `\nWallet $${b.wallet.toFixed(2)} · Equity $${b.equity.toFixed(2)} · Available $${b.available.toFixed(2)}\nBalance updated: ${new Date(b.updatedAt).toISOString()}` : '\nBalance awaiting verified account read') +
@@ -177,6 +179,9 @@ export class FuturesAutoExecutor extends FadeExecutor {
         job.plan = plan; job.actualFillPlanned = true; await this.save();
       }
       if (job.closeRequested) { await this.close(job, job.closeReason ?? 'OWNER_CLOSE'); return; }
+      // Time stop: a breakout that has not worked within the hold window is
+      // closed rather than left open accruing funding (v6.9.37).
+      if (this.now() - job.createdAt > FUTURES_MAX_HOLD_MS) { await this.close(job, 'MAX_HOLD_TIME'); return; }
       const quote = await this.exchange.book(job.symbol), price = Number(job.direction === 'LONG' ? quote.bidPrice : quote.askPrice);
       if (!(price > 0)) throw Error('Exit quote unavailable');
       if (job.direction === 'LONG' ? price <= job.plan.stop : price >= job.plan.stop) { await this.close(job, 'STOP_PRICE_REACHED'); return; }
@@ -192,9 +197,10 @@ export class FuturesAutoExecutor extends FadeExecutor {
       if (Math.abs(Math.abs(Number(current.positionAmt)) - (filled - tpFilled)) > job.filters.step / 2) throw Error('Position changed outside bot orders');
       const net = job.direction === 'LONG' ? filled * (price * (1 - job.fee - .0005) - average * (1 + job.fee))
         : filled * (average * (1 - job.fee) - price * (1 + job.fee + .0005));
-      // Once half the modeled risk is earned, protect at cost-adjusted entry.
+      // Once a full 1R is earned, protect at cost-adjusted entry (was 0.5R,
+      // which turned most early winners into scratches; v6.9.37).
       const be = job.plan.breakEven;
-      if (net >= job.plan.plannedLossUsd * .5 && (job.direction === 'LONG' ? price > be && be > job.plan.stop : price < be && be < job.plan.stop)) await this.ensureStop(job, be);
+      if (net >= job.plan.plannedLossUsd * FUTURES_BREAKEVEN_R && (job.direction === 'LONG' ? price > be && be > job.plan.stop : price < be && be < job.plan.stop)) await this.ensureStop(job, be);
       const changed = job.phase !== 'OPEN'; job.phase = 'OPEN';
       await this.cancelOwned(job, [job.stopId, job.actions.tp.id]); if (changed) await this.save();
     } catch (e) {
@@ -254,7 +260,7 @@ export class FuturesAutoExecutor extends FadeExecutor {
       catch (e) { if (e instanceof ExchangeError && e.status < 500) { job.actions.e.rejected = true; await this.save(); } }
       await this.manage(job);
       this.lastError = null; this.reason = `${symbol} ${signal.direction}: ${job.phase}`;
-      if (active(job)) await this.notify(`🤖 FUTURES AUTO ${this.cfg.environment.toUpperCase()}: ${symbol} ${signal.direction}\nFilled ${job.filledQty} · stop ${job.plan.stop} · net target ~$5\n/futuresauto`);
+      if (active(job)) await this.notify(`🤖 FUTURES AUTO ${this.cfg.environment.toUpperCase()}: ${symbol} ${signal.direction}\nFilled ${job.filledQty} · stop ${job.plan.stop} · target ${job.plan.target} (1.5R)\n/futuresauto`);
     } catch (e) { await this.failed(e); this.reason = e.message; }
     finally { this.busy = false; }
   }

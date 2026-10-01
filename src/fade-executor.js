@@ -175,7 +175,7 @@ export class FadeExecutor {
         if (decision.allowed && /^Rolling seven-day/.test(this.entrySafety.reason)) {
           this.entrySafety = { allowed: false, reason: 'Timed risk limits clear; awaiting signal-specific checks' };
         }
-        if (!decision.allowed && /^(Daily net loss|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
+        if (!decision.allowed && /^(Daily net loss|Rolling seven-day|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
           this.entrySafety = decision;
           const key = `${gstDayStart(capturedAt)}:${decision.reason}`;
           if (key !== this.lastRiskNotice) {

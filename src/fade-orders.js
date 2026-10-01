@@ -94,10 +94,13 @@ export function fadeFilters(info) {
   return result;
 }
 
+// v6.9.37: the stop sits ABOVE the failed high with a 0.3% buffer. One tick
+// below the high was stopped out by ordinary retests that never broke it.
+export const FADE_STOP_BUFFER = 0.003;
 export function structuralFadeStop(resistance, f) {
   if (!(resistance > 0)) throw Error('Fade resistance missing');
-  const stop = down(resistance - f.tick, f.tick);
-  if (!(stop > f.minPrice && stop < resistance && stop <= f.maxPrice)) throw Error('Fade stop cannot fit below resistance');
+  const stop = Number((Math.ceil(resistance * (1 + FADE_STOP_BUFFER) / f.tick - 1e-9) * f.tick).toFixed(12));
+  if (!(stop > f.minPrice && stop > resistance && stop <= f.maxPrice)) throw Error('Fade stop cannot fit above resistance');
   return stop;
 }
 

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { FadeExecutor } from '../src/fade-executor.js';
-import { ExchangeError, FadeExchange, entryPlan, exitPlan, fadeFilters } from '../src/fade-orders.js';
+import { ExchangeError, FadeExchange, entryPlan, exitPlan, fadeFilters, structuralFadeStop } from '../src/fade-orders.js';
 
 const now = Date.parse('2026-09-15T13:00:00Z');
 const symbolInfo = symbol => ({ symbol, status: 'TRADING', quoteAsset: 'USDT', contractType: 'PERPETUAL', filters: [
@@ -125,7 +125,7 @@ test('size cap preserves invalidation, 0.5% equity risk, and >=1.5R net partial'
   assert.ok(net >= 1.5 * p.riskDollars - 1e-6);
   const loss = p.qty * (p.stop - p.entry) + p.qty * p.entry * p.fee + p.qty * p.stop * (p.fee + 0.0005);
   assert.ok(loss <= 0.5 + 1e-6);
-  assert.ok(p.stop < signal.resistance && p.stop > 100.01);
+  assert.ok(p.stop > signal.resistance && p.stop <= signal.resistance * 1.0031);
   assert.ok(p.runner > 0);
   assert.throws(() => exitPlan(100, 0.01, 0.0005, fadeFilters(symbolInfo('AAAUSDT'))));
 });
@@ -257,7 +257,7 @@ test('profit locks before the 75% limit fills; native replacement is installed f
 });
 test('sustained approach to fade stop warns once and holds new entries until price recovers', async () => {
   const h = harness(); await h.executor.onSignal('AAAUSDT', signal);
-  h.options.price = 100.65;
+  h.options.price = 100.9; // >75% of the way to the (now 0.3% above resistance) stop
   for (let i = 0; i < 3; i++) await h.executor.run();
   assert.equal(h.executor.lastError, null);
   assert.equal(h.db().state.jobs[0].adverseChecks, 3);
@@ -374,4 +374,11 @@ test('BTC gate changing during preparation prevents the SELL order', async () =>
   await h.executor.onSignal('AAAUSDT', signal);
   assert.equal(h.calls.filter(c => c[0] === 'place').length, 0);
   assert.equal(h.db().state.jobs[0].phase, 'CLOSED');
+});
+
+test('v6.9.37: fade stop sits above the failed high with a buffer, never below it', () => {
+  const f = fadeFilters(symbolInfo('AAAUSDT'));
+  const stop = structuralFadeStop(100.8, f);
+  assert.ok(stop > 100.8 && stop >= 100.8 * 1.003 - 1e-9 && stop <= 100.8 * 1.003 + f.tick);
+  assert.throws(() => structuralFadeStop(0, f), /resistance missing/);
 });

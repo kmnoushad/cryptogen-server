@@ -22,6 +22,14 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
     dailyPeak = Math.max(dailyPeak, dailyNet);
   }
   if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached');
+  // v6.9.37: restored rolling seven-day net loss lock (removed in v6.9.26).
+  // Entry-only; open positions keep native protection. Rolls off automatically.
+  let weeklyNet = 0;
+  for (const row of rows) {
+    const time = Number(row.time);
+    if (KINDS.has(row.incomeType) && time >= now - 7 * 86400000 && time <= now) weeklyNet += Number(row.income);
+  }
+  if (weeklyNet <= -Math.max(10, equity * 0.05)) return blocked('Rolling seven-day net loss limit reached');
   // New entries stop after a real, fee-adjusted profitable day gives back
   // meaningful gains. This does not liquidate open positions or guarantee PnL.
   if (dailyPeak >= Math.max(3, equity * 0.02)
