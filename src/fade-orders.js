@@ -77,7 +77,7 @@ export class FadeExchange {
   }
 }
 
-export const decimal = n => Number(n).toFixed(12).replace(/0+$/, '').replace(/\.$/, '');
+export const decimal = n => Number(n).toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
 export const down = (n, step) => Number((Math.floor(n / step + 1e-9) * step).toFixed(12));
 
 export function fadeFilters(info) {
