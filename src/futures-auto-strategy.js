@@ -1,4 +1,5 @@
-export const FUTURES_AUTO_SYMBOLS = Object.freeze(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT']);
+export const FUTURES_AUTO_SYMBOLS = Object.freeze(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+  'ADAUSDT', 'LINKUSDT', 'AVAXUSDT', 'LTCUSDT']);
 const ema = (values, n) => values.reduce((v, x) => v === null ? x : v + 2 / (n + 1) * (x - v), null);
 export function closedSeries(rows, interval, now) {
   if (!Array.isArray(rows)) throw Error('Candle data unavailable');

@@ -24,17 +24,17 @@ test('v6.9.37 rolling seven-day net loss locks entries, rolls off, and daily cap
     row('REALIZED_PNL', 22, sixDaysAgo), row('COMMISSION', -1, sixDaysAgo),
     row('REALIZED_PNL', -40, now - 86400000), row('COMMISSION', -12, now - 86400000)];
   // Net -31 over the window exceeds max($10, 5% equity): blocked.
-  assert.match(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: week, jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
   // Just under / just over the max($10, 5%) threshold.
-  assert.equal(fadeRiskDecision({ rows: [row('REALIZED_PNL', -9, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).allowed, true);
-  assert.match(fadeRiskDecision({ rows: [row('REALIZED_PNL', -11, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('REALIZED_PNL', -9, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).allowed, true);
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('REALIZED_PNL', -11, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
   // Deposits/transfers never count as trading income.
-  assert.equal(fadeRiskDecision({ rows: [row('TRANSFER', -500, now - 1000)], jobs: [], equity: 138.89, now }).allowed, true);
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('TRANSFER', -500, now - 1000)], jobs: [], equity: 138.89, now }).allowed, true);
   // Daily limit is still reported first when it is also breached.
-  assert.match(fadeRiskDecision({ rows: [...week, row('COMMISSION', -3, now - 1000)],
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: [...week, row('COMMISSION', -3, now - 1000)],
     jobs: [], equity: 138.89, now }).reason, /Daily net loss/);
   // Old losses roll off automatically once outside seven days.
-  assert.equal(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89, now: now + 8 * 86400000 }).allowed, true);
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: week, jobs: [], equity: 138.89, now: now + 8 * 86400000 }).allowed, true);
 });
 
 test('profitable day locks fresh entries after gains are given back net of fees, across restarts', () => {
