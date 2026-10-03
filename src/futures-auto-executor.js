@@ -65,6 +65,7 @@ export class FuturesAutoExecutor extends FadeExecutor {
     return `FUTURES AUTO — ${this.cfg.environment.toUpperCase()} · separate account\n` +
       `${!this.cfg.enabled ? 'New entries disabled; protection active' : this.row?.state.paused !== false ? 'Entries paused' : 'Enabled'} · ${jobs.length}/5 active intents\n` +
       `Last entry/scan: ${this.reason}\n` +
+      'Detection: pipeline v2 · early WATCH + confirmation age/cost diagnostics\n' +
       'LONG + SHORT · isolated 2x · max $150 notional each\n' +
       'Target 1.5R net · break-even at +1R · 4h max hold · stop ≤ min($5, 1% equity)\n' +
       'Aggregate risk ≤3% equity · margin ≤50% equity\nDaily 2% loss/giveback lock · two-loss cooldown 4h\n' +

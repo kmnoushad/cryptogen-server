@@ -8,7 +8,8 @@ export class FadeRemote {
   }
   health() { return { external: true, localExecution: false }; }
   async publish(symbol, signal) {
-    // Written only after Telegram delivery. Original informational events cannot execute.
+    // Dedicated confirmed-signal channel; Telegram message throttles do not
+    // control execution. Original informational events cannot execute.
     await this.store.insertEvent({
       event_key: `fade-worker-v1:${symbol}:${signal.peakTime}`,
       event_type: 'FADE_WORKER_SIGNAL_V1', symbol,
