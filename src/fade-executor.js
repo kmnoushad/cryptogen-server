@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { decimal, down, entryPlan, ExchangeError, exitPlan, structuralFadeStop } from './fade-orders.js';
+import { decimal, down, entryPlan, ExchangeError, FadeEntrySkipped, exitPlan, structuralFadeStop } from './fade-orders.js';
 import { fadeBtcGate } from './fade-btc-gate.js';
 import { fadeAdverseQuote, fadeAdverseEntryBlocked } from './fade-adverse.js';
 import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
 import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk, weeklyLockSummary } from './fade-risk.js';
 import { escapeHtml } from './util.js';
+import { entryQuality } from './entry-quality.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
 const open = j => j.phase !== 'CLOSED';
@@ -74,6 +75,7 @@ export class FadeExecutor {
       `${h.enabled ? h.paused ? 'Entries paused' : 'Enabled' : 'Disabled'} · ${h.active}/3 active intents\n` +
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
+      'Entry quality: modeled costs ≤25% of stop risk · no chasing\n' +
       `Fade setup gate: ${fadeAdverseEntryBlocked(this.row?.state.jobs ?? [], this.now()) ? 'HOLD — active short near planned stop' : 'clear'}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
       'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · ' + weeklyLockSummary() + '\n' +
@@ -444,6 +446,8 @@ export class FadeExecutor {
       const book = await this.exchange.book(symbol), quoteAt = this.now();
       const plan = entryPlan({ signal, bid: Number(book.bidPrice), ask: Number(book.askPrice), info, fee,
         available: Number(snapshot.account.assets.find(a => a.asset === 'USDT')?.availableBalance), equity, now: this.now() });
+      const quality = entryQuality({ direction: 'SHORT', entry: plan.entry, stop: plan.stop, reference: signal.price, fee });
+      if (!quality.allowed) { this.entrySafety = { allowed: false, reason: `Entry skipped: ${quality.reason}` }; return; }
       const job = { id, symbol, phase: 'SUBMITTING', signal, fee, filters: plan.filters,
         riskBudget: equity * 0.005, createdAt: this.now(), actions: {}, plan };
       jobs.push(job);
@@ -471,7 +475,10 @@ export class FadeExecutor {
       await this.manage(job);
       if (open(job)) await this.notify(`🤖 FADE AUTO ${escapeHtml(this.cfg.fadeEnvironment.toUpperCase())}: ${escapeHtml(symbol)} SHORT\nFilled ${job.filledQty} · ${escapeHtml(job.phase)}\n/fadeauto`);
       this.lastError = null;
-    } catch (e) { await this.failed(e); }
+    } catch (e) {
+      if (e instanceof FadeEntrySkipped) this.entrySafety = { allowed: false, reason: `Entry skipped: ${e.message}` };
+      else await this.failed(e);
+    }
     finally { this.busy = false; }
   }
 }
