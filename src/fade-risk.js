@@ -3,7 +3,15 @@
 export const gstDayStart = now => Math.floor((now + 4 * 3600000) / 86400000) * 86400000 - 4 * 3600000;
 const KINDS = new Set(['REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE']);
 
-export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, cooldownMs = 4 * 3600000 }) {
+const configuredWeeklyPct = () => {
+  const v = Number(process.env.WEEKLY_LOSS_LOCK_PCT);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+};
+export const weeklyLockSummary = (pct = configuredWeeklyPct()) =>
+  (pct > 0 ? 'rolling 7d net loss lock (-$10 or ' + pct + '%)' : '7d PnL information only');
+
+export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, cooldownMs = 4 * 3600000,
+  weeklyLockPct = configuredWeeklyPct() }) {
   const blocked = reason => ({ allowed: false, reason });
   if (!(equity > 0) || !Array.isArray(rows) || !Array.isArray(jobs)) return blocked('Risk data unavailable');
   const dayStart = gstDayStart(now);
@@ -22,6 +30,14 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
     dailyPeak = Math.max(dailyPeak, dailyNet);
   }
   if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached');
+  // v6.9.37: restored rolling seven-day net loss lock (removed in v6.9.26).
+  // Entry-only; open positions keep native protection. Rolls off automatically.
+  let weeklyNet = 0;
+  for (const row of rows) {
+    const time = Number(row.time);
+    if (KINDS.has(row.incomeType) && time >= now - 7 * 86400000 && time <= now) weeklyNet += Number(row.income);
+  }
+  if (weeklyLockPct > 0 && weeklyNet <= -Math.max(10, equity * weeklyLockPct / 100)) return blocked('Rolling seven-day net loss limit reached');
   // New entries stop after a real, fee-adjusted profitable day gives back
   // meaningful gains. This does not liquidate open positions or guarantee PnL.
   if (dailyPeak >= Math.max(3, equity * 0.02)

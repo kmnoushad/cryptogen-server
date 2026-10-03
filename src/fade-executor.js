@@ -3,7 +3,7 @@ import { decimal, down, entryPlan, ExchangeError, exitPlan, structuralFadeStop }
 import { fadeBtcGate } from './fade-btc-gate.js';
 import { fadeAdverseQuote, fadeAdverseEntryBlocked } from './fade-adverse.js';
 import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
-import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk } from './fade-risk.js';
+import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk, weeklyLockSummary } from './fade-risk.js';
 import { escapeHtml } from './util.js';
 
 const hash = text => createHash('sha256').update(text).digest('hex').slice(0, 16);
@@ -76,7 +76,7 @@ export class FadeExecutor {
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
       `Fade setup gate: ${fadeAdverseEntryBlocked(this.row?.state.jobs ?? [], this.now()) ? 'HOLD — active short near planned stop' : 'clear'}\n` +
       'New entries: isolated 2x · max $150 notional · 0.5% equity modeled stop risk\n' +
-      'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · 7d PnL information only\n' +
+      'Daily 2% loss/giveback lock (GST reset) · two-loss cooldown 4h · ' + weeklyLockSummary() + '\n' +
       'New entries: 75% exit targets ≥1.5R modeled net · 25% runner\n' +
       'Runner: fee-adjusted break-even, then 0.75% trailing stop\n' +
       (this.row?.state.jobs.filter(open).map(j => {
@@ -175,7 +175,7 @@ export class FadeExecutor {
         if (decision.allowed && /^Rolling seven-day/.test(this.entrySafety.reason)) {
           this.entrySafety = { allowed: false, reason: 'Timed risk limits clear; awaiting signal-specific checks' };
         }
-        if (!decision.allowed && /^(Daily net loss|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
+        if (!decision.allowed && /^(Daily net loss|Rolling seven-day|Daily realized profit giveback|Two consecutive losses)/.test(decision.reason)) {
           this.entrySafety = decision;
           const key = `${gstDayStart(capturedAt)}:${decision.reason}`;
           if (key !== this.lastRiskNotice) {

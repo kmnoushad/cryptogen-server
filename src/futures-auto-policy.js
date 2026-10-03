@@ -1,6 +1,6 @@
 // Planning only. No exchange calls or order submissions in this module.
 export const FUTURES_AUTO_LIMITS = Object.freeze({ maxOpen: 5, maxStopUsd: 5,
-  targetNetUsd: 5, perTradeEquityRisk: 0.01, aggregateEquityRisk: 0.03,
+  targetR: 1.5, perTradeEquityRisk: 0.01, aggregateEquityRisk: 0.03,
   maxNotionalUsd: 150, leverage: 2, maxMarginFraction: 0.5 });
 
 const floorStep = (n, step) => Math.floor(n / step + 1e-9) * step;
@@ -36,12 +36,14 @@ export function planFuturesAutoTrade({ direction, entry, stop, equity, available
     limits.maxNotionalUsd / maxEntry, marginBudget * limits.leverage / maxEntry), qtyStep);
   if (!(qty >= minQty && qty * entry >= minNotional)) return reject('Safe size below exchange minimum');
   const plannedLossUsd = qty * perUnitLoss;
-  // The $5 target is on the whole position, after modeled entry/exit fees and
-  // exit slippage. This is not a partial-fill or execution-price guarantee.
+  // v6.9.37: target scales with risk (targetR x modeled loss, net of fees and
+  // exit slippage). A fixed-dollar target ignored position size and needed
+  // 3-18% moves against sub-1% stops. Not an execution-price guarantee.
+  const targetNet = limits.targetR * plannedLossUsd;
   const target = direction === 'LONG'
-    ? (limits.targetNetUsd / qty + entry * (1 + feeRate)) / (1 - feeRate - exitSlip)
-    : (entry * (1 - feeRate) - limits.targetNetUsd / qty) / (1 + feeRate + exitSlip);
-  if (!(target > 0 && (direction === 'LONG' ? target > entry : target < entry))) return reject('Net $5 target not feasible');
+    ? (targetNet / qty + entry * (1 + feeRate)) / (1 - feeRate - exitSlip)
+    : (entry * (1 - feeRate) - targetNet / qty) / (1 + feeRate + exitSlip);
+  if (!(target > 0 && (direction === 'LONG' ? target > entry : target < entry))) return reject('Risk-multiple target not feasible');
   return { allowed: true, direction, qty, entry, stop, target,
     targetMovePct: Math.abs(target / entry - 1) * 100,
     plannedLossUsd, riskBudget, marginUsd: qty * entry / limits.leverage,

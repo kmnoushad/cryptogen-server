@@ -18,18 +18,23 @@ test('GST day boundary and daily cap count net income, not wallet transfers', ()
   assert.equal(fadeRiskDecision({ rows: rows.slice(2), jobs: [], equity: 100, now }).allowed, true);
 });
 
-test('last week losses cannot prevent a later entry; daily cap still applies', () => {
+test('v6.9.37 rolling seven-day net loss locks entries, rolls off, and daily cap still applies first', () => {
   const sixDaysAgo = now - 6 * 86400000;
   const week = [row('TRANSFER', 70, sixDaysAgo - 10),
     row('REALIZED_PNL', 22, sixDaysAgo), row('COMMISSION', -1, sixDaysAgo),
     row('REALIZED_PNL', -40, now - 86400000), row('COMMISSION', -12, now - 86400000)];
-  assert.equal(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89, now }).allowed, true);
-  const belowPeak = [row('REALIZED_PNL', -11, now - 2 * 86400000)];
-  assert.equal(fadeRiskDecision({ rows: belowPeak, jobs: [], equity: 138.89, now }).allowed, true);
-  assert.match(fadeRiskDecision({ rows: [...week, row('COMMISSION', -3, now - 1000)],
+  // Net -31 over the window exceeds max($10, 5% equity): blocked.
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: week, jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
+  // Just under / just over the max($10, 5%) threshold.
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('REALIZED_PNL', -9, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).allowed, true);
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('REALIZED_PNL', -11, now - 2 * 86400000)], jobs: [], equity: 138.89, now }).reason, /Rolling seven-day/);
+  // Deposits/transfers never count as trading income.
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: [row('TRANSFER', -500, now - 1000)], jobs: [], equity: 138.89, now }).allowed, true);
+  // Daily limit is still reported first when it is also breached.
+  assert.match(fadeRiskDecision({ weeklyLockPct: 5, rows: [...week, row('COMMISSION', -3, now - 1000)],
     jobs: [], equity: 138.89, now }).reason, /Daily net loss/);
-  assert.equal(fadeRiskDecision({ rows: week, jobs: [], equity: 138.89,
-    now: now + 8 * 86400000 }).allowed, true);
+  // Old losses roll off automatically once outside seven days.
+  assert.equal(fadeRiskDecision({ weeklyLockPct: 5, rows: week, jobs: [], equity: 138.89, now: now + 8 * 86400000 }).allowed, true);
 });
 
 test('profitable day locks fresh entries after gains are given back net of fees, across restarts', () => {
@@ -136,7 +141,7 @@ test('late chase is skipped rather than moving stop above the peak', () => {
   ] };
   const signal = { price: 100, resistance: 100.8, barCloseTime: now - 1000 };
   const plan = entryPlan({ signal, bid: 100, ask: 100.01, info, fee: 0.0005, available: 100, equity: 100, now });
-  assert.ok(plan.stop < signal.resistance && plan.riskDollars <= 0.5);
+  assert.ok(plan.stop > signal.resistance && plan.riskDollars <= 0.5);
   assert.throws(() => entryPlan({ signal: { ...signal, price: 99, resistance: 100.8 }, bid: 99,
     ask: 99.01, info, fee: 0.0005, available: 100, equity: 100, now }), /more than 1% below failed high/);
 });

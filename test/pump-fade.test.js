@@ -64,7 +64,7 @@ test('80% gainers can warn without long BTC gate; cooldown avoids repeated sends
   assert.match(x.messages[0], /DOWNSIDE RISK INCREASING/);
   assert.match(x.messages[0], /not a guaranteed fall/);
   assert.equal(x.events[0].event_type, 'FUTURES_PUMP_FADE_WARNING');
-  assert.equal(x.requests(), 1);
+  assert.equal(x.requests(), 2); // Notification cooldown must not disable scanning.
 });
 test('persisted duplicate suppresses replay after restart', async () => {
   const x = radarFixture({ duplicate: true }); await x.radar.poll();
@@ -84,14 +84,32 @@ test('delivery errors are visible and release polling guard', async () => {
   assert.equal(x.radar.running, false);
 });
 
-test('low liquidity, exclusions and hourly cap prevent candle requests', async () => {
+test('liquidity/exclusions prevent scanning; hourly message cap does not', async () => {
   const low = radarFixture();
   low.radar.binance.ticker24h = async () => [{ symbol: 'ETHUSDT', priceChangePercent: '80', quoteVolume: '1000' }];
   await low.radar.poll(); assert.equal(low.requests(), 0);
   const excluded = radarFixture(); excluded.radar.excluded.add('ETHUSDT');
   await excluded.radar.poll(); assert.equal(excluded.requests(), 0);
   const capped = radarFixture(); capped.radar.sent = Array(6).fill(now);
-  await capped.radar.poll(); assert.equal(capped.requests(), 0);
+  await capped.radar.poll(); assert.equal(capped.requests(), 1); assert.equal(capped.messages.length, 0);
+});
+test('confirmed execution handoff survives hourly cap and Telegram failure', async () => {
+  for (const failSend of [false, true]) {
+    const x = radarFixture({ failSend }); const signals=[];
+    x.radar.onSignal=async (symbol,signal)=>signals.push({symbol,signal});
+    if (!failSend) x.radar.sent=Array(6).fill(now);
+    await x.radar.poll(); await x.radar.poll();
+    assert.equal(signals.length,1);
+    assert.equal(signals[0].signal.detectedAt,now);
+    assert.equal(x.radar.health().handoffs,1);
+  }
+});
+test('failed execution handoff retries while fresh even if warning was persisted', async () => {
+  const x=radarFixture({duplicate:true});let attempts=0;
+  x.radar.onSignal=async()=>{if (++attempts===1) throw Error('database offline');};
+  await x.radar.poll(); await x.radar.poll();
+  assert.equal(attempts,2);assert.equal(x.radar.health().handoffs,1);
+  assert.equal(x.messages.length,0);
 });
 test('stop during candle retrieval prevents alert delivery', async () => {
   const x = radarFixture();

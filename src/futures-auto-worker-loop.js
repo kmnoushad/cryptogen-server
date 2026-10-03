@@ -1,7 +1,10 @@
 import { directionalSignal, FUTURES_AUTO_SYMBOLS } from './futures-auto-strategy.js';
+import { DetectionLedger } from './detection-audit.js';
+import { earlyFuturesWatch } from './early-setup-watch.js';
 export class FuturesAutoWorkerLoop {
   constructor({ executor, store, now = () => Date.now() }) {
     Object.assign(this, { executor, store, now }); this.busy = false; this.stopped = false; this.lastScan = -Infinity; this.lastProgress = now();
+    this.detectionLedger = new DetectionLedger();
     executor.authorizeEntry = async () => { const c = await store.control(executor.scope); return !c.paused && !c.close_requested; };
   }
   async tick() {
@@ -20,21 +23,38 @@ export class FuturesAutoWorkerLoop {
       this.lastScan = this.now();
       const [btc15, btc1h] = await Promise.all([ex.exchange.candles('BTCUSDT', '15m'), ex.exchange.candles('BTCUSDT', '1h')]);
       const candidates = [];
-      for (const symbol of FUTURES_AUTO_SYMBOLS) {
+      // Bounded market-data concurrency: a slow first symbol must not age every
+      // later symbol's closed-bar confirmation. Exchange writes remain serial.
+      for (let offset = 0; offset < FUTURES_AUTO_SYMBOLS.length; offset += 3) {
         if (this.stopped) return;
+        await Promise.all(FUTURES_AUTO_SYMBOLS.slice(offset, offset + 3).map(async symbol => {
         try {
           const [m1, m15, h1] = await Promise.all([ex.exchange.candles(symbol, '1m'),
             symbol === 'BTCUSDT' ? btc15 : ex.exchange.candles(symbol, '15m'),
             symbol === 'BTCUSDT' ? btc1h : ex.exchange.candles(symbol, '1h')]);
-          const signal = directionalSignal({ symbol, m1, m15, h1, btc15, btc1h, now: this.now() });
+          const input = { symbol, m1, m15, h1, btc15, btc1h, now: this.now() };
+          const signal = directionalSignal(input);
           ex.scanReasons[symbol] = signal.allowed ? `${signal.direction}: confirmed` : signal.reason;
-          if (signal.allowed) candidates.push(signal);
+          if (!signal.allowed) {
+            const watch=earlyFuturesWatch(input);
+            if (watch) ex.scanReasons[symbol]=`${watch.direction} WATCH: ${watch.reason}; ${signal.reason}`;
+          }
+          if (signal.allowed) {
+            const audit = this.detectionLedger.record(symbol, signal, this.now());
+            candidates.push({ ...signal, detectionAudit: audit });
+            if (audit) ex.scanReasons[symbol] += ` · age ${(audit.confirmationAgeMs / 1000).toFixed(0)}s · stop ${audit.stopDistancePct.toFixed(3)}% · modeled cost ${(audit.approximateCostShare * 100).toFixed(0)}% of loss risk`;
+          }
         } catch (e) { ex.scanReasons[symbol] = 'Market data unavailable'; }
         this.lastProgress = this.now();
+        }));
       }
       ex.reason = candidates.length ? `${candidates.length} confirmed candidates; applying execution checks` : 'No confirmed directional setup';
-      for (const signal of candidates.sort((a, b) => b.score - a.score)) {
+      for (const signal of candidates.sort((a, b) => b.score - a.score
+        || FUTURES_AUTO_SYMBOLS.indexOf(a.symbol)-FUTURES_AUTO_SYMBOLS.indexOf(b.symbol))) {
         if (this.stopped) break;
+        if (this.now() - signal.barCloseTime > 90000) {
+          ex.scanReasons[signal.symbol] = 'Confirmation expired during scan; no entry'; continue;
+        }
         await ex.onSignal(signal.symbol, signal); this.lastProgress = this.now();
         if (ex.lastError) break;
       }

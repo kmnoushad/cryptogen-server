@@ -1,5 +1,6 @@
 import { closedCandles, parseKlines } from './indicators.js';
 import { escapeHtml, formatPrice, gstTime, log } from './util.js';
+import { earlyFadeWatch } from './early-setup-watch.js';
 
 // Informational, experimental detector. No trade or risk-account API.
 export function detectPumpFade(rows, now = Date.now()) {
@@ -50,7 +51,9 @@ export class PumpFadeRadar {
     Object.assign(this, { cfg, binance, store, telegram, excluded, isPaused, now });
     this.running = false; this.stopped = false; this.timer = null;
     this.info = null; this.infoAt = 0; this.cooldowns = new Map(); this.sent = [];
-    this.metrics = { polls: 0, checked: 0, alerts: 0, errors: 0 };
+    this.handoffs = new Map();
+    this.setupWatches = new Map();
+    this.metrics = { polls: 0, checked: 0, alerts: 0, errors: 0, confirmed: 0, handoffs: 0, notificationSuppressed: 0 };
     this.lastError = null; this.lastPollAt = null;
   }
   start() {
@@ -84,18 +87,45 @@ export class PumpFadeRadar {
         if (this.stopped || this.isPaused()) break;
         const now = this.now();
         this.sent = this.sent.filter(x => now - x < 3600000);
-        if (this.sent.length >= 6) break;
-        if (now - (this.cooldowns.get(t.symbol) ?? -Infinity) < 1800000) continue;
         try {
           const rows = await this.binance.klines(t.symbol, '1m', 91);
           this.metrics.checked++;
+          const watch = earlyFadeWatch(rows, this.now());
+          const previousWatch = this.setupWatches.get(t.symbol);
+          if (watch && (!previousWatch || this.now()-previousWatch.firstSeenAt>1800000
+            || Math.abs(watch.resistance/previousWatch.resistance-1)>.002)) {
+            this.setupWatches.set(t.symbol,{...watch,firstSeenAt:this.now()});
+          }
+          for (const [symbol, item] of this.setupWatches) if (this.now()-item.firstSeenAt>1800000) this.setupWatches.delete(symbol);
           const signal = detectPumpFade(rows, this.now());
           if (!signal || this.stopped || this.isPaused()) continue;
+          this.metrics.confirmed++;
           const inserted = await this.store.insertEvent({ event_key: `pump-fade-v1:${t.symbol}:${signal.peakTime}`,
             event_type: 'FUTURES_PUMP_FADE_WARNING', symbol: t.symbol,
             payload: { ...signal, change24h: Number(t.priceChangePercent), model: 'pump-fade-v1', informationalOnly: true } });
-          if (inserted === false) { this.cooldowns.set(t.symbol, this.now()); continue; }
           if (this.stopped || this.isPaused() || this.now() - signal.barCloseTime > 90000) continue;
+          // Durable execution delivery is independent of informational Telegram
+          // throttling. Publisher/store and executor retain their pattern IDs,
+          // control checks, freshness, risk gates and order deduplication.
+          const handoffKey = `${t.symbol}:${signal.peakTime}`;
+          if (this.onSignal && !this.handoffs.has(handoffKey)) {
+            try {
+              await this.onSignal(t.symbol, { ...signal, detectedAt: this.now(),
+                confirmationAgeMs: this.now() - signal.barCloseTime,
+                watchToConfirmationMs: this.setupWatches.has(t.symbol)
+                  ? this.now()-this.setupWatches.get(t.symbol).firstSeenAt : null });
+              this.handoffs.set(handoffKey, this.now()); this.metrics.handoffs++;
+            } catch (error) {
+              this.metrics.errors++; this.lastError = `Execution handoff: ${error.message}`;
+              log(`Pump-fade ${t.symbol} handoff: ${error.message}`);
+            }
+          }
+          for (const [key, time] of this.handoffs) if (this.now() - time > 3600000) this.handoffs.delete(key);
+          if (inserted === false || this.sent.length >= 6
+            || this.now() - (this.cooldowns.get(t.symbol) ?? -Infinity) < 1800000) {
+            this.metrics.notificationSuppressed++; continue;
+          }
+          if (this.stopped || this.isPaused()) continue;
           await this.telegram.send(`⚠️ <b>PUMP FADE — DOWNSIDE RISK INCREASING</b>\n` +
             `${escapeHtml(t.symbol)} · $${formatPrice(signal.price)} · 24h +${Number(t.priceChangePercent).toFixed(1)}%\n` +
             `Two distinct failed highs near $${formatPrice(signal.resistance)}\n` +
@@ -105,9 +135,6 @@ export class PumpFadeRadar {
             `A sustained reclaim above $${formatPrice(signal.resistance)} would weaken this warning.\n` +
             `<i>Possible reversal, not a guaranteed fall. Auto-execution, if enabled, is reported separately.</i>\n⏰ ${gstTime()} GST`);
           this.cooldowns.set(t.symbol, this.now()); this.sent.push(this.now()); this.metrics.alerts++;
-          // Only fresh newly delivered pump-fade warnings reach the executor.
-          // Other signal producers and paper FIRE paths have no execution hook.
-          if (this.onSignal) await this.onSignal(t.symbol, signal);
         } catch (error) { this.metrics.errors++; this.lastError = error.message; log(`Pump-fade ${t.symbol}: ${error.message}`); }
       }
       this.lastPollAt = new Date(this.now()).toISOString();
