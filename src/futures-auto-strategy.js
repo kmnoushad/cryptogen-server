@@ -20,7 +20,8 @@ export function trendDirection(c) {
     : last < fast && fast < slow && fast < previous ? 'SHORT' : null;
 }
 // Closed 15m breakout, followed by distinct 1m retest and reclaim bars.
-// Both symbol and BTC 15m/1h trends must agree; no countertrend hedging.
+// The 15m trend is the trigger. 1h trends are filters: they may be neutral,
+// but they must not strongly oppose the setup.
 export function directionalSignal({ symbol, m1, m15, h1, btc15, btc1h, now }) {
   const reject = reason => ({ allowed: false, reason });
   if (!FUTURES_AUTO_SYMBOLS.includes(symbol)) return reject('Symbol outside initial allowlist');
@@ -29,7 +30,12 @@ export function directionalSignal({ symbol, m1, m15, h1, btc15, btc1h, now }) {
     d = closedSeries(btc15, 900000, now); e = closedSeries(btc1h, 3600000, now); }
   catch (err) { return reject(err.message); }
   const direction = trendDirection(b);
-  if (!direction || [c, d, e].some(x => trendDirection(x) !== direction)) return reject('15m/1h symbol and BTC trends do not agree');
+  const symbolH1 = trendDirection(c), btc15Trend = trendDirection(d), btcH1 = trendDirection(e);
+  const opposes = x => x && x !== direction;
+  if (!direction) return reject('Symbol 15m trend not confirmed');
+  if (btc15Trend !== direction) return reject('BTC 15m trend does not confirm symbol direction');
+  if (opposes(symbolH1)) return reject('Symbol 1h trend strongly opposes setup');
+  if (opposes(btcH1)) return reject('BTC 1h trend strongly opposes setup');
   const sign = direction === 'LONG' ? 1 : -1;
   // Search only the last two closed 15m bars for a breakout; expire after 30m.
   for (let k = b.length - 1; k >= b.length - 2; k--) {
