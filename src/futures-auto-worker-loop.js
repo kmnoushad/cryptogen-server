@@ -5,6 +5,7 @@ export class FuturesAutoWorkerLoop {
   constructor({ executor, store, now = () => Date.now() }) {
     Object.assign(this, { executor, store, now }); this.busy = false; this.stopped = false; this.lastScan = -Infinity; this.lastProgress = now();
     this.detectionLedger = new DetectionLedger();
+    this.lastScanMinute = -Infinity;
     executor.authorizeEntry = async () => { const c = await store.control(executor.scope); return !c.paused && !c.close_requested; };
   }
   async tick() {
@@ -19,7 +20,10 @@ export class FuturesAutoWorkerLoop {
       if (control.close_requested && ex.row.state.jobs.some(j => j.phase !== 'CLOSED' && !j.closeRequested)) await ex.control('close');
       else if (ex.row.state.paused !== control.paused) await ex.control(control.paused ? 'pause' : 'resume');
       if (!ex.cfg.enabled || control.paused || control.close_requested || ex.lastError || this.stopped) return;
-      if (this.now() - this.lastScan < 60000) return;
+      const scanNow = this.now(), minute = Math.floor(scanNow / 60000);
+      // Protective reconciliation above still runs during the close grace.
+      if (scanNow % 60000 < 1500 || minute === this.lastScanMinute) return;
+      this.lastScanMinute = minute;
       this.lastScan = this.now();
       const [btc15, btc1h] = await Promise.all([ex.exchange.candles('BTCUSDT', '15m'), ex.exchange.candles('BTCUSDT', '1h')]);
       const candidates = [];
