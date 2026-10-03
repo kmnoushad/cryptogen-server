@@ -1,6 +1,7 @@
 import { closedCandles, parseKlines } from './indicators.js';
 import { escapeHtml, formatPrice, gstTime, log } from './util.js';
 import { earlyFadeWatch } from './early-setup-watch.js';
+import { nextClosedMinuteDelay } from './entry-quality.js';
 
 // Informational, experimental detector. No trade or risk-account API.
 export function detectPumpFade(rows, now = Date.now()) {
@@ -47,8 +48,9 @@ export function detectPumpFade(rows, now = Date.now()) {
 }
 
 export class PumpFadeRadar {
-  constructor({ cfg, binance, store, telegram, excluded = new Set(), isPaused = () => false, now = () => Date.now() }) {
+  constructor({ cfg, binance, store, telegram, excluded = new Set(), isPaused = () => false, now = () => Date.now(), schedule = setTimeout, cancel = clearTimeout }) {
     Object.assign(this, { cfg, binance, store, telegram, excluded, isPaused, now });
+    Object.assign(this, { schedule, cancel }); this.started = false;
     this.running = false; this.stopped = false; this.timer = null;
     this.info = null; this.infoAt = 0; this.cooldowns = new Map(); this.sent = [];
     this.handoffs = new Map();
@@ -57,12 +59,24 @@ export class PumpFadeRadar {
     this.lastError = null; this.lastPollAt = null;
   }
   start() {
-    if (!this.cfg.enablePumpFadeAlerts || this.timer || this.stopped) return;
+    if (!this.cfg.enablePumpFadeAlerts || this.started || this.stopped) return;
+    this.started = true;
     void this.poll();
-    this.timer = setInterval(() => { void this.poll(); }, 60000);
+    this.scheduleNext();
+  }
+  scheduleNext() {
+    if (this.stopped || !this.started) return;
+    // Candle-close scheduling removes the persistent startup-time offset.
+    // poll() retains its non-overlap guard when a slow read spans a boundary.
+    this.timer = this.schedule(() => {
+      this.timer = null;
+      if (this.stopped) return;
+      void this.poll();
+      this.scheduleNext();
+    }, nextClosedMinuteDelay(this.now()));
     this.timer.unref?.();
   }
-  stop() { this.stopped = true; clearInterval(this.timer); this.timer = null; }
+  stop() { this.stopped = true; this.started = false; this.cancel(this.timer); this.timer = null; }
   health() { return { enabled: this.cfg.enablePumpFadeAlerts === true,
     running: this.running, lastPollAt: this.lastPollAt, lastError: this.lastError, ...this.metrics }; }
   async poll() {
