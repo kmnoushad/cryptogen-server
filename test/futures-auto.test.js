@@ -63,7 +63,7 @@ function harness(opt = {}) {
   const make = () => new FuturesAutoExecutor({ cfg, store, exchange, now: () => clock, wait: async () => {}, telegram: { send: async () => {} }, eventGate: { check: async () => ({ allowed: true }) } });
   return { ex: make(), make, calls, orders, algos, positions, exchange, cfg, opt, db: () => clone(db), release: () => { owner = null; }, advance: ms => { clock += ms; } };
 }
-const signal = direction => ({ allowed: true, symbol: 'ETHUSDT', direction, entry: 100, stop: direction === 'LONG' ? 99.6 : 100.4, barCloseTime: now - 1000, breakoutTime: now - 300000 });
+const signal = direction => ({ allowed: true, symbol: 'ETHUSDT', direction, entry: 100, stop: direction === 'LONG' ? 99.5 : 100.5, barCloseTime: now - 1000, breakoutTime: now - 300000 });
 for (const direction of ['LONG', 'SHORT']) {
   test(`${direction}: stop precedes target; restart doesn't duplicate; exit clears owned orders`, async () => {
     const h = harness(); await h.ex.onSignal('ETHUSDT', signal(direction)); assert.equal(h.ex.lastError, null);
@@ -239,5 +239,17 @@ for (const direction of ['LONG', 'SHORT']) {
     const h = harness(); await h.ex.onSignal('ETHUSDT', signal(direction)); assert.equal(h.positions.size, 1);
     h.advance(4 * 3600000 + 5000); await h.ex.run(); await h.ex.run();
     assert.equal(h.positions.size, 0); assert.equal(h.db().state.jobs[0].closeReason, 'MAX_HOLD_TIME');
+  });
+}
+
+for (const direction of ['LONG', 'SHORT']) {
+  test(`${direction}: cost-dominated entry creates no intent or order and is not an infrastructure failure`, async () => {
+    const h = harness();
+    await h.ex.onSignal('ETHUSDT', { ...signal(direction), stop: direction === 'LONG' ? 99.9 : 100.1 });
+    assert.equal(h.positions.size, 0);
+    assert.equal(h.db().state.jobs.length, 0);
+    assert.equal(h.calls.filter(x => x[0] === 'place').length, 0);
+    assert.equal(h.ex.lastError, null);
+    assert.match(h.ex.reason, /fees\/slippage/);
   });
 }

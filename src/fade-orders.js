@@ -122,21 +122,29 @@ export function exitPlan(entry, qty, fee, f, stop) {
   return { entry, qty, partial, runner, stop, target, breakEven, riskDollars, fee, filters: f };
 }
 
+export class FadeEntrySkipped extends Error {}
+
 export function entryPlan({ signal, bid, ask, info, fee, available, equity, now = Date.now() }) {
   const f = fadeFilters(info);
-  if (!(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw Error('Fade entry expired: closed bar older than 90 seconds');
+  if (!(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw new FadeEntrySkipped('Fade entry expired: closed bar older than 90 seconds');
   if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask && equity > 0)) throw Error('Fade entry quote, resistance or equity invalid');
-  if ((ask / bid - 1) * 10000 > 10) throw Error('Fade entry spread exceeds 10 bps');
-  if (Math.abs(bid / signal.price - 1) > 0.0015) throw Error('Fade entry price moved more than 0.15% since alert');
-  if (1 - bid / signal.resistance > 0.01) throw Error('Fade entry more than 1% below failed high; structural stop too far');
+  if ((ask / bid - 1) * 10000 > 10) throw new FadeEntrySkipped('Fade entry spread exceeds 10 bps');
+  if (Math.abs(bid / signal.price - 1) > 0.0015) throw new FadeEntrySkipped('Fade entry price moved more than 0.15% since alert');
+  if (1 - bid / signal.resistance > 0.01) throw new FadeEntrySkipped('Fade entry more than 1% below failed high; structural stop too far');
   const stop = structuralFadeStop(signal.resistance, f);
-  if (!(stop > ask)) throw Error('Fade invalidation already reached; entry skipped');
+  if (!(stop > ask)) throw new FadeEntrySkipped('Fade invalidation already reached; entry skipped');
   const perUnitRisk = modeledFadeLoss(bid, stop, 1, fee);
   if (!(perUnitRisk > 0)) throw Error('Fade stop cannot cover execution costs');
   const riskBudget = equity * 0.005;
   // Bound quantity by 0.5% of verified equity, available isolated margin and notional.
   const qty = down(Math.min(riskBudget / perUnitRisk, 150 / bid, Math.max(0, available - 10) * 2 / bid, f.max), f.step);
-  const p = exitPlan(bid, qty, fee, f, stop);
-  if (qty < f.min || qty * bid < f.notional || p.riskDollars > riskBudget + 1e-7) throw Error('Insufficient budget for structural stop');
+  let p;
+  try { p = exitPlan(bid, qty, fee, f, stop); }
+  catch (error) {
+    if (error.message === 'Position too small or invalid for 75%/25% exits')
+      throw new FadeEntrySkipped(error.message);
+    throw error;
+  }
+  if (qty < f.min || qty * bid < f.notional || p.riskDollars > riskBudget + 1e-7) throw new FadeEntrySkipped('Insufficient budget for structural stop');
   return p;
 }

@@ -382,3 +382,14 @@ test('v6.9.37: fade stop sits above the failed high with a buffer, never below i
   assert.ok(stop > 100.8 && stop >= 100.8 * 1.003 - 1e-9 && stop <= 100.8 * 1.003 + f.tick);
   assert.throws(() => structuralFadeStop(0, f), /resistance missing/);
 });
+
+ test('expired fade candidate is a per-signal skip; the next fresh candidate can enter', async () => {
+  const h = harness();
+  await h.executor.onSignal('AAAUSDT', { ...signal, barCloseTime: now - 100000 });
+  assert.equal(h.db().state.jobs.length, 0);
+  assert.equal(h.executor.lastError, null);
+  assert.match(h.executor.entrySafety.reason, /Entry skipped.*expired/);
+  assert.equal(h.messages.length, 0);
+  await h.executor.onSignal('AAAUSDT', signal);
+  assert.equal(h.positions.size, 1);
+});

@@ -6,6 +6,7 @@ import { readFadeRisk } from './fade-risk.js';
 import { futuresScope } from './futures-auto-store.js';
 import { FUTURES_AUTO_SYMBOLS } from './futures-auto-strategy.js';
 import { escapeHtml } from './util.js';
+import { entryQuality } from './entry-quality.js';
 const hash = s => createHash('sha256').update(s).digest('hex').slice(0, 16);
 const active = j => j.phase !== 'CLOSED';
 const terminal = s => ['FILLED', 'CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH', 'REJECTED'].includes(s);
@@ -67,6 +68,7 @@ export class FuturesAutoExecutor extends FadeExecutor {
       `Last entry/scan: ${this.reason}\n` +
       'Detection: pipeline v2 · early WATCH + confirmation age/cost diagnostics\n' +
       'LONG + SHORT · isolated 2x · max $150 notional each\n' +
+      'Entry quality: modeled costs ≤25% of stop risk · no chasing\n' +
       'Target 1.5R net · break-even at +1R · 4h max hold · stop ≤ min($5, 1% equity)\n' +
       'Aggregate risk ≤3% equity · margin ≤50% equity\nDaily 2% loss/giveback lock · two-loss cooldown 4h\n' +
       jobs.map(j => `${j.symbol} ${j.direction} · ${j.phase} · stop ${j.plan.stop} · target ${j.plan.target}`).join('\n') +
@@ -242,6 +244,8 @@ export class FuturesAutoExecutor extends FadeExecutor {
         available: this.balanceSnapshot.available, open: jobs.filter(active).map(j => ({ riskUsd: j.plan.plannedLossUsd, marginUsd: j.plan.marginUsd })),
         feeRate: fee, qtyStep: filters.step, minQty: filters.min, minNotional: filters.notional });
       if (!plan.allowed) { this.reason = plan.reason; return; }
+      const quality = entryQuality({ direction: signal.direction, entry, stop, reference: signal.entry, fee });
+      if (!quality.allowed) { this.reason = `${symbol}: ${quality.reason}`; this.scanReasons[symbol] = this.reason; return; }
       if (plan.qty > filters.max || stop < filters.minPrice || stop > filters.maxPrice) throw Error('Planned size/stop violates filters');
       const job = { id, symbol, direction: signal.direction, signal, phase: 'SUBMITTING', createdAt: this.now(),
         structuralStop: stop, riskBudget: plan.riskBudget, fee, filters, plan, actions: {} };
