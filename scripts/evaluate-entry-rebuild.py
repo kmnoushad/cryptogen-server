@@ -38,7 +38,7 @@ def run(root, events, model, slip, delay, engine):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--data', required=True); ap.add_argument('--signals', required=True)
-    ap.add_argument('--engine', default=str(Path(__file__).with_name('entry-rebuild-engine.py'))); ap.add_argument('--out', required=True); args = ap.parse_args()
+    ap.add_argument('--engine', default=str(Path(__file__).with_name('entry-rebuild-engine.py'))); ap.add_argument('--models', default='pullback5,compression5,auctionFade5'); ap.add_argument('--out', required=True); args = ap.parse_args()
     root = Path(args.data); manifest = json.loads((root / 'manifest.json').read_text())
     events = json.loads(Path(args.signals).read_text()); engine = load_engine(args.engine)
     result = {'liveOrders': False, 'acceptance': 'Research only. No live approval; fresh holdout and portfolio/fill validation required.',
@@ -49,7 +49,7 @@ def main():
         'Fees 0.05%/side; stop/time exit slippage 0.05%; target touch assumed; stop wins intrabar ties.',
         'Break-even moves apply next bar. Funding not modeled. Net is summed risk units, not USD.',
         'Slippage/delay runs reapply entry checks and have different accepted cohorts; positive subset results do not prove fill robustness.'], 'models': {}}
-    for model in ['pullback5', 'compression5', 'auctionFade5']:
+    for model in args.models.split(','):
         for scenario, slip, delay in [('base', .0005, 0), ('slippage', .0015, 0), ('delay', .0005, 1)]:
             trades, counts = run(root, events, model, slip, delay, engine)
             summary = engine.summaries(trades, manifest['evaluationStart'], manifest['end'])
