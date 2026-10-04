@@ -1,6 +1,8 @@
 {
   "src/research-entry-models.js": "12ab7fb85490fd1f00adec3ef464f3a183116484625c8200223a71fe57c38d45",
   "scripts/replay-entry-rebuild.js": "ebbd1503825b6659f0dc097a106740814d41c13508d2b2d47995d5dd1a9d7ab7",
-  "scripts/evaluate-entry-rebuild.py": "c52af330a6e8037d40308b087123835c2dc3b4a411b4a1074381cda532db6b77",
-  "scripts/entry-rebuild-engine.py": "d3eeb9313d5b942aec6cc4123a7bc3d90fcfd2d12187dac88eeb60bde3f9fbc4"
+  "scripts/evaluate-entry-rebuild.py": "514dd74484156cf551f8954a94c864106c480562bd64b79b8747c8a0682d2528",
+  "scripts/entry-rebuild-engine.py": "d3eeb9313d5b942aec6cc4123a7bc3d90fcfd2d12187dac88eeb60bde3f9fbc4",
+  "src/regime-entry-models.js": "f95a0991f552b2ebdc9c970eb65393aac3526e0b6636d4fafcbde4ab1d8eb5f2",
+  "scripts/replay-regime-rebuild.js": "7d15fc57e4d62364ddbf33b1623f59632fb3b53c68db5dc5d1ef169c02b0934d"
 }
