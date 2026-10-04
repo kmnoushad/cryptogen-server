@@ -11,6 +11,20 @@ test('one-second buckets bound storage while preserving every aggressor quote',(
   for(let i=1;i<=200;i++) {time+=1000;d.ingest('TESTUSDT',{a:10000+i,T:time,p:'100',q:'1',m:false});}
   assert.ok(d.states.get('TESTUSDT').ticks.length<=151);
 });
+test('per-symbol diagnostics separate ready, warming, quiet, unseen and rejection reasons',()=>{
+  let time=1000000;
+  const d=new SpikeFadeDetector({symbols:['AUSDT','BUSDT','CUSDT'],now:()=>time});
+  const tick=(id,T)=>({a:id,T,p:'100',q:'1',m:false});
+  d.ingest('AUSDT',tick(1,time));
+  d.states.get('AUSDT').lastReason='No sudden spike';
+  time+=141000;d.ingest('BUSDT',tick(2,time));
+  const x=d.diagnostics();assert.equal(x.warming,1);assert.equal(x.quiet,1);assert.equal(x.unseen,1);
+  d.states.get('AUSDT').ticks=Array.from({length:150},(_,i)=>({firstTime:time-149000+i*1000,time:time-149000+i*1000}));
+  d.states.get('AUSDT').time=time;d.states.get('AUSDT').lastReason='No sudden spike';
+  const y=d.diagnostics();assert.equal(y.ready,1);assert.equal(y.warming,1);
+  assert.equal(y.gates['No sudden spike'],1);assert.equal(y.unseen,1);
+  time+=6000;assert.equal(d.diagnostics().quiet,2);
+});
 function fixture() {
   let time = 0, id = 0;
   const d = new SpikeFadeDetector({ symbols: ['TESTUSDT'], now: () => time });

@@ -13,7 +13,7 @@ export class SpikeFadeDetector {
       || typeof sell !== 'boolean' || !(price > 0 && qty > 0 && Number.isFinite(price * qty))
       || now - time > 2000 || time > now) return reject('Invalid or stale trade');
     let s = this.states.get(symbol);
-    if (!s) { s = { ticks: [], id: -1, time: -1, watch: null, cooldown: 0, evaluated: -Infinity }; this.states.set(symbol, s); }
+    if (!s) { s = { ticks: [], id: -1, time: -1, watch: null, cooldown: 0, evaluated: -Infinity, lastReason: 'Warming up' }; this.states.set(symbol, s); }
     if (id <= s.id || time < s.time) return reject('Duplicate or out-of-order trade');
     if (s.time >= 0 && time - s.time > 5000) { s.ticks = []; s.watch = null; }
     s.id = id; s.time = time;
@@ -27,6 +27,7 @@ export class SpikeFadeDetector {
     if(s.watch && price>s.watch.high) {s.watch.high=price;s.watch.highAt=time;}
     if(time-s.evaluated<250) return reject('Sampling flow');
     s.evaluated=time;
+    const result=reject;
     if (time < s.cooldown) return reject('Pattern cooldown');
     if (s.watch && time - s.watch.started > 45000) s.watch = null;
     if (!s.watch) {
@@ -61,5 +62,19 @@ export class SpikeFadeDetector {
     return { allowed: false, executable: false, candidate: true, model: 'spike-fade-ticks-v1',
       symbol, direction: 'SHORT', detectedAt: now, entry: book.bid, stop, resistance: w.high,
       spikeGain: w.gain, sellShare, costShare: quality.costShare, maxModeledLossUsd: 5 };
+  }
+  diagnostics(now = this.now()) {
+    const d={unseen:0,quiet:0,warming:0,ready:0,watch:0,candidate:0,gates:{}};
+    for(const symbol of this.symbols) {
+      const s=this.states.get(symbol);
+      if(!s) {d.unseen++;continue;}
+      if(s.watch && now-s.watch.started<=45000) {d.watch++;continue;}
+      if(now-s.time>5000) {d.quiet++;continue;}
+      if(!s.ticks.length || now-s.ticks[0].firstTime<140000) {d.warming++;continue;}
+      d.ready++;
+      const reason=s.lastReason ?? 'Unknown';
+      d.gates[reason]=(d.gates[reason]??0)+1;
+    }
+    return d;
   }
 }
