@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { decimal, down, entryPlan, ExchangeError, FadeEntrySkipped, exitPlan, structuralFadeStop } from './fade-orders.js';
-import { fadeBtcGate } from './fade-btc-gate.js';
+import { fadeBtcGate, fadeSpikeBtcGate } from './fade-btc-gate.js';
 import { fadeAdverseQuote, fadeAdverseEntryBlocked } from './fade-adverse.js';
 import { FadeEventGate, fadePositioningGate } from './fade-entry-gates.js';
 import { fadeRiskDecision, gstDayStart, readFadeIncome, readFadeRisk, weeklyLockSummary } from './fade-risk.js';
@@ -73,6 +73,7 @@ export class FadeExecutor {
     const h = this.health();
     return `🤖 <b>FADE AUTO — ${escapeHtml(h.environment.toUpperCase())}</b>\n` +
       `${h.enabled ? h.paused ? 'Entries paused' : 'Enabled' : 'Disabled'} · ${h.active}/3 active intents\n` +
+      `Entry source: ${this.cfg.fadeEntrySource ?? 'legacy'}${this.spikeHealth ? ' · ' + escapeHtml(this.spikeHealth()) : ''}\n` +
       `BTC entry gate: ${this.btcGate ? escapeHtml(this.btcGate.reason) + ' · last entry check ' + new Date(this.btcGate.checkedAt).toISOString() : 'awaiting entry check'}\n` +
       `Entry safety: ${escapeHtml(this.entrySafety.reason)}\n` +
       'Entry quality: modeled costs ≤25% of stop risk · no chasing\n' +
@@ -384,10 +385,11 @@ export class FadeExecutor {
       throw Error(`Protection/reconciliation issue on ${job.symbol}; emergency close requested: ${e.message}`);
     }
   }
-  async checkBtcGate() {
+  async checkBtcGate(signal) {
     try {
       const [rows, book] = await Promise.all([this.exchange.btcCandles(), this.exchange.book('BTCUSDT')]);
-      this.btcGate = fadeBtcGate(rows, book, this.now());
+      this.btcGate = signal?.model === 'spike-fade-ticks-v1'
+        ? fadeSpikeBtcGate(rows, book, this.now()) : fadeBtcGate(rows, book, this.now());
     } catch {
       this.btcGate = { allowed: false, reason: 'BTC data unavailable; short gate closed', checkedAt: this.now() };
     }
@@ -413,12 +415,15 @@ export class FadeExecutor {
   }
   async onSignal(symbol, signal) {
     if (!this.enabled() || this.busy || this.stopped || this.isPaused()) return;
+    const spike = signal?.model === 'spike-fade-ticks-v1';
+    if (this.cfg.fadeEntrySource === 'spike' && !spike) return;
+    if (spike && (this.cfg.fadeEntrySource !== 'spike' || !this.spikeAuthorize?.(symbol, signal))) return;
     this.busy = true;
     try {
       if (!await this.authorizeEntry()) return;
       await this.ready(); await this.reconcile();
       if (this.row.state.paused) return;
-      if (!await this.checkBtcGate()) return;
+      if (!await this.checkBtcGate(signal)) return;
       const jobs = this.row.state.jobs;
       if (fadeAdverseEntryBlocked(jobs, this.now())) {
         this.entrySafety = { allowed: false, reason: 'Active fade short nearing its stop; new entries withheld until recovery' };
@@ -449,7 +454,7 @@ export class FadeExecutor {
       const quality = entryQuality({ direction: 'SHORT', entry: plan.entry, stop: plan.stop, reference: signal.price, fee });
       if (!quality.allowed) { this.entrySafety = { allowed: false, reason: `Entry skipped: ${quality.reason}` }; return; }
       const job = { id, symbol, phase: 'SUBMITTING', signal, fee, filters: plan.filters,
-        riskBudget: equity * 0.005, createdAt: this.now(), actions: {}, plan };
+        riskBudget: Math.min(5, equity * 0.005), createdAt: this.now(), actions: {}, plan };
       jobs.push(job);
       // The journal is persisted inside submit before the signed entry request.
       const originalPlace = this.exchange.place.bind(this.exchange);
@@ -459,7 +464,7 @@ export class FadeExecutor {
       await this.save();
       await this.fence();
       let authorized;
-      try { authorized = await this.authorizeEntry() && await this.checkBtcGate()
+      try { authorized = await this.authorizeEntry() && await this.checkBtcGate(signal)
         && await this.checkEntrySafety(symbol, equity, jobs.filter(j => j !== job)); }
       catch {
         job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'CONTROL_UNAVAILABLE_BEFORE_SEND';
@@ -467,7 +472,9 @@ export class FadeExecutor {
         throw Error('Control unavailable before entry; no order sent');
       }
       await this.fence();
-      if (!authorized || this.stopped || this.isPaused() || this.now() - quoteAt > 5000 || this.now() - signal.barCloseTime > 90000) {
+      if (!authorized || this.stopped || this.isPaused() || this.now() - quoteAt > 5000
+        || this.now() - signal.barCloseTime > (spike ? 10000 : 90000)
+        || (spike && !this.spikeAuthorize?.(symbol, signal))) {
         job.phase = 'CLOSED'; job.closedAt = this.now(); job.closeReason = 'ENTRY_EXPIRED_BEFORE_SEND'; await this.save(); return;
       }
       try { await originalPlace({ symbol, positionSide: 'BOTH', newClientOrderId: job.actions.e.id, ...job.actions.e.params }); }

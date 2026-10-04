@@ -10,9 +10,12 @@ export function loadFadeConfig(env = process.env) {
   const enabled = String(env.ENABLE_FADE_EXECUTION ?? 'false').trim().toLowerCase();
   if (!['true', 'false'].includes(enabled)) throw Error('ENABLE_FADE_EXECUTION must be true or false');
   const fadeStartBalanceUsdt = Number(env.FADE_START_BALANCE_USDT ?? 100);
+  const fadeEntrySource = String(env.FADE_ENTRY_SOURCE ?? 'legacy').trim();
+  if (!['legacy', 'spike'].includes(fadeEntrySource)) throw Error('FADE_ENTRY_SOURCE must be legacy or spike');
   if (!(fadeStartBalanceUsdt > 0) || !Number.isFinite(fadeStartBalanceUsdt)) throw Error('FADE_START_BALANCE_USDT must be a positive number');
   return {
     fadeEnvironment, enableFadeExecution: enabled === 'true',
+    fadeEntrySource,
     fadeStartBalanceUsdt,
     fadeLiveAcknowledgement: String(env.FADE_LIVE_ACKNOWLEDGEMENT ?? '').trim(),
     fadeV2DemoAcceptance: String(env.FADE_V2_DEMO_ACCEPTANCE ?? '').trim(),
