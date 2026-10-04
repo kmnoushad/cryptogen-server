@@ -38,6 +38,13 @@ test('fresh tick candidate wakes worker once, drains once and is fenced by gener
   assert.equal(wakes,1);const [s]=h.source.drain();assert.equal(h.source.authorize(s.symbol,s),true);
   assert.deepEqual(h.source.drain(),[]);h.source.clear();assert.equal(h.source.authorize(s.symbol,s),false);
 });
+test('candidate expiry is exposed with a specific source-side block reason',()=>{
+  const h=fixture();h.feed(103,100);h.feed(103,100,true);h.feed(102.8,100,true);h.feed(102.4,100,true);
+  const [s]=h.source.drain();assert.ok(s);h.advance(11000);
+  assert.equal(h.source.authorize(s.symbol,s),false);
+  assert.match(h.source.health(),/last AAAUSDT blocked: candidate expired/);
+  assert.match(h.source.health(),/ready 1/);
+});
 test('stale book, pause, disconnect and rising BTC invalidate unsent signal',()=>{
   for(const change of [h=>h.advance(1100),h=>h.pause(),h=>h.source.connected.clear(),
     h=>{h.source.btc.at(-1).price=101;}]) {
