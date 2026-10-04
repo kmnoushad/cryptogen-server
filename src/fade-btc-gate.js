@@ -25,3 +25,15 @@ export function fadeBtcGate(rows, book, now) {
     || emas.at(-1) >= emas.at(-6)) return blocked('BTC bullish or mixed; short gate closed');
   return { allowed: true, reason: 'BTC bearish confirmation', checkedAt: now };
 }
+
+// Spike entries accept weak/flat BTC, but retain all data and upward-burst checks.
+export function fadeSpikeBtcGate(rows, book, now) {
+  const strict = fadeBtcGate(rows, book, now);
+  if (strict.allowed || strict.reason !== 'BTC bullish or mixed; short gate closed') return strict;
+  const closes = rows.filter(r => r[6] < now).slice(-120).map(r => Number(r[4]));
+  const current = Number(book.askPrice);
+  if (closes.at(-1) / closes.at(-16) - 1 > 0
+    || current / closes.at(-16) - 1 > .001 || current / closes.at(-31) - 1 > .001)
+    return { allowed: false, reason: 'BTC strength blocks spike short', checkedAt: now };
+  return { allowed: true, reason: 'BTC weak/flat for spike rejection', checkedAt: now };
+}

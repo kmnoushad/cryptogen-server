@@ -7,8 +7,9 @@ export const workerPollDelay = worker => worker.executor.row?.state?.jobs?.some(
 
 // Serial polling; one Telegram poller stays on Railway. No scanners run here.
 export class FadeWorkerLoop {
-  constructor({ executor, store, now = () => Date.now() }) {
+  constructor({ executor, store, signalSource = null, now = () => Date.now() }) {
     Object.assign(this, { executor, store, now });
+    this.signalSource = signalSource;
     this.startedAt = now(); this.seen = new Map(); this.busy = false;
     this.tickStartedAt = null; this.lastCompletedAt = this.startedAt;
     this.control = { paused: true }; this.stopped = false;
@@ -18,7 +19,7 @@ export class FadeWorkerLoop {
       return !this.stopped && !this.control.paused && !this.control.close_requested;
     };
   }
-  stop() { this.stopped = true; this.executor.stop(); }
+  stop() { this.stopped = true; this.signalSource?.stop(); this.executor.stop(); }
   valid(event) {
     const s = event.payload;
     const created = Date.parse(event.created_at);
@@ -44,7 +45,7 @@ export class FadeWorkerLoop {
         else if (this.executor.row && this.executor.row.state.paused !== this.control.paused) {
           await this.executor.control(this.control.paused ? 'pause' : 'resume');
         }
-        const events = await this.store.fadeSignals(Math.max(this.startedAt, this.now() - 90000));
+        const events = this.signalSource ? [] : await this.store.fadeSignals(Math.max(this.startedAt, this.now() - 90000));
         for (const event of events) {
           if (this.stopped) break;
           if (!this.valid(event) || this.seen.has(event.event_key)) continue;
@@ -56,6 +57,16 @@ export class FadeWorkerLoop {
           }
         }
         for (const [key, time] of this.seen) if (this.now() - time > 120000) this.seen.delete(key);
+        if (this.signalSource) {
+          // Tick candidates never wait behind a resume or outage and never replay.
+          const candidates = this.signalSource.drain();
+          for (const s of candidates) {
+            if (this.stopped || this.control.paused || this.control.close_requested) break;
+            const resumedAt = Date.parse(this.control.updated_at ?? new Date(this.startedAt).toISOString());
+            if (s.detectedAt >= Math.max(this.startedAt, resumedAt)
+              && this.signalSource.authorize(s.symbol, s)) await this.executor.onSignal(s.symbol, s);
+          }
+        }
       }
     } catch (e) { error = e; this.control = { paused: true }; }
     finally {

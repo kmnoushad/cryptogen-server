@@ -14,6 +14,23 @@ const symbolInfo = symbol => ({ symbol, status: 'TRADING', quoteAsset: 'USDT', c
 const signal = { price: 100, resistance: 100.8, barCloseTime: now - 1000, peakTime: now - 300000 };
 const clone = x => structuredClone(x);
 
+test('spike entry requires configured source and live source authorization before send', async () => {
+  const s = { ...signal, model: 'spike-fade-ticks-v1' };
+  const h = harness(); await h.executor.onSignal('AAAUSDT', s);
+  assert.equal(h.calls.filter(x => x[0] === 'place').length, 0);
+  h.executor.cfg.fadeEntrySource = 'spike'; let checks = 0;
+  h.executor.spikeAuthorize = () => ++checks === 1;
+  await h.executor.onSignal('AAAUSDT', s);
+  assert.equal(h.calls.filter(x => x[0] === 'place').length, 0);
+  assert.equal(h.db().state.jobs[0].closeReason, 'ENTRY_EXPIRED_BEFORE_SEND');
+});
+test('spike entry planner expires at ten seconds and never risks above five dollars', () => {
+  const input = { signal: { ...signal, model: 'spike-fade-ticks-v1' }, bid: 100, ask: 100.01,
+    info: symbolInfo('AAAUSDT'), fee: .0005, available: 10000, equity: 10000, now };
+  assert.ok(entryPlan(input).riskDollars <= 5);
+  assert.throws(() => entryPlan({ ...input, now: now+10001 }), /10 seconds/);
+});
+
 test('remote pause arriving after sizing prevents the entry POST', async () => {
   const h = harness(); let reads = 0;
   h.executor.authorizeEntry = async () => ++reads === 1;

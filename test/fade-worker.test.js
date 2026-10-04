@@ -7,6 +7,15 @@ import { loadFadeConfig } from '../src/fade-config.js';
 import { loadConfig } from '../src/config.js';
 
 const now = Date.parse('2026-09-19T12:00:00Z');
+test('spike source replaces Railway signals; protection precedes entry and pause drains candidates', async () => {
+  const h = harness(); h.store.control.paused = false;
+  const payload = {symbol:'AAAUSDT',detectedAt:now};let queue=[payload];
+  h.worker.signalSource = {drain:()=>{const q=queue;queue=[];return q;},authorize:()=>true};
+  h.store.fadeSignals=async()=>{throw Error('Legacy source must not be queried');};
+  await h.worker.tick();assert.equal(h.calls[0],'monitor');assert.ok(h.calls.includes('AAAUSDT'));
+  h.store.control.paused=true;queue=[payload];h.calls.length=0;await h.worker.tick();
+  assert.deepEqual(queue,[]);assert.ok(!h.calls.includes('AAAUSDT'));
+});
 test('idle polling halves routine database traffic while active positions retain five-second protection', () => {
   const worker = { executor: { row: { state: { jobs: [{ phase: 'CLOSED' }] } } } };
   assert.equal(workerPollDelay(worker), 10000);

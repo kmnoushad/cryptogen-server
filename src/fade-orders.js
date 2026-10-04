@@ -126,7 +126,9 @@ export class FadeEntrySkipped extends Error {}
 
 export function entryPlan({ signal, bid, ask, info, fee, available, equity, now = Date.now() }) {
   const f = fadeFilters(info);
-  if (!(now >= signal.barCloseTime && now - signal.barCloseTime <= 90000)) throw new FadeEntrySkipped('Fade entry expired: closed bar older than 90 seconds');
+  const maxAge = signal.model === 'spike-fade-ticks-v1' ? 10000 : 90000;
+  if (!(now >= signal.barCloseTime && now - signal.barCloseTime <= maxAge))
+    throw new FadeEntrySkipped(signal.model === 'spike-fade-ticks-v1' ? 'Spike entry older than 10 seconds' : 'Fade entry expired: closed bar older than 90 seconds');
   if (!(bid > 0 && ask >= bid && signal.price > 0 && signal.resistance > ask && equity > 0)) throw Error('Fade entry quote, resistance or equity invalid');
   if ((ask / bid - 1) * 10000 > 10) throw new FadeEntrySkipped('Fade entry spread exceeds 10 bps');
   if (Math.abs(bid / signal.price - 1) > 0.0015) throw new FadeEntrySkipped('Fade entry price moved more than 0.15% since alert');
@@ -135,7 +137,7 @@ export function entryPlan({ signal, bid, ask, info, fee, available, equity, now 
   if (!(stop > ask)) throw new FadeEntrySkipped('Fade invalidation already reached; entry skipped');
   const perUnitRisk = modeledFadeLoss(bid, stop, 1, fee);
   if (!(perUnitRisk > 0)) throw Error('Fade stop cannot cover execution costs');
-  const riskBudget = equity * 0.005;
+  const riskBudget = Math.min(5, equity * 0.005);
   // Bound quantity by 0.5% of verified equity, available isolated margin and notional.
   const qty = down(Math.min(riskBudget / perUnitRisk, 150 / bid, Math.max(0, available - 10) * 2 / bid, f.max), f.step);
   let p;
