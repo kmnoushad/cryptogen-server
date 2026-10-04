@@ -10,7 +10,7 @@ export class FadeWorkerLoop {
   constructor({ executor, store, signalSource = null, now = () => Date.now() }) {
     Object.assign(this, { executor, store, now });
     this.signalSource = signalSource;
-    this.startedAt = now(); this.seen = new Map(); this.busy = false;
+    this.startedAt = now(); this.seen = new Map(); this.busy = false; this.rerun = false;
     this.tickStartedAt = null; this.lastCompletedAt = this.startedAt;
     this.control = { paused: true }; this.stopped = false;
     executor.isPaused = () => this.stopped || this.control.paused || this.control.close_requested;
@@ -32,13 +32,14 @@ export class FadeWorkerLoop {
       && Number.isFinite(s.price) && s.price > 0
       && Number.isFinite(s.resistance) && s.resistance > s.price;
   }
-  async tick() {
-    if (this.busy || this.stopped) return;
+  async tick({ wake = false } = {}) {
+    if (this.stopped) return;
+    if (this.busy) { if (wake) this.rerun = true; return; }
     this.busy = true; this.tickStartedAt = this.now();
     let error = null;
     try {
-      // Protect existing positions even when the signal/control channel fails.
-      await this.executor.run();
+      // Legacy signals keep protection-first ordering; live tick candidates have a short expiry.
+      if (!this.signalSource) await this.executor.run();
       if (this.executor.enabled()) {
         this.control = await this.store.fadeControl(this.executor.scope);
         if (this.control.close_requested) await this.executor.control('close');
@@ -49,7 +50,6 @@ export class FadeWorkerLoop {
         for (const event of events) {
           if (this.stopped) break;
           if (!this.valid(event) || this.seen.has(event.event_key)) continue;
-          // Skip, never queue a catch-up entry, if paused or full. Journal dedups across workers.
           this.seen.set(event.event_key, this.now());
           const resumedAt = Date.parse(this.control.updated_at ?? new Date(this.startedAt).toISOString());
           if (!this.control.paused && !this.control.close_requested && Date.parse(event.created_at) >= resumedAt) {
@@ -58,24 +58,40 @@ export class FadeWorkerLoop {
         }
         for (const [key, time] of this.seen) if (this.now() - time > 120000) this.seen.delete(key);
         if (this.signalSource) {
-          // Tick candidates never wait behind a resume or outage and never replay.
+          // onSignal performs lease/account reconciliation and protection before any order submission.
           const candidates = this.signalSource.drain();
           for (const s of candidates) {
-            if (this.stopped || this.control.paused || this.control.close_requested) break;
+            if (this.stopped) break;
+            if (this.control.paused || this.control.close_requested) {
+              this.signalSource.rejectCandidate?.(s.symbol,s,'entries paused or close requested');
+              continue;
+            }
             const resumedAt = Date.parse(this.control.updated_at ?? new Date(this.startedAt).toISOString());
-            if (s.detectedAt >= Math.max(this.startedAt, resumedAt)
-              && this.signalSource.authorize(s.symbol, s)) await this.executor.onSignal(s.symbol, s);
+            if (s.detectedAt < Math.max(this.startedAt, resumedAt)) {
+              this.signalSource.rejectCandidate?.(s.symbol,s,'candidate predates worker start/resume');
+              continue;
+            }
+            if (!this.signalSource.authorize(s.symbol, s)) continue;
+            await this.executor.onSignal(s.symbol, s);
           }
         }
       }
     } catch (e) { error = e; this.control = { paused: true }; }
     finally {
+      // Always run the ordinary protection/reconciliation pass, including on control or signal errors.
+      if (this.signalSource && this.executor.enabled() && !this.stopped) {
+        try { await this.executor.run(); }
+        catch (e) { error ??= e; }
+      }
       try {
         await this.store.fadeHeartbeat(this.executor.scope,
           this.executor.status().replace(/<[^>]*>/g, '') + (error ? '\nSignal/control channel unavailable; new entries blocked.' : ''));
       } catch { /* An absent heartbeat is surfaced by Railway as stale. */ }
       this.lastCompletedAt = this.now(); this.tickStartedAt = null;
       this.busy = false;
+      if (this.rerun && !this.stopped) {
+        this.rerun = false;
+        setImmediate(() => { void this.tick(); });
+      }
     }
   }
-}
