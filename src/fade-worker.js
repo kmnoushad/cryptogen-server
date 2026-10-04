@@ -21,7 +21,7 @@ worker = new FadeWorkerLoop({ executor, store, signalSource: source });
 if (source) {
   executor.spikeAuthorize = (symbol, signal) => source.authorize(symbol, signal);
   executor.spikeHealth = () => source.health();
-  source.onCandidate = () => { void worker.tick(); };
+  source.onCandidate = () => { void worker.tick({ wake: true }); };
 }
 let lastPollAt = Date.now();
 const timer = setInterval(() => {
