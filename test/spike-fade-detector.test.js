@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SpikeFadeDetector } from '../src/spike-fade-detector.js';
+test('one-second buckets bound storage while preserving every aggressor quote',()=>{
+  let time=1000000;
+  const d=new SpikeFadeDetector({symbols:['TESTUSDT'],now:()=>time});
+  for(let i=0;i<10000;i++) d.ingest('TESTUSDT',{a:i,T:time,p:'100',q:'1',m:i%2===0});
+  const bucket=d.states.get('TESTUSDT').ticks[0];
+  assert.equal(d.states.get('TESTUSDT').ticks.length,1);assert.equal(bucket.quote,1000000);
+  assert.equal(bucket.sellQuote,500000);assert.equal(bucket.count,10000);
+  for(let i=1;i<=200;i++) {time+=1000;d.ingest('TESTUSDT',{a:10000+i,T:time,p:'100',q:'1',m:false});}
+  assert.ok(d.states.get('TESTUSDT').ticks.length<=151);
+});
 function fixture() {
   let time = 0, id = 0;
   const d = new SpikeFadeDetector({ symbols: ['TESTUSDT'], now: () => time });

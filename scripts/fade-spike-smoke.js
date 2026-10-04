@@ -12,7 +12,7 @@ try {
   while(Date.now()<deadline) {
     await new Promise(resolve=>setTimeout(resolve,500));
     const latest=source.btc.at(-1);
-    if(source.connected.size===2 && latest && Date.now()-latest.time<2000
+    if(source.ready() && latest && Date.now()-latest.time<2000
       && [...source.books.values()].some(b=>Date.now()-b.at<1000)) {received=true;break;}
   }
   if(!received) throw Error('Fresh BTC trade and symbol book streams not received');

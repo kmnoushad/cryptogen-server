@@ -1,8 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FadeSpikeSource } from '../src/fade-spike-source.js';
+import { FadeSpikeSource, spikeContracts, spikeSubscriptions } from '../src/fade-spike-source.js';
 import { SpikeFadeDetector } from '../src/spike-fade-detector.js';
 import { fadeSpikeBtcGate } from '../src/fade-btc-gate.js';
+test('full universe includes 740 coin contracts and shards every subscription without a volume filter',()=>{
+  const make=symbol=>({symbol,status:'TRADING',quoteAsset:'USDT',contractType:'PERPETUAL',underlyingType:'COIN'});
+  const info={symbols:Array.from({length:740},(_,i)=>make(`SMALL${i}USDT`))};
+  info.symbols.push(make('BTCUSDT'),{...make('HALTEDUSDT'),status:'SETTLING'},
+    {...make('STOCKUSDT'),underlyingType:'INDEX'}, {...make('USDCOINUSDC'),quoteAsset:'USDC'});
+  const symbols=spikeContracts(info),streams=spikeSubscriptions(symbols);
+  assert.equal(symbols.length,740);assert.equal(streams.length,16);
+  assert.ok(streams.every(s=>s.names.length<=101));
+  const names=streams.flatMap(s=>s.names);assert.equal(new Set(names).size,names.length);
+  assert.equal(names.filter(n=>n==='btcusdt@aggTrade').length,1);
+  for(const symbol of symbols) {
+    assert.ok(names.includes(symbol.toLowerCase()+'@aggTrade'));
+    assert.ok(names.includes(symbol.toLowerCase()+'@bookTicker'));
+  }
+});
 function fixture() {
   let time=1000000,id=0,paused=false;
   const source=new FadeSpikeSource({now:()=>time,environment:'live',isPaused:()=>paused});

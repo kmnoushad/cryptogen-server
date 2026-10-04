@@ -13,18 +13,25 @@ export class SpikeFadeDetector {
       || typeof sell !== 'boolean' || !(price > 0 && qty > 0 && Number.isFinite(price * qty))
       || now - time > 2000 || time > now) return reject('Invalid or stale trade');
     let s = this.states.get(symbol);
-    if (!s) { s = { ticks: [], id: -1, time: -1, watch: null, cooldown: 0 }; this.states.set(symbol, s); }
+    if (!s) { s = { ticks: [], id: -1, time: -1, watch: null, cooldown: 0, evaluated: -Infinity }; this.states.set(symbol, s); }
     if (id <= s.id || time < s.time) return reject('Duplicate or out-of-order trade');
     if (s.time >= 0 && time - s.time > 5000) { s.ticks = []; s.watch = null; }
     s.id = id; s.time = time;
-    s.ticks.push({ time, price, quote: price * qty, sell });
-    s.ticks = s.ticks.filter(t => time - t.time <= 150000);
-    if (s.ticks.length > 20000) { s.ticks = []; s.watch = null; return reject('Tick capacity exceeded; warmup required'); }
+    // One-second flow buckets preserve all quote volume and aggressor counts,
+    // without retaining millions of raw trades across the full universe.
+    const bucket=s.ticks.at(-1),second=Math.floor(time/1000);
+    if(bucket?.second===second) {
+      bucket.time=time;bucket.quote+=price*qty;bucket.sellQuote+=sell?price*qty:0;bucket.count++;
+    } else s.ticks.push({second,time,firstTime:time,price,quote:price*qty,sellQuote:sell?price*qty:0,count:1});
+    while(s.ticks.length && time-s.ticks[0].firstTime>150000) s.ticks.shift();
+    if(s.watch && price>s.watch.high) {s.watch.high=price;s.watch.highAt=time;}
+    if(time-s.evaluated<250) return reject('Sampling flow');
+    s.evaluated=time;
     if (time < s.cooldown) return reject('Pattern cooldown');
     if (s.watch && time - s.watch.started > 45000) s.watch = null;
     if (!s.watch) {
       const base = s.ticks.filter(t => time - t.time > 30000), burst = s.ticks.filter(t => time - t.time <= 30000);
-      if (!base.length || time - s.ticks[0].time < 140000) return reject('Warming up');
+      if (!base.length || time - s.ticks[0].firstTime < 140000) return reject('Warming up');
       const baseline = base.reduce((v, t) => v + t.quote, 0) / 120;
       const quote = burst.reduce((v, t) => v + t.quote, 0), gain = price / burst[0].price - 1;
       if (gain < .02 || quote < baseline * 30 * 3) return reject('No sudden spike');
@@ -37,8 +44,8 @@ export class SpikeFadeDetector {
     if (retreat > .009) { s.watch = null; s.cooldown = time + 60000; return reject('Spike already faded; no chasing'); }
     if (retreat < .005 || time - w.highAt < 2000) return reject('Spike still rising or no rejection');
     const flow = s.ticks.filter(t => time - t.time <= 5000), quote = flow.reduce((v, t) => v + t.quote, 0);
-    const sellShare = flow.reduce((v, t) => v + (t.sell ? t.quote : 0), 0) / quote;
-    if (sellShare < .6 || flow.length < 3) return reject('Selling not confirmed');
+    const sellShare = flow.reduce((v, t) => v + t.sellQuote, 0) / quote;
+    if (sellShare < .6 || flow.reduce((v,t)=>v+t.count,0) < 3) return reject('Selling not confirmed');
     const { btc, book } = context ?? {};
     if (!btc || !Number.isFinite(btc.at) || now - btc.at > 2000 || btc.at > now
       || ![btc.return30s, btc.return15m].every(Number.isFinite)) return reject('BTC context unavailable');
