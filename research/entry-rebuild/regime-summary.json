@@ -1,0 +1,241 @@
+{
+  "liveOrders": false,
+  "acceptance": "Research only. No live approval; fresh holdout and portfolio/fill validation required.",
+  "limitations": [
+    "Previously examined 14-day history is reused confirmation, not untouched holdout.",
+    "Current-listing survivor sample; sampled universe top20. PORTAL file incomplete and excluded.",
+    "Independent risk units; no simultaneous-position margin limits or live risk brakes.",
+    "No historical funding, OI, event, spread or order-book replay.",
+    "Fees 0.05%/side; stop/time exit slippage 0.05%; target touch assumed; stop wins intrabar ties.",
+    "Break-even moves apply next bar. Funding not modeled. Net is summed risk units, not USD.",
+    "Slippage/delay runs reapply entry checks and have different accepted cohorts; positive subset results do not prove fill robustness."
+  ],
+  "models": {
+    "rangeReversion5_base": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "rangeReversion5_slippage": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "rangeReversion5_delay": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "failedReclaimFade1_base": {
+      "summary": {
+        "all": {
+          "n": 1,
+          "win_pct": 0.0,
+          "expectancy_r": 0.0,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 1,
+          "win_pct": 0.0,
+          "expectancy_r": 0.0,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "failedReclaimFade1_slippage": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {
+        "no_chase": 1
+      }
+    },
+    "failedReclaimFade1_delay": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {
+        "no_chase": 1
+      }
+    }
+  }
+}

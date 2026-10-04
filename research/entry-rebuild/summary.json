@@ -1,0 +1,365 @@
+{
+  "liveOrders": false,
+  "acceptance": "Research only. No live approval; fresh holdout and portfolio/fill validation required.",
+  "limitations": [
+    "Previously examined 14-day history is reused confirmation, not untouched holdout.",
+    "Current-listing survivor sample; sampled universe top20. PORTAL file incomplete and excluded.",
+    "Independent risk units; no simultaneous-position margin limits or live risk brakes.",
+    "No historical funding, OI, event, spread or order-book replay.",
+    "Fees 0.05%/side; stop/time exit slippage 0.05%; target touch assumed; stop wins intrabar ties.",
+    "Break-even moves apply next bar. Funding not modeled. Net is summed risk units, not USD.",
+    "Slippage/delay runs reapply entry checks and have different accepted cohorts; positive subset results do not prove fill robustness."
+  ],
+  "models": {
+    "pullback5_base": {
+      "summary": {
+        "all": {
+          "n": 115,
+          "win_pct": 26.08695652173913,
+          "expectancy_r": -0.1743960955813246,
+          "pf": 0.682813773154271,
+          "net": -20.05555099185233,
+          "max_closed_dd": 23.765812616214422
+        },
+        "development": {
+          "n": 75,
+          "win_pct": 25.333333333333336,
+          "expectancy_r": -0.23255154314388052,
+          "pf": 0.6056628421217846,
+          "net": -17.441365735791038,
+          "max_closed_dd": 20.80777012964918
+        },
+        "validation": {
+          "n": 28,
+          "win_pct": 25.0,
+          "expectancy_r": -0.13916404031325627,
+          "pf": 0.7216719193734874,
+          "net": -3.8965931287711757,
+          "max_closed_dd": 5.726365477684701
+        },
+        "reused_confirmation": {
+          "n": 12,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": 0.10686732272582351,
+          "pf": 1.2564815745419764,
+          "net": 1.2824078727098822,
+          "max_closed_dd": 3.0
+        }
+      },
+      "skipped": {
+        "same_symbol_overlap": 13
+      }
+    },
+    "pullback5_slippage": {
+      "summary": {
+        "all": {
+          "n": 49,
+          "win_pct": 32.6530612244898,
+          "expectancy_r": -0.1275477086795732,
+          "pf": 0.7661333856532876,
+          "net": -6.249837725299087,
+          "max_closed_dd": 7.87534371230489
+        },
+        "development": {
+          "n": 27,
+          "win_pct": 29.629629629629626,
+          "expectancy_r": -0.15769526343411955,
+          "pf": 0.7221437111105405,
+          "net": -4.257772112721228,
+          "max_closed_dd": 7.87534371230489
+        },
+        "validation": {
+          "n": 15,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": -0.0786456068067396,
+          "pf": 0.8525394872373633,
+          "net": -1.179684102101094,
+          "max_closed_dd": 3.888358451921266
+        },
+        "reused_confirmation": {
+          "n": 7,
+          "win_pct": 42.857142857142854,
+          "expectancy_r": -0.11605450149668085,
+          "pf": 0.7610848498093101,
+          "net": -0.812381510476766,
+          "max_closed_dd": 2.3754334387665184
+        }
+      },
+      "skipped": {
+        "no_chase": 74,
+        "same_symbol_overlap": 5
+      }
+    },
+    "pullback5_delay": {
+      "summary": {
+        "all": {
+          "n": 82,
+          "win_pct": 28.04878048780488,
+          "expectancy_r": -0.15556456289375797,
+          "pf": 0.7226892574502576,
+          "net": -12.756294157288153,
+          "max_closed_dd": 15.874105951301425
+        },
+        "development": {
+          "n": 55,
+          "win_pct": 29.09090909090909,
+          "expectancy_r": -0.17634576000066493,
+          "pf": 0.6969057249988571,
+          "net": -9.69901680003657,
+          "max_closed_dd": 15.874105951301425
+        },
+        "validation": {
+          "n": 21,
+          "win_pct": 23.809523809523807,
+          "expectancy_r": -0.15171242181228187,
+          "pf": 0.7103671947220073,
+          "net": -3.185960858057919,
+          "max_closed_dd": 4.456646322638887
+        },
+        "reused_confirmation": {
+          "n": 6,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": 0.021447250134389712,
+          "pf": 1.0428945002687795,
+          "net": 0.12868350080633828,
+          "max_closed_dd": 2.0
+        }
+      },
+      "skipped": {
+        "no_chase": 29,
+        "same_symbol_overlap": 13,
+        "cost_ceiling": 4
+      }
+    },
+    "compression5_base": {
+      "summary": {
+        "all": {
+          "n": 36,
+          "win_pct": 44.44444444444444,
+          "expectancy_r": 0.0032019914398377985,
+          "pf": 1.0065226310513475,
+          "net": 0.11527169183416075,
+          "max_closed_dd": 7.555192568265198
+        },
+        "development": {
+          "n": 18,
+          "win_pct": 55.55555555555556,
+          "expectancy_r": 0.14112875892573923,
+          "pf": 1.3175397075829134,
+          "net": 2.540317660663306,
+          "max_closed_dd": 3.0
+        },
+        "validation": {
+          "n": 8,
+          "win_pct": 25.0,
+          "expectancy_r": -0.2511414159734277,
+          "pf": 0.5398635852360981,
+          "net": -2.0091313277874217,
+          "max_closed_dd": 3.5529001261319277
+        },
+        "reused_confirmation": {
+          "n": 9,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": -0.06838116038207409,
+          "pf": 0.8840165934635953,
+          "net": -0.6154304434386668,
+          "max_closed_dd": 4.0
+        }
+      },
+      "skipped": {
+        "same_symbol_overlap": 2
+      }
+    },
+    "compression5_slippage": {
+      "summary": {
+        "all": {
+          "n": 20,
+          "win_pct": 40.0,
+          "expectancy_r": 0.07001144310446608,
+          "pf": 1.2048594242054484,
+          "net": 1.4002288620893215,
+          "max_closed_dd": 5.104395566071768
+        },
+        "development": {
+          "n": 10,
+          "win_pct": 50.0,
+          "expectancy_r": 0.24541484953595044,
+          "pf": 1.8011947981577028,
+          "net": 2.4541484953595045,
+          "max_closed_dd": 2.0
+        },
+        "validation": {
+          "n": 3,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": -0.2475015684371579,
+          "pf": 0.47342706540281504,
+          "net": -0.7425047053114737,
+          "max_closed_dd": 1.4100700140987519
+        },
+        "reused_confirmation": {
+          "n": 6,
+          "win_pct": 33.33333333333333,
+          "expectancy_r": -0.05190248799311825,
+          "pf": 0.8681501617485979,
+          "net": -0.3114149279587095,
+          "max_closed_dd": 2.361890860760294
+        }
+      },
+      "skipped": {
+        "no_chase": 17,
+        "same_symbol_overlap": 1
+      }
+    },
+    "compression5_delay": {
+      "summary": {
+        "all": {
+          "n": 26,
+          "win_pct": 30.76923076923077,
+          "expectancy_r": -0.21385217566753048,
+          "pf": 0.6362298873267702,
+          "net": -5.560156567355793,
+          "max_closed_dd": 8.74041646145511
+        },
+        "development": {
+          "n": 11,
+          "win_pct": 45.45454545454545,
+          "expectancy_r": -0.08595078013517966,
+          "pf": 0.8424235697521706,
+          "net": -0.9454585814869763,
+          "max_closed_dd": 2.77928308703418
+        },
+        "validation": {
+          "n": 7,
+          "win_pct": 14.285714285714285,
+          "expectancy_r": -0.3508011149181746,
+          "pf": 0.3860980488931944,
+          "net": -2.4556078044272223,
+          "max_closed_dd": 4.0
+        },
+        "reused_confirmation": {
+          "n": 8,
+          "win_pct": 25.0,
+          "expectancy_r": -0.2698862726801992,
+          "pf": 0.5914534808047639,
+          "net": -2.1590901814415937,
+          "max_closed_dd": 4.284808657027887
+        }
+      },
+      "skipped": {
+        "no_chase": 11,
+        "same_symbol_overlap": 1
+      }
+    },
+    "auctionFade5_base": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "auctionFade5_slippage": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    },
+    "auctionFade5_delay": {
+      "summary": {
+        "all": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "development": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "validation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        },
+        "reused_confirmation": {
+          "n": 0,
+          "win_pct": null,
+          "expectancy_r": null,
+          "pf": null,
+          "net": 0.0,
+          "max_closed_dd": 0.0
+        }
+      },
+      "skipped": {}
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "evaluationStart": 1789847880000,
+  "end": 1791057480000,
+  "included": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "LINKUSDT",
+    "AVAXUSDT",
+    "LTCUSDT",
+    "CLANKERUSDT",
+    "NEARUSDT",
+    "HOTUSDT",
+    "1000XECUSDT",
+    "FLOWUSDT",
+    "PROMPTUSDT",
+    "1000LUNCUSDT",
+    "CFXUSDT",
+    "AWEUSDT",
+    "ANIMEUSDT",
+    "ZBTUSDT",
+    "UMAUSDT",
+    "HUSDT",
+    "APTUSDT",
+    "OPNUSDT",
+    "GASUSDT",
+    "STBLUSDT",
+    "KNCUSDT",
+    "BULLAUSDT",
+    "JELLYJELLYUSDT",
+    "FFUSDT",
+    "CCUSDT",
+    "EDUUSDT",
+    "SAFEUSDT",
+    "MIRAUSDT",
+    "MEUSDT",
+    "CTRUSDT",
+    "CRVUSDT",
+    "BASUSDT",
+    "WCTUSDT"
+  ],
+  "excluded": [
+    {
+      "symbol": "PORTALUSDT",
+      "reason": "Incomplete continuous data"
+    }
+  ],
+  "counts": {
+    "failedReclaimFade1:No local pump": 19394,
+    "rangeReversion5:No failed excursion at range edge": 17929,
+    "rangeReversion5:Market is not ranging": 17800,
+    "failedReclaimFade1:No earlier rejected high": 2642,
+    "failedReclaimFade1:No failed reclaim near resistance": 48,
+    "failedReclaimFade1:No post-reclaim selling confirmation": 19,
+    "rangeReversion5:Range has insufficient net reward to centre": 105,
+    "failedReclaimFade1:Reclaim fade already extended": 4,
+    "failedReclaimFade1:BTC closed-minute shock": 18,
+    "rangeReversion5:BTC closed-minute shock": 18,
+    "rangeReversion5:Cost ceiling": 4,
+    "failedReclaimFade1:candidate": 1
+  },
+  "models": [
+    "rangeReversion5",
+    "failedReclaimFade1"
+  ],
+  "liveOrders": false,
+  "note": "Previously inspected history; temporal partitions are reused confirmation, not untouched holdout. Current-listing sample and sampled-universe top20."
+}
