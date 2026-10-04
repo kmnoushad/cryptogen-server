@@ -23,7 +23,7 @@ test('candidate arriving during a worker tick schedules an immediate follow-up i
   const running=h.worker.tick();
   while (!release) await new Promise(resolve=>setImmediate(resolve));
   queue=[{symbol:'AAAUSDT',detectedAt:now}];
-  await h.worker.tick();
+  await h.worker.tick({wake:true});
   release(); await running;
   await new Promise(resolve=>setImmediate(resolve));
   assert.ok(h.calls.includes('AAAUSDT'));
