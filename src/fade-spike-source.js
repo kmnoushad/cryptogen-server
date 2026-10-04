@@ -24,11 +24,17 @@ export class FadeSpikeSource {
     this.books = new Map(); this.btc = []; this.pending = []; this.latest = new Map();
     this.detector = null; this.lastReason = 'Starting'; this.lastError = null;
     this.watches = 0; this.candidates = 0; this.retries = 0; this.retry = null;
+    this.lastCandidate = null; this.candidateBlocks = 0;
     this.requiredConnections = 2;
   }
   ready() { return this.connected.size === this.requiredConnections; }
   health() {
-    return `spike stream ${this.ready() ? 'connected' : 'unavailable'} (${this.connected.size}/${this.requiredConnections}) · ${this.detector?.symbols.size ?? 0} symbols · WATCH ${this.watches} · candidates ${this.candidates} · ${this.lastError ?? this.lastReason}`;
+    const d=this.detector?.diagnostics(this.now());
+    const top=Object.entries(d?.gates ?? {}).sort((a,b)=>b[1]-a[1])[0];
+    const candidate=this.lastCandidate
+      ? ` · last ${this.lastCandidate.symbol} ${this.lastCandidate.outcome}${this.lastCandidate.reason ? `: ${this.lastCandidate.reason}` : ''}` : '';
+    const readiness=d ? `ready ${d.ready} · warming ${d.warming} · quiet ${d.quiet} · unseen ${d.unseen} · active WATCH ${d.watch}` : 'warming up';
+    return `spike stream ${this.ready() ? 'connected' : 'unavailable'} (${this.connected.size}/${this.requiredConnections}) · ${this.detector?.symbols.size ?? 0} symbols · ${readiness} · candidates ${this.candidates} · candidate blocks ${this.candidateBlocks} · top gate ${top ? `${top[0]} (${top[1]})` : 'none yet'}${candidate} · ${this.lastError ?? this.lastReason}`;
   }
   clear() {
     this.generation++; this.detector?.reset(); this.books.clear(); this.btc = [];
@@ -123,18 +129,34 @@ export class FadeSpikeSource {
     const signal={...result, price:result.entry, peakTime:result.detectedAt-1,
       barCloseTime:result.detectedAt, generation:this.generation};
     this.candidates++;
+    this.lastCandidate={symbol:data.s,detectedAt:now,outcome:'queued',reason:null};
     this.pending=[signal]; // latest only; never build an execution backlog
     this.onCandidate?.();
   }
+  rejectCandidate(symbol, signal, reason) {
+    this.candidateBlocks++;
+    this.lastCandidate={symbol,detectedAt:signal?.detectedAt ?? null,outcome:'blocked',reason};
+    return false;
+  }
   authorize(symbol, signal) {
     const now=this.now(),btc=this.btcContext(),book=this.books.get(symbol),last=this.latest.get(symbol);
-    return !this.stopped && !this.isPaused() && this.ready() && this.detector?.symbols.has(symbol)
-      && signal.generation===this.generation && signal.model==='spike-fade-ticks-v1'
-      && now>=signal.detectedAt && now-signal.detectedAt<=10000
-      && btc && btc.return30s<=.001 && btc.return15m<=0
-      && book && now-book.at<=1000 && book.ask/book.bid-1<=.001
-      && last && now-last.at<=2000 && book.ask<signal.resistance
-      && Math.abs(book.bid/signal.price-1)<=.0015 && 1-book.bid/signal.resistance<=.009;
+    const reject=reason=>this.rejectCandidate(symbol,signal,reason);
+    if (this.stopped) return reject('source stopped');
+    if (this.isPaused()) return reject('entries paused');
+    if (!this.ready()) return reject('market streams disconnected');
+    if (!this.detector?.symbols.has(symbol)) return reject('symbol outside active universe');
+    if (signal?.generation!==this.generation || signal?.model!=='spike-fade-ticks-v1') return reject('candidate generation/model mismatch');
+    if (!Number.isFinite(signal.detectedAt) || now<signal.detectedAt || now-signal.detectedAt>10000) return reject('candidate expired (>10s)');
+    if (!btc) return reject('BTC tick context stale');
+    if (btc.return30s>.001 || btc.return15m>0) return reject('BTC momentum gate');
+    if (!book || now-book.at>1000) return reject('symbol book missing/stale');
+    if (book.ask/book.bid-1>.001) return reject('spread exceeds 0.10%');
+    if (!last || now-last.at>2000) return reject('symbol trade tick stale');
+    if (!(book.ask<signal.resistance)) return reject('ask reclaimed resistance');
+    if (Math.abs(book.bid/signal.price-1)>.0015) return reject('price moved >0.15% from spike signal');
+    if (1-book.bid/signal.resistance>.009) return reject('entry is >0.9% below failed high');
+    this.lastCandidate={symbol,detectedAt:signal.detectedAt,outcome:'authorized',reason:null};
+    return true;
   }
   drain() { const result=this.pending; this.pending=[]; return result; }
 }
