@@ -32,9 +32,9 @@ export class FadeWorkerLoop {
       && Number.isFinite(s.price) && s.price > 0
       && Number.isFinite(s.resistance) && s.resistance > s.price;
   }
-  async tick() {
+  async tick({ wake = false } = {}) {
     if (this.stopped) return;
-    if (this.busy) { this.rerun = true; return; }
+    if (this.busy) { if (wake) this.rerun = true; return; }
     this.busy = true; this.tickStartedAt = this.now();
     let error = null;
     try {
