@@ -11,6 +11,12 @@ test('one-second buckets bound storage while preserving every aggressor quote',(
   for(let i=1;i<=200;i++) {time+=1000;d.ingest('TESTUSDT',{a:10000+i,T:time,p:'100',q:'1',m:false});}
   assert.ok(d.states.get('TESTUSDT').ticks.length<=151);
 });
+test('ready-symbol diagnostics retain the actual latest detector gate',()=>{
+  const {d,feed}=fixture();
+  assert.equal(d.diagnostics().ready,1);
+  assert.equal(d.states.get('TESTUSDT').lastReason,'No sudden spike');
+  assert.equal(d.diagnostics().gates['No sudden spike'],1);
+});
 test('per-symbol diagnostics separate ready, warming, quiet, unseen and rejection reasons',()=>{
   let time=1000000;
   const d=new SpikeFadeDetector({symbols:['AUSDT','BUSDT','CUSDT'],now:()=>time});
@@ -24,6 +30,23 @@ test('per-symbol diagnostics separate ready, warming, quiet, unseen and rejectio
   const y=d.diagnostics();assert.equal(y.ready,1);assert.equal(y.warming,1);
   assert.equal(y.gates['No sudden spike'],1);assert.equal(y.unseen,1);
   time+=6000;assert.equal(d.diagnostics().quiet,2);
+});
+test('a trade lull clears a pending watch but preserves the bounded volume warmup',()=>{
+  let time=1000000,id=0;
+  const d=new SpikeFadeDetector({symbols:['TESTUSDT'],now:()=>time});
+  const feed=(price,qty=1,sell=false)=>{
+    time+=1000;
+    return d.ingest('TESTUSDT',{a:++id,T:time,p:String(price),q:String(qty),m:sell});
+  };
+  for(let i=0;i<145;i++)feed(100);
+  assert.equal(d.diagnostics().ready,1);
+  assert.equal(feed(103,100).watch,true);
+  time+=6000;
+  const resumed=feed(103,1,true);
+  assert.equal(resumed.candidate,false);
+  assert.equal(d.states.get('TESTUSDT').watch,null);
+  assert.notEqual(resumed.reason,'Warming up');
+  assert.equal(d.diagnostics().ready,1);
 });
 function fixture() {
   let time = 0, id = 0;

@@ -19,8 +19,9 @@ export function earlyFuturesWatch({symbol,m1,m15,h1,btc15,btc1h,now}) {
   let a,b,c,d,e;
   try { a=closedSeries(m1,60000,now);b=closedSeries(m15,900000,now);c=closedSeries(h1,3600000,now);
     d=closedSeries(btc15,900000,now);e=closedSeries(btc1h,3600000,now); } catch { return null; }
-  const direction=trendDirection(b), opposite=direction==='LONG'?'SHORT':'LONG';
-  if (!direction || trendDirection(d)!==direction || trendDirection(c)===opposite || trendDirection(e)===opposite) return null;
+  const direction=trendDirection(b), opposite=direction==='LONG'?'SHORT':'LONG', btc15Direction=trendDirection(d);
+  if (!direction || (btc15Direction && btc15Direction!==direction)
+    || trendDirection(c)===opposite || trendDirection(e)===opposite) return null;
   const last=a.at(-1), previous=a.slice(-21,-1), sign=direction==='LONG'?1:-1;
   const level=sign===1?Math.max(...previous.map(x=>x.high)):Math.min(...previous.map(x=>x.low));
   if (sign*(last.close-level)<=0 || sign*(last.close-last.open)<=0
