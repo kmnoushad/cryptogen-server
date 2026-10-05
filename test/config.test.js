@@ -107,7 +107,7 @@ test('v6.9 BTC-block heartbeat and fast-mover defaults', () => {
 test('v6.9.3 Alpha fast-mover defaults', () => {
   const cfg = loadConfig(base);
   assert.equal(cfg.enableAlphaFastMover, true);
-  assert.equal(cfg.alphaMoverPollMs, 90_000);
+  assert.equal(cfg.alphaMoverPollMs, 30_000);
   assert.equal(cfg.alphaMoverMin10mPct, 3.0);
   assert.equal(cfg.alphaMoverMin30mPct, 6.0);
   assert.equal(cfg.alphaMoverMax24hChangePct, 60);
@@ -124,8 +124,8 @@ test('v6.9.3 Alpha fast-mover vars warn and fall back instead of throwing', () =
   console.warn = message => warnings.push(message);
   try {
     assert.equal(loadConfig({ ...base, ENABLE_ALPHA_FAST_MOVER: 'maybe' }).enableAlphaFastMover, true);
-    assert.equal(loadConfig({ ...base, ALPHA_MOVER_POLL_MS: '10' }).alphaMoverPollMs, 90_000);
-    assert.equal(loadConfig({ ...base, ALPHA_MOVER_POLL_MS: '99999999' }).alphaMoverPollMs, 90_000);
+    assert.equal(loadConfig({ ...base, ALPHA_MOVER_POLL_MS: '10' }).alphaMoverPollMs, 30_000);
+    assert.equal(loadConfig({ ...base, ALPHA_MOVER_POLL_MS: '99999999' }).alphaMoverPollMs, 30_000);
     assert.equal(loadConfig({ ...base, ALPHA_MOVER_MIN_10M_PCT: 'abc' }).alphaMoverMin10mPct, 3.0);
     assert.equal(loadConfig({ ...base, ALPHA_MOVER_MIN_30M_PCT: '0' }).alphaMoverMin30mPct, 6.0);
     assert.equal(loadConfig({ ...base, ALPHA_MOVER_MAX_24H_CHANGE_PCT: '5' }).alphaMoverMax24hChangePct, 60);

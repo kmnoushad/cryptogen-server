@@ -469,7 +469,7 @@ test('tier-2 15m window: steady grind triggers, confirms, persists and alerts', 
   assert.match(deps.sent[0], /\+2\.20% in 15m/);
   assert.match(deps.sent[0], /5m volume accel: 2\.5× baseline/);
   assert.match(deps.sent[0], /Steady mover — not a burst/);
-  assert.match(deps.sent[0], /radar ping, not a gated entry/);
+  assert.match(deps.sent[0], /Paper simulation only; no Binance order/);
   assert.equal(deps.events.length, 1);
   assert.equal(deps.events[0].event_type, 'FUTURES_TRENDING_MOVER');
   assert.equal(deps.events[0].symbol, 'TRENDUSDT');
@@ -772,5 +772,4 @@ test('fast-mover alerts are unchanged with a null bias or the tag disabled', () 
   });
   assert.ok(!off.alertMessage(trigger, confirm).includes('₿ BTC'));
 });
-
 

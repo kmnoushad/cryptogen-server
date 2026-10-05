@@ -495,6 +495,23 @@ test('start is idempotent and stop clears the timer', async () => {
   assert.equal(h.radar.metrics.errors, 0);
 });
 
+test('Alpha fast-mover respects 429 backoff and exposes actual polling interval', async () => {
+  let clock = T0, calls = 0;
+  const radar = new AlphaFastMover({ cfg: { ...cfg, alphaMoverPollMs: 30_000 },
+    store: { insertEvent: async () => true }, telegram: { send: async () => {} },
+    fetcher: async () => { calls++; const e = Error('throttled'); e.status = 429; throw e; },
+    assessSecurity: async () => goodSecurity, now: () => clock, sleepImpl: async () => {} });
+  await radar.pollOnce();
+  assert.equal(radar.health().pollIntervalMs, 30_000);
+  assert.equal(radar.health().backoffUntil, new Date(T0 + 60_000).toISOString());
+  clock += 30_000;
+  assert.equal((await radar.pollOnce()).skipped, 'backoff');
+  assert.equal(calls, 1);
+  clock += 31_000;
+  await radar.pollOnce();
+  assert.equal(calls, 2);
+});
+
 // ── v6.9.6 BTC bias bundling ────────────────────────────────────────────────
 
 test('alpha fast-mover alert carries the BTC bias tag when injected', () => {

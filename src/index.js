@@ -18,6 +18,7 @@ import { AlphaFastMover } from './alpha-mover.js';
 import { BtcFeed } from './btc-feed.js';
 import { BtcBiasEngine } from './btc-bias.js';
 import { BtcRecorder } from './btc-recorder.js';
+import { MoverPaperBook } from './mover-paper.js';
 import { log } from './util.js';
 import { APP_VERSION } from './version.js';
 
@@ -30,6 +31,9 @@ const binance = new BinanceClient({
 });
 const store = new Store(cfg);
 const telegram = new Telegram(cfg);
+const moverPaper = new MoverPaperBook({ store, maxRiskUsd: cfg.moverPaperMaxRiskUsd,
+  dailyLossUsd: cfg.moverPaperDailyLossUsd, feeBps: cfg.moverPaperFeeBps,
+  slippageBps: cfg.moverPaperSlippageBps });
 // v6.9.6: BTC combined-stream feed → 15m/30m bias engine → per-candle
 // recorder. The bias engine is injected into every alert producer so each
 // outbound long alert carries the current BTC bias tag.
@@ -55,6 +59,7 @@ const fastMover = new FastMoverDetector({
   telegram,
   realtimeShock,
   btcBias,
+  moverPaper,
   isPaused: () => engine?.paused ?? false,
   isEventGuarded: () => Boolean(eventGuard.activeWindow()),
 });
@@ -63,10 +68,11 @@ const alphaMover = new AlphaFastMover({
   store,
   telegram,
   btcBias,
+  moverPaper,
   isPaused: () => engine?.paused ?? false,
   isEventGuarded: () => Boolean(eventGuard.activeWindow()),
 });
-engine = new Engine({ cfg, binance, store, telegram, alpha, calendar, realtimeShock, fastMover, alphaMover, eventGuard, btcFeed, btcBias, btcRecorder });
+engine = new Engine({ cfg, binance, store, telegram, alpha, calendar, realtimeShock, fastMover, alphaMover, eventGuard, btcFeed, btcBias, btcRecorder, moverPaper });
 const pumpFade = new PumpFadeRadar({ cfg, binance, store, telegram,
   excluded: FUTURES_EXCLUDED, isPaused: () => engine.paused });
 engine.pumpFade = pumpFade;
@@ -110,6 +116,8 @@ process.on('uncaughtException', error => {
 try {
   server.listen(cfg.port, '0.0.0.0', () => log(`Health server listening on :${cfg.port}`));
   await engine.initialize();
+  const paperReady = await moverPaper.initialize();
+  if (!paperReady) log(`Mover paper simulator unavailable; no simulated entries: ${moverPaper.error}`);
   await btcFeed.seed(); // one-time REST warm-up (~4 weight); failure only logs
   btcFeed.start();
   realtimeShock.start();
@@ -128,6 +136,7 @@ try {
     `[FADE AUTO] external worker only · /fadeauto\n` +
     `[ALPHA] ${cfg.enableAlphaSignals ? '✅ ON · on-chain risk screening active' : 'disabled'}\n` +
     `[ALPHA MOVER] ${cfg.enableAlphaFastMover ? '✅ ON · early runner radar (info alerts only)' : 'disabled'}\n` +
+    `🧪 Mover paper: ${paperReady ? 'READY · $100 per cohort · max $10 risk/trade · $30 GST daily loss stop · /moverpaperstats' : 'UNAVAILABLE · no simulated entries'}\n` +
     `[BTC BIAS] ${cfg.enableBtcFeed ? `✅ ON · 15m/30m gauge${cfg.btcBiasBlockLongs ? ' · LONG-BLOCK GATE ON' : ''}` : 'disabled'} · recorder ${cfg.enableBtcRecorder ? '✅' : '⚠️ off'}\n` +
     `Calendar: ${calendar.configured() ? '✅ ON · Finnhub high-impact US reminders' : '⚠️ FINNHUB_KEY missing/disabled'}\n` +
     `<i>Trade alerts actionable-only · calendar information kept separate</i>`);

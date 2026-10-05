@@ -186,7 +186,11 @@ export const loadConfig = (env = process.env) => {
       console.warn(`[CONFIG WARNING] ENABLE_ALPHA_FAST_MOVER="${raw}" is invalid; using safe default true`);
       return true;
     })(),
-    alphaMoverPollMs: numberFromWarn(env, 'ALPHA_MOVER_POLL_MS', 90_000, { min: 45_000, max: 600_000 }),
+    alphaMoverPollMs: numberFromWarn(env, 'ALPHA_MOVER_POLL_MS', 30_000, { min: 15_000, max: 600_000 }),
+    moverPaperMaxRiskUsd: numberFromWarn(env, 'MOVER_PAPER_MAX_RISK_USD', 10, { min: 1, max: 10 }),
+    moverPaperDailyLossUsd: numberFromWarn(env, 'MOVER_PAPER_DAILY_LOSS_USD', 30, { min: 5, max: 30 }),
+    moverPaperFeeBps: numberFromWarn(env, 'MOVER_PAPER_FEE_BPS', 5, { min: 0, max: 50 }),
+    moverPaperSlippageBps: numberFromWarn(env, 'MOVER_PAPER_SLIPPAGE_BPS', 10, { min: 0, max: 100 }),
     // v6.9.8: earlier-detection window. Default 3m/2.5% is a HIGHER rate of
     // change than the 10m/3% rule, so it fires only on genuine acceleration.
     alphaMoverFastWindowMin: numberFromWarn(env, 'ALPHA_MOVER_FAST_WINDOW_MIN', 3, { min: 1, max: 10 }),

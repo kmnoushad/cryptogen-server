@@ -152,6 +152,22 @@ export class Store {
     }
   }
 
+  async moverPaperEvents() {
+    const all = [];
+    for (let offset = 0; offset < 100_000; offset += 1000) {
+      const page = await this.get('nexio_events', [
+        ['event_type', 'in.(MOVER_PAPER_OPEN,MOVER_PAPER_CLOSE)'],
+        ['select', 'event_key,event_type,symbol,payload,created_at'],
+        ['order', 'created_at.asc,event_key.asc'],
+        ['limit', '1000'], ['offset', String(offset)],
+      ]);
+      if (!Array.isArray(page)) throw Error('Mover paper journal returned invalid data');
+      all.push(...page);
+      if (page.length < 1000) return all;
+    }
+    throw Error('Mover paper journal exceeds safe recovery limit');
+  }
+
   // v6.9.6 BTC recorder (additive). Same PostgREST pattern as insertEvent but
   // NEVER throws: recording is best-effort and must not disturb trading. On a
   // table-missing reply it flags btcSnapshotsTableMissing so the recorder can

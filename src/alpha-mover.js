@@ -32,6 +32,7 @@ export class AlphaFastMover {
     fetcher = requestJson,
     assessSecurity = fetchAndAssessOnchain,
     btcBias = null,
+    moverPaper = null,
     isPaused = () => false,
     isEventGuarded = () => false,
     now = () => Date.now(),
@@ -43,6 +44,7 @@ export class AlphaFastMover {
     this.fetcher = fetcher;
     this.assessSecurity = assessSecurity;
     this.btcBias = btcBias;
+    this.moverPaper = moverPaper;
     this.isPaused = isPaused;
     this.isEventGuarded = isEventGuarded;
     this.now = now;
@@ -54,6 +56,8 @@ export class AlphaFastMover {
     this.polling = false; // re-entrancy guard (same pattern as alpha.js `this.running`)
     this.lastPollAt = 0;
     this.lastError = null;
+    this.nextPollAt = 0;
+    this.pollBackoffMs = 0;
     this.metrics = {
       polls: 0,
       triggers: 0,
@@ -116,6 +120,7 @@ export class AlphaFastMover {
   async pollOnce() {
     if (!this.cfg.enableAlphaFastMover) return { skipped: 'disabled' };
     if (this.polling) return { skipped: 'already running' };
+    if (this.now() < this.nextPollAt) return { skipped: 'backoff', nextPollAt: this.nextPollAt };
     this.polling = true;
     try {
       const nowMs = this.now();
@@ -125,9 +130,16 @@ export class AlphaFastMover {
       } catch (error) {
         this.metrics.errors++;
         this.lastError = error.message;
+        const status = Number(error.status ?? error.statusCode ?? error.response?.status);
+        if ([418, 429].includes(status)) {
+          this.pollBackoffMs = Math.min(Math.max(this.cfg.alphaMoverPollMs, this.pollBackoffMs ? this.pollBackoffMs * 2 : 60_000), 10 * 60_000);
+          this.nextPollAt = nowMs + this.pollBackoffMs;
+        }
         log(`Alpha fast-mover fetch failed: ${error.message}`);
         return { error: error.message };
       }
+      this.pollBackoffMs = 0;
+      this.nextPollAt = 0; // routine cadence is owned by start()'s interval
       const tokens = (Array.isArray(response?.data) ? response.data : []).map(parseToken).filter(Boolean);
       for (const token of tokens) {
         try { await this.track(token, nowMs); }
@@ -147,6 +159,7 @@ export class AlphaFastMover {
       for (const [key, ts] of this.cooldowns) {
         if (nowMs - ts > cooldownMs) this.cooldowns.delete(key);
       }
+      if (this.moverPaper) await this.moverPaper.sweep();
       this.lastPollAt = nowMs;
       this.metrics.polls++;
       return { processed: tokens.length };
@@ -158,6 +171,7 @@ export class AlphaFastMover {
   async track(token, nowMs) {
     const key = keyOf(token);
     if (!this.passesFloors(token)) return null;
+    if (this.moverPaper) await this.moverPaper.mark('ALPHA_FAST_MOVER', `${token.chainId}:${token.contractAddress.toLowerCase()}`, token.price);
     let buffer = this.buffers.get(key);
     if (!buffer) {
       buffer = [];
@@ -267,7 +281,7 @@ export class AlphaFastMover {
       `24h change: ${change >= 0 ? '+' : ''}${change.toFixed(2)}%\n` +
       `Security: ${securityLabel(security)} (risk ${Number(security?.riskScore ?? 0)}/10)\n` +
       this.btcBiasLine() +
-      `⚠️ <b>Early radar ping — unverified move.</b> Tiny size / DYOR. This is NOT the guarded IGNITION entry; no database trade was opened.\n` +
+      `⚠️ <b>Early radar ping — unverified move.</b> DYOR. Paper simulation only; no Binance order. This is NOT the guarded IGNITION entry.\n` +
       `⏰ ${gstTime()} GST`;
   }
 
@@ -333,6 +347,18 @@ export class AlphaFastMover {
       log(`Alpha fast-mover dedup skip ${token.symbol}: cooldown-bucket event already persisted; alert suppressed`);
       return { triggered: true, suppressed: 'dedup', symbol: token.symbol };
     }
+    if (this.moverPaper) {
+      const entryKey = `alpha-mover:${key}:${this.cooldownBucket(nowMs)}`;
+      const stopPct = Math.max(0.01, Math.min(0.10, Number(move.pct) / 200));
+      try {
+        const paper = await this.moverPaper.open({ strategy: 'ALPHA_FAST_MOVER', eventKey: entryKey,
+          symbol: `${token.chainId}:${token.contractAddress.toLowerCase()}`, price: token.price,
+          stopPrice: token.price * (1 - stopPct), details: { displaySymbol: token.symbol, chain: token.chainName,
+            movePct: move.pct, windowMin: move.windowMin, liquidity: token.liquidity,
+            securityScore: security?.riskScore ?? null } });
+        if (!paper.opened) log(`Alpha fast-mover paper entry skipped ${token.symbol}: ${paper.reason}`);
+      } catch (error) { log(`Alpha fast-mover paper entry failed ${token.symbol}: ${error.message}`); }
+    }
     await this.telegram.send(this.alertMessage(token, move, security));
     this.metrics.alerts++;
     this.alertTimestamps.push(nowMs);
@@ -344,11 +370,11 @@ export class AlphaFastMover {
     return {
       enabled: Boolean(this.cfg.enableAlphaFastMover),
       lastPollAt: this.lastPollAt ? new Date(this.lastPollAt).toISOString() : null,
+      pollIntervalMs: this.cfg.alphaMoverPollMs,
+      backoffUntil: this.nextPollAt > this.now() ? new Date(this.nextPollAt).toISOString() : null,
       tracked: this.buffers.size,
       metrics: this.metrics,
       lastError: this.lastError,
     };
   }
 }
-
-
