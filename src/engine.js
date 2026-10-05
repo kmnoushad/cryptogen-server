@@ -53,7 +53,7 @@ const normalizedCandidateReason = reason => {
 };
 
 export class Engine {
-  constructor({ cfg, binance, store, telegram, alpha = null, calendar = null, realtimeShock = null, fastMover = null, alphaMover = null, eventGuard = null, btcFeed = null, btcBias = null, btcRecorder = null }) {
+  constructor({ cfg, binance, store, telegram, alpha = null, calendar = null, realtimeShock = null, fastMover = null, alphaMover = null, eventGuard = null, btcFeed = null, btcBias = null, btcRecorder = null, moverPaper = null }) {
     this.cfg = cfg;
     this.binance = binance;
     this.breadth = new AltcoinBreadth(binance);
@@ -68,6 +68,7 @@ export class Engine {
     this.btcFeed = btcFeed;
     this.btcBias = btcBias;
     this.btcRecorder = btcRecorder;
+    this.moverPaper = moverPaper;
     this.eventGuardWindow = null; // last observed guard window (edge-triggered Telegram lifecycle)
     this.eventGuardHoldLogged = new Set(); // `${symbol}:${eventTime}` — HOLD log once per candidate per window
     this.eventGuardFrozenBar = new Map(); // symbol → last bar closeTime already risk-checked under the freeze
@@ -1030,6 +1031,7 @@ export class Engine {
       pumpFade: this.pumpFade?.health() ?? { enabled: false },
       fadeExecution: this.fadeExecutor?.health() ?? { enabled: false },
       alphaMover: this.alphaMover?.health() ?? { enabled: false },
+      moverPaper: this.moverPaper?.summary() ?? { ready: false },
     };
   }
 
@@ -1096,7 +1098,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /futuresauto /futurespause /futuresresume /futurescloseall /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /moverpaperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /futuresauto /futurespause /futuresresume /futurescloseall /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1128,6 +1130,7 @@ export class Engine {
         `${this.fastMoverStatusLine()}\n` +
         `${this.pumpFadeStatusLine()}\n` +
         `${this.alphaMoverStatusLine()}\n` +
+        `Mover paper: ${this.moverPaper?.ready ? '✅ ready · /moverpaperstats' : '⚠️ unavailable'}\n` +
         `${this.btcBiasStatusLine()}\n` +
         `${risk.allowed ? 'Risk gate ✅' : `Risk gate ⛔ ${escapeHtml(risk.reasons.join('; '))}`}\n` +
         `⏰ ${gstTime()} GST`);
@@ -1138,6 +1141,15 @@ export class Engine {
       await this.telegram.send(this.futuresAuto ? await this.futuresAuto.control(action) : 'Futures auto unavailable.');
     } else if (text === '/fadeauto') {
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.status() : 'Fade execution unavailable.');
+    } else if (text === '/moverpaperstats') {
+      const s = this.moverPaper?.summary();
+      if (!s?.ready) await this.telegram.send(`🧪 <b>MOVER PAPER</b>\nUnavailable: ${escapeHtml(s?.error ?? 'simulator not initialized')}\nNo simulated entries are accepted until its event ledger is reachable.`);
+      else {
+        const line = (name, a) => `${name} · ${a.cohort}\nCash $${a.cash.toFixed(2)} · open PnL ${a.openPnl >= 0 ? '+' : ''}$${a.openPnl.toFixed(2)} · equity $${a.equity.toFixed(2)}\n` +
+          `Today ${a.today >= 0 ? '+' : ''}$${a.today.toFixed(2)} · ${a.open} open · ${a.closed} closed · ${a.wins}W/${a.losses}L · open risk $${a.riskOpen.toFixed(2)} · ${a.locked ? 'DAILY LOCK' : 'limit clear'}\n` +
+          (a.positions.length ? a.positions.map(p => `${p.symbol} entry ${p.entry} · mark ${p.mark} · stop ${p.stop} · target ${p.target}`).join('\n') : 'No open paper positions');
+        await this.telegram.send(`🧪 <b>MOVER PAPER — SIMULATION ONLY</b>\nTwo independent $100 ledgers · no Binance orders\nMax planned risk $${s.maxRiskUsd.toFixed(2)}/trade · daily realized loss stop $${s.dailyLossUsd.toFixed(2)} per cohort · no trade-count cap\nModeled fee ${s.feeBps} bps + slippage ${s.slippageBps} bps per side. Simulated results are not evidence of profitability.\n\n${line('📈 FUTURES TRENDING MOVER', s.accounts.FUTURES_TRENDING_MOVER)}\n\n${line('⚡ ALPHA FAST MOVER', s.accounts.ALPHA_FAST_MOVER)}`);
+      }
     } else if (text === '/fadebalance') {
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.balance() : 'Fade balance unavailable.');
     } else if (['/fadepause', '/faderesume', '/fadecloseall'].includes(text)) {
@@ -1314,4 +1326,3 @@ export class Engine {
     this.calendar?.stop();
   }
 }
-

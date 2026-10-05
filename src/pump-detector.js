@@ -49,6 +49,7 @@ export class FastMoverDetector {
     telegram,
     realtimeShock = null,
     btcBias = null,
+    moverPaper = null,
     isPaused = () => false,
     isEventGuarded = () => false,
     WebSocketImpl = WebSocket,
@@ -61,6 +62,7 @@ export class FastMoverDetector {
     this.telegram = telegram;
     this.realtimeShock = realtimeShock;
     this.btcBias = btcBias;
+    this.moverPaper = moverPaper;
     this.isPaused = isPaused;
     this.isEventGuarded = isEventGuarded;
     this.WebSocketImpl = WebSocketImpl;
@@ -207,6 +209,8 @@ export class FastMoverDetector {
     if (!symbol.endsWith('USDT') || symbol.includes('_')) return null; // USDT-M perpetuals only
     if (!(price > 0) || !Number.isFinite(quoteVolume24h) || !Number.isFinite(eventTime)) return null;
     this.lastMessageAt = this.now();
+    if (this.moverPaper) void this.moverPaper.mark('FUTURES_TRENDING_MOVER', symbol, price)
+      .catch(error => log(`Trending-mover paper mark failed: ${error.message}`));
     let buffer = this.buffers.get(symbol);
     if (!buffer) {
       buffer = [];
@@ -642,7 +646,11 @@ export class FastMoverDetector {
     if (spreadBps > this.cfg.trendingMaxSpreadBps) {
       return { ok: false, reason: `spread ${spreadBps.toFixed(1)} bps above ${this.cfg.trendingMaxSpreadBps}` };
     }
-    return { ok: true, buyRatio: flow.buyRatio, spreadBps };
+    const support = Math.min(...closed.slice(-3).map(c => Number(c.low)));
+    const entryPrice = bestAsk;
+    const stopPrice = Number.isFinite(support) && support > 0 && support < entryPrice
+      ? support * 0.999 : entryPrice * 0.985;
+    return { ok: true, buyRatio: flow.buyRatio, spreadBps, entryPrice, stopPrice };
   }
 
   trendingCooldownBucket(nowMs) {
@@ -657,7 +665,7 @@ export class FastMoverDetector {
       `Spread: ${confirmation.spreadBps.toFixed(1)} bps\n` +
       (trigger.crowding ?? '') +
       this.btcBiasLine() +
-      `⚠️ <b>Steady mover — not a burst; it can still reverse.</b> This is a live radar ping, not a gated entry — no database trade was opened.\n` +
+      `⚠️ <b>Steady mover — not a burst; it can still reverse.</b> Paper simulation only; no Binance order.\n` +
       `⏰ ${gstTime()} GST`;
   }
 
@@ -717,6 +725,16 @@ export class FastMoverDetector {
       log(`Trending-mover dedup skip ${trigger.symbol}: cooldown-bucket event already persisted; alert suppressed`);
       return;
     }
+    if (this.moverPaper) {
+      try {
+        const paper = await this.moverPaper.open({ strategy: 'FUTURES_TRENDING_MOVER',
+          eventKey: `trending-mover:${trigger.symbol}:${this.trendingCooldownBucket(nowMs)}`,
+          symbol: trigger.symbol, price: confirmation.entryPrice ?? trigger.price, stopPrice: confirmation.stopPrice,
+          details: { movePct: trigger.move.pct, window: trigger.move.window, volumeAccel: trigger.volume.accel,
+            spreadBps: confirmation.spreadBps, takerBuyRatio: confirmation.buyRatio } });
+        if (!paper.opened) log(`Trending-mover paper entry skipped ${trigger.symbol}: ${paper.reason}`);
+      } catch (error) { log(`Trending-mover paper entry failed ${trigger.symbol}: ${error.message}`); }
+    }
     this.trendingMetrics.trendingAlerts++;
     this.lastAlertAt = nowMs;
     trigger.crowding = await this.crowdingLine(trigger.symbol);
@@ -759,5 +777,4 @@ export class FastMoverDetector {
     this.connected = false;
   }
 }
-
 
