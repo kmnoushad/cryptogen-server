@@ -209,10 +209,10 @@ export class FadeSpikeSource {
     const reject=reason=>this.rejectCandidate(symbol,signal,reason);
     if (this.stopped) return reject('source stopped');
     if (this.isPaused()) return reject('entries paused');
-    if (!this.ready(symbol)) return reject('symbol/BTC market stream unavailable');
     if (!this.detector?.symbols.has(symbol)) return reject('symbol outside active universe');
     if (signal?.generation!==this.generation || signal?.model!=='spike-fade-ticks-v1') return reject('candidate generation/model mismatch');
     if (!Number.isFinite(signal.detectedAt) || now<signal.detectedAt || now-signal.detectedAt>10000) return reject('candidate expired (>10s)');
+    if (!this.ready(symbol)) return reject('symbol/BTC market stream unavailable');
     if (!btc) return reject('BTC tick context stale');
     if (btc.return30s>.001 || btc.return15m>0) return reject('BTC momentum gate');
     if (!book || now-book.at>1000) return reject('symbol book missing/stale');
