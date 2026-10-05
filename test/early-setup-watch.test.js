@@ -25,6 +25,10 @@ test('micro breakout watch precedes 15m breakout confirmation and ignores open b
   const input={symbol:'ETHUSDT',m1,m15,h1,btc15:m15,btc1h:h1,now};
   const watch=earlyFuturesWatch(input);assert.equal(watch.phase,'WATCH');assert.equal(watch.direction,'LONG');
   assert.equal(watch.executable,false);assert.equal(directionalSignal(input).allowed,false);
+  const neutralBtc15=rows(900000,121,()=>100);
+  assert.equal(earlyFuturesWatch({...input,btc15:neutralBtc15}).direction,'LONG');
+  const oppositeBtc15=rows(900000,121,i=>110-i*.05);
+  assert.equal(earlyFuturesWatch({...input,btc15:oppositeBtc15}),null);
   const live=[Math.floor(now/60000)*60000,96.2,100,90,99,200,Math.floor(now/60000)*60000+59999,10000,0,0,6000];
   assert.deepEqual(earlyFuturesWatch({...input,m1:[...m1,live]}),watch);
   assert.equal(earlyFuturesWatch({...input,now:now+120000}),null);

@@ -4,18 +4,27 @@ export class SpikeFadeDetector {
   constructor({ symbols, now = () => Date.now() }) {
     this.symbols = new Set(symbols); this.now = now; this.states = new Map();
   }
-  reset() { this.states.clear(); } // Required on disconnect/reconnect.
+  reset(symbols) {
+    if (!symbols) { this.states.clear(); return; }
+    for (const symbol of symbols) this.states.delete(symbol);
+  } // Reset only symbols whose market/book shard was interrupted.
   ingest(symbol, trade, context) {
     const now = this.now(), { a: id, T: time, m: sell } = trade;
     const price = Number(trade.p), qty = Number(trade.q);
-    const reject = reason => ({ allowed: false, executable: false, candidate: false, reason });
+    let s = this.states.get(symbol);
+    const reject = reason => {
+      if (s) s.lastReason = reason;
+      return { allowed: false, executable: false, candidate: false, reason };
+    };
     if (!this.symbols.has(symbol) || !Number.isSafeInteger(id) || !Number.isFinite(time)
       || typeof sell !== 'boolean' || !(price > 0 && qty > 0 && Number.isFinite(price * qty))
       || now - time > 2000 || time > now) return reject('Invalid or stale trade');
-    let s = this.states.get(symbol);
-    if (!s) { s = { ticks: [], id: -1, time: -1, watch: null, cooldown: 0, evaluated: -Infinity, lastReason: 'Warming up' }; this.states.set(symbol, s); }
+    if (!s) { s = { ticks: [], id: -1, time: -1, windowStart: time, watch: null, cooldown: 0, evaluated: -Infinity, lastReason: 'Warming up' }; this.states.set(symbol, s); }
     if (id <= s.id || time < s.time) return reject('Duplicate or out-of-order trade');
-    if (s.time >= 0 && time - s.time > 5000) { s.ticks = []; s.watch = null; }
+    // A trade lull breaks an in-progress spike/rejection pattern, but it does
+    // not erase the rolling volume baseline. This lets intermittently traded
+    // contracts warm up while the bounded 150s deque still ages old data out.
+    if (s.time >= 0 && time - s.time > 5000) { s.watch = null; s.windowStart = time; }
     s.id = id; s.time = time;
     // One-second flow buckets preserve all quote volume and aggressor counts,
     // without retaining millions of raw trades across the full universe.
@@ -31,12 +40,14 @@ export class SpikeFadeDetector {
     if (time < s.cooldown) return reject('Pattern cooldown');
     if (s.watch && time - s.watch.started > 45000) s.watch = null;
     if (!s.watch) {
-      const base = s.ticks.filter(t => time - t.time > 30000), burst = s.ticks.filter(t => time - t.time <= 30000);
+      const base = s.ticks.filter(t => time - t.time > 30000),
+        burst = s.ticks.filter(t => time - t.time <= 30000 && t.time >= s.windowStart);
       if (!base.length || time - s.ticks[0].firstTime < 140000) return reject('Warming up');
       const baseline = base.reduce((v, t) => v + t.quote, 0) / 120;
       const quote = burst.reduce((v, t) => v + t.quote, 0), gain = price / burst[0].price - 1;
       if (gain < .02 || quote < baseline * 30 * 3) return reject('No sudden spike');
       s.watch = { started: time, highAt: time, high: price, gain, quote };
+      s.lastReason = 'Spike detected; awaiting rejection';
       return { ...reject('Spike detected; awaiting rejection'), watch: true, symbol, ...s.watch };
     }
     const w = s.watch;
@@ -59,6 +70,7 @@ export class SpikeFadeDetector {
     if (!quality.allowed) return reject(quality.reason);
     if (1 - book.bid / w.high > .009) return reject('Executable quote already extended');
     s.watch = null; s.cooldown = time + 60000;
+    s.lastReason = 'Spike fade candidate';
     return { allowed: false, executable: false, candidate: true, model: 'spike-fade-ticks-v1',
       symbol, direction: 'SHORT', detectedAt: now, entry: book.bid, stop, resistance: w.high,
       spikeGain: w.gain, sellShare, costShare: quality.costShare, maxModeledLossUsd: 5 };

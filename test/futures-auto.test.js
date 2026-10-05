@@ -165,6 +165,10 @@ test('directional scanner requires distinct retest/reclaim; mirrors SHORT and ig
   assert.equal(directionalSignal({ ...input, m1: candleRows(60000, () => 98) }).allowed, false);
   assert.equal(directionalSignal({ ...input, now: now + 2 * 3600000 }).allowed, false);
   assert.equal(directionalSignal({ ...input, btc1h: mirror(h1) }).allowed, false);
+  const neutralBtc15 = candleRows(900000, () => 100);
+  assert.equal(directionalSignal({ ...input, btc15: neutralBtc15 }).direction, 'LONG');
+  const opposingBtc = directionalSignal({ ...input, btc15: mirror(m15) });
+  assert.equal(opposingBtc.allowed, false); assert.match(opposingBtc.reason, /BTC 15m trend SHORT opposes symbol LONG/);
   const forming = [...m1, [now, 100, 101, 99, 100, 1, now+59999, 100, 0, 0, 50]];
   assert.equal(closedSeries(forming, 60000, now).length, m1.length);
 });
