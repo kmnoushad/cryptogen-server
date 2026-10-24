@@ -103,7 +103,7 @@ export class FuturesAutoExecutor extends FadeExecutor {
       (this.cfg.momentumStrategy ? 'Quality: $5M daily volume; LONG age 14d / SHORT 3d; no fixed daily-gain ceiling\n' : 'Long quality: age/liquidity/activity + 24h move bounds; no scam guarantee\n') +
       'LONG + SHORT · isolated 2x · max $150 notional each\n' +
       'Entry quality: modeled costs ≤25% of stop risk · no chasing\n' +
-      (this.cfg.momentumStrategy ? 'New momentum trades: no fixed TP · native stop + 2x 5m ATR trail · BE after 1R · 4h hold\n' : 'Structure trades: target 1.5R · BE +0.5R · 4h hold\n') +
+      (this.cfg.momentumStrategy ? 'New momentum trades: structural native stop · 2x 5m ATR trail + BE activate after 1R net · no fixed TP · 4h hold\n' : 'Structure trades: target 1.5R · BE +0.5R · 4h hold\n') +
       'Aggregate risk ≤3% equity · margin ≤50% equity\nDaily 2% loss/giveback lock · three-loss cooldown 2h\n' +
       jobs.map(j => `${j.symbol} ${j.direction} · ${j.phase} · stop ${j.plan.stop} · ${j.policyVersion===MOMENTUM_VERSION?'volatility trail':'target '+j.plan.target}`).join('\n') +
       (b ? `\nWallet $${b.wallet.toFixed(2)} · Equity $${b.equity.toFixed(2)} · Available $${b.available.toFixed(2)}\nBalance updated: ${new Date(b.updatedAt).toISOString()}` : '\nBalance awaiting verified account read') +

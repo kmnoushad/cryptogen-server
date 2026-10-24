@@ -69,6 +69,28 @@ for(const direction of ['LONG','SHORT'])test(`${direction}: volatility trailing 
  const stop=volatilityStop(j,long?103:97,3,1);assert.ok(long?stop>=100.16:stop<=99.84);j.plan.stop=stop;
  assert.equal(volatilityStop(j,long?102.5:97.5,2,3),stop);
 });
+for(const direction of ['LONG','SHORT'])test(`${direction}: structural stop stays until 1R net; trail latch survives restart`,()=>{
+ const long=direction==='LONG';
+ let j={direction,filters:{tick:.01},plan:{entry:100,stop:long?98:102,breakEven:long?100.16:99.84,plannedLossUsd:2}};
+ const initial=j.plan.stop;
+ // Tiny ATR would previously tighten the stop immediately, even at a loss.
+ for(const net of [-.1,0,1,1.999999]){
+  assert.equal(volatilityStop(j,long?101:99,net,.1),initial);
+  assert.notEqual(j.momentumTrailArmed,true);
+ }
+ const armed=volatilityStop(j,long?103:97,2,1);assert.equal(j.momentumTrailArmed,true);
+ assert.ok(long?armed>=j.plan.breakEven:armed<=j.plan.breakEven);j.plan.stop=armed;
+ j=JSON.parse(JSON.stringify(j));
+ const next=volatilityStop(j,long?102.8:97.2,1.5,.5);
+ assert.ok(long?next>armed:next<armed,'trail remains enabled below 1R after arming');j.plan.stop=next;
+ assert.equal(volatilityStop(j,long?102.5:97.5,1,3),next,'ATR expansion never widens protection');
+});
+test('missing R inputs cannot arm trailing or widen a previously tightened stop',()=>{
+ const j={direction:'LONG',filters:{tick:.01},plan:{entry:100,stop:100.2,breakEven:100.16,plannedLossUsd:2}};
+ assert.equal(volatilityStop(j,100.5,NaN,.1),100.2);
+ assert.equal(volatilityStop(j,100.5,.1,.1),100.2,'migrated stop remains intact before latch arms');
+ assert.notEqual(j.momentumTrailArmed,true);
+});
 test('live worker does not scan before :03; snapshots and decisions captured without live orders',async()=>{
  let now=clock-2000;const calls=[],x=momentumFixture(clock);
  const executor={scope:'live:directional',cfg:{enabled:true,momentumStrategy:true},row:{state:{jobs:[],paused:false}},lastError:null,
