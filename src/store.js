@@ -12,6 +12,7 @@ export class Store {
   constructor(cfg) {
     this.base = `${cfg.supabaseUrl}/rest/v1`;
     this.alphaEnabled = cfg.enableAlphaSignals;
+    this.executionReads = cfg.enableFadeExecution === true;
     this.headers = {
       apikey: cfg.supabaseKey,
       authorization: `Bearer ${cfg.supabaseKey}`,
@@ -25,7 +26,7 @@ export class Store {
   }
 
   get(table, entries = []) {
-    return requestJson(this.url(table, entries), { headers: this.headers, timeoutMs: 10_000 });
+    return requestJson(this.url(table, entries), { headers: this.headers, timeoutMs: this.executionReads ? 7000 : 10_000, retries: this.executionReads ? 0 : 2 });
   }
 
   async health() {

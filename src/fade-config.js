@@ -13,7 +13,7 @@ export function loadFadeConfig(env = process.env) {
   const fadeEntrySource = String(env.FADE_ENTRY_SOURCE ?? 'legacy').trim();
   if (!['legacy', 'spike'].includes(fadeEntrySource)) throw Error('FADE_ENTRY_SOURCE must be legacy or spike');
   if (!(fadeStartBalanceUsdt > 0) || !Number.isFinite(fadeStartBalanceUsdt)) throw Error('FADE_START_BALANCE_USDT must be a positive number');
-  return {
+  return { structureStrategy: true,
     fadeEnvironment, enableFadeExecution: enabled === 'true',
     fadeEntrySource,
     fadeStartBalanceUsdt,

@@ -36,15 +36,17 @@ test('close scheduler has no permanent startup offset, replay, or duplicate star
   assert.equal(nextClosedMinuteDelay(60000), 1500);
 });
 test('minute keyed Futures scans remove drift while protection runs every tick', async () => {
-  let now = 59000, reads = 0, protections = 0;
+  const base=Date.parse('2026-10-05T00:00:00Z'); let now = base+59000, reads = 0, protections = 0;
+  const symbols=Array.from({length:9},(_,i)=>({symbol:`C${i}USDT`,baseAsset:`C${i}`,status:'TRADING',contractType:'PERPETUAL',quoteAsset:'USDT',marginAsset:'USDT',onboardDate:base-30*86400000}));
+  const tickers=symbols.map(s=>({symbol:s.symbol,quoteVolume:'6000000',count:'2000',lastPrice:'1',priceChangePercent:'0'}));
   const ex = { scope: 'live:directional', cfg: { enabled: true }, row: { state: { paused: false, jobs: [] } },
     scanReasons: {}, lastError: null, run: async () => { protections++; },
-    exchange: { candles: async () => { reads++; return []; } }, status: () => '', failed: async e => { throw e; } };
+    exchange: { info:async()=>({symbols}), ticker24h:async()=>tickers, candles: async () => { reads++; return []; } }, status: () => '', failed: async e => { throw e; } };
   const store = { control: async () => ({ paused: false }), heartbeat: async () => {} };
   const worker = new FuturesAutoWorkerLoop({ executor: ex, store, now: () => now });
   await worker.tick(); const initial = reads;
   now = 60000; await worker.tick(); assert.equal(reads, initial);
-  now = 62000; await worker.tick(); assert.equal(reads, initial * 2);
-  now = 70000; await worker.tick(); assert.equal(reads, initial * 2);
+  now = base+122000; await worker.tick(); assert.equal(reads, initial + symbols.length);
+  now = base+130000; await worker.tick(); assert.equal(reads, initial + symbols.length);
   assert.equal(protections, 4);
 });

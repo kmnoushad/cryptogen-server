@@ -1,3 +1,4 @@
+import { MomentumLiveWorker } from './momentum-live-worker.js';
 import dns from 'node:dns';
 import { loadFuturesAutoConfig } from './futures-auto-config.js';
 import { FuturesAutoExchange, FuturesAutoExecutor } from './futures-auto-executor.js';
@@ -9,13 +10,15 @@ dns.setDefaultResultOrder('ipv4first');
 const cfg = loadFuturesAutoConfig(), store = new FuturesAutoStore(cfg);
 const executor = new FuturesAutoExecutor({ cfg, store, telegram: new Telegram(cfg),
   exchange: new FuturesAutoExchange({ key: cfg.binanceApiKey, secret: cfg.binanceApiSecret, environment: cfg.environment }) });
-const worker = new FuturesAutoWorkerLoop({ executor, store });
+const worker = new (cfg.momentumStrategy ? MomentumLiveWorker : FuturesAutoWorkerLoop)({ executor, store });
 let lastPoll = 0;
 const timer = setInterval(() => {
-  const delay = executor.row?.state.jobs.some(j => j.phase !== 'CLOSED') ? 5000 : 10000;
+  const minute = Math.floor(Date.now()/60000);
+  const due = Date.now()%60000>=3000 && minute!==worker.lastScanMinute;
+  const delay = due ? 1000 : 5000;
   if (Date.now() - lastPoll < delay) return;
   lastPoll = Date.now(); void worker.tick();
-}, 5000);
+}, 1000);
 const watchdog = setInterval(() => {
   if (worker.busy && Date.now() - worker.lastProgress > 120000) { console.error('Futures cycle stalled; exiting for systemd recovery'); process.exit(1); }
 }, 10000);

@@ -10,7 +10,7 @@ export function loadFuturesAutoConfig(env = process.env) {
   if (required('FUTURES_ACCOUNT_CONFIRMATION') !== 'SEPARATE_FUTURES_SUBACCOUNT') throw Error('Dedicated Futures subaccount confirmation required');
   const ack = String(env.FUTURES_AUTO_LIVE_ACKNOWLEDGEMENT ?? '').trim();
   if (environment === 'live' && ack !== 'I_ACCEPT_LIVE_FUTURES_ORDERS') throw Error('Live Futures acknowledgement missing');
-  return { environment, enabled: enabled === 'true', binanceApiKey: key,
+  return { momentumStrategy: true, structureStrategy: true, environment, enabled: enabled === 'true', binanceApiKey: key,
     binanceApiSecret: required('FUTURES_BINANCE_API_SECRET'),
     supabaseUrl: required('SUPABASE_URL').replace(/\/+$/, ''), supabaseKey: required('SUPABASE_SERVICE_ROLE_KEY'),
     botToken: required('BOT_TOKEN'), ownerChatId: required('OWNER_CHAT_ID'),

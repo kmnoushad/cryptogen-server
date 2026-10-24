@@ -53,25 +53,15 @@ test('profitable day locks fresh entries after gains are given back net of fees,
   assert.match(fadeRiskDecision({ rows: [transfer, ...rows], jobs: [], equity: 150, now }).reason, /profit giveback/);
 });
 
-test('two verified losing closes block four hours; a verified winner breaks streak', () => {
-  const a = job('AAAUSDT', now - 1200000, now - 1000000);
-  const b = job('BBBUSDT', now - 600000, now - 400000);
-  const rows = [row('REALIZED_PNL', -0.5, a.closedAt, a.symbol), row('COMMISSION', -0.1, a.createdAt, a.symbol),
-    row('REALIZED_PNL', -0.6, b.closedAt, b.symbol), row('COMMISSION', -0.1, b.createdAt, b.symbol)];
-  assert.match(fadeRiskDecision({ rows, jobs: [a, b], equity: 100, now }).reason, /Two consecutive losses/);
-  assert.equal(fadeRiskDecision({ rows: [...rows.slice(0, 2), row('REALIZED_PNL', 1, b.closedAt, b.symbol), rows.at(-1)],
-    jobs: [a, b], equity: 100, now }).allowed, true);
-  assert.equal(fadeRiskDecision({ rows: [row('COMMISSION', -0.1, b.createdAt, b.symbol)],
-    jobs: [b], equity: 100, now }).allowed, false);
-  assert.equal(fadeRiskDecision({ rows: [], jobs: [a, b], equity: 100, now: now + 5 * 3600000 }).allowed, true);
-  const earlierLoss = job('CCCUSDT', now - 6 * 3600000, now - 5 * 3600000);
-  const recentLoss = job('DDDUSDT', now - 600000, now - 400000);
-  const spreadRows = [row('REALIZED_PNL', -0.5, earlierLoss.closedAt, earlierLoss.symbol),
-    row('COMMISSION', -0.1, earlierLoss.createdAt, earlierLoss.symbol),
-    row('REALIZED_PNL', -0.5, recentLoss.closedAt, recentLoss.symbol),
-    row('COMMISSION', -0.1, recentLoss.createdAt, recentLoss.symbol)];
-  assert.match(fadeRiskDecision({ rows: spreadRows, jobs: [earlierLoss, recentLoss], equity: 100, now }).reason,
-    /Two consecutive losses/);
+test('three verified losing closes block two hours; a verified winner breaks streak', () => {
+  const jobs = ['AAAUSDT','BBBUSDT','CCCUSDT'].map((symbol,i)=>job(symbol,now-900000+i*200000,now-800000+i*200000));
+  const rows=jobs.flatMap(j=>[row('REALIZED_PNL',-.3,j.closedAt,j.symbol),row('COMMISSION',-.05,j.createdAt,j.symbol)]);
+  assert.equal(fadeRiskDecision({rows:rows.slice(0,4),jobs:jobs.slice(0,2),equity:100,now}).allowed,true);
+  assert.match(fadeRiskDecision({rows,jobs,equity:100,now}).reason,/Three consecutive losses/);
+  assert.equal(fadeRiskDecision({rows,jobs,equity:100,now:jobs[2].closedAt+2*3600000+1}).allowed,true);
+  const winning=[...rows];winning[4]=row('REALIZED_PNL',1,jobs[2].closedAt,jobs[2].symbol);
+  assert.equal(fadeRiskDecision({rows:winning,jobs,equity:100,now}).allowed,true);
+  assert.equal(fadeRiskDecision({rows:[rows[5]],jobs:[jobs[2]],equity:100,now}).allowed,false);
 });
 
 test('exchange income is paged and a truncated history fails closed', async () => {

@@ -15,7 +15,9 @@ try {
     if(source.ready() && latest && Date.now()-latest.time<2000
       && [...source.books.values()].some(b=>Date.now()-b.at<1000)) {received=true;break;}
   }
-  if(!received) throw Error('Fresh BTC trade and symbol book streams not received');
+  console.log(source.health());
+  console.log('Stream freshness:',JSON.stringify(source.feedStats));
+  if(!received) throw Error('Fresh BTC trade and probe book streams not received');
   console.log(`Spike read-only smoke passed: ${source.detector.symbols.size} eligible symbols; fresh BTC trades and bid/ask received. No orders placed.`);
 } catch(error) {
   console.error(`Spike read-only smoke failed: ${error.message}`);process.exitCode=1;

@@ -37,11 +37,12 @@ export class FadeWorkerLoop {
     if (this.busy) { if (wake) this.rerun = true; return; }
     this.busy = true; this.tickStartedAt = this.now();
     let error = null;
+    const stage = async (name, action) => { this.stage = name; this.stageStartedAt = this.now(); return await action(); };
     try {
       // Legacy signals keep protection-first ordering; live tick candidates have a short expiry.
       if (!this.signalSource) await this.executor.run();
       if (this.executor.enabled()) {
-        this.control = await this.store.fadeControl(this.executor.scope);
+        this.control = await stage('control read', () => this.store.fadeControl(this.executor.scope));
         if (this.control.close_requested) await this.executor.control('close');
         else if (this.executor.row && this.executor.row.state.paused !== this.control.paused) {
           await this.executor.control(this.control.paused ? 'pause' : 'resume');
@@ -60,6 +61,7 @@ export class FadeWorkerLoop {
         if (this.signalSource) {
           // onSignal performs lease/account reconciliation and protection before any order submission.
           const candidates = this.signalSource.drain();
+          let attempted = false;
           for (const s of candidates) {
             if (this.stopped) break;
             if (this.control.paused || this.control.close_requested) {
@@ -72,7 +74,13 @@ export class FadeWorkerLoop {
               continue;
             }
             if (!this.signalSource.authorize(s.symbol, s)) continue;
-            await this.executor.onSignal(s.symbol, s);
+            if (attempted) {
+              this.signalSource.rejectCandidate?.(s.symbol, s, 'one entry attempt per cycle; await a fresh signal');
+              continue;
+            }
+            attempted = true;
+            await stage('entry ' + s.symbol, () => this.executor.onSignal(s.symbol, s));
+            this.signalSource.recordExecution?.(s.symbol, s, this.executor.lastEntryAttempt);
           }
         }
       }
@@ -80,15 +88,15 @@ export class FadeWorkerLoop {
     finally {
       // Always run the ordinary protection/reconciliation pass, including on control or signal errors.
       if (this.signalSource && this.executor.enabled() && !this.stopped) {
-        try { await this.executor.run(); }
+        try { await stage('protection/reconciliation', () => this.executor.run()); this.executor.preparation?.warm(); }
         catch (e) { error ??= e; }
       }
       try {
-        await this.store.fadeHeartbeat(this.executor.scope,
-          this.executor.status().replace(/<[^>]*>/g, '') + (error ? '\nSignal/control channel unavailable; new entries blocked.' : ''));
+        await stage('heartbeat', () => this.store.fadeHeartbeat(this.executor.scope,
+          this.executor.status().replace(/<[^>]*>/g, '') + (error ? '\nSignal/control channel unavailable; new entries blocked.' : '')));
       } catch { /* An absent heartbeat is surfaced by Railway as stale. */ }
       this.lastCompletedAt = this.now(); this.tickStartedAt = null;
-      this.busy = false;
+      this.busy = false; this.stage = null;
       if (this.rerun && !this.stopped) {
         this.rerun = false;
         setImmediate(() => { void this.tick(); });
