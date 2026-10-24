@@ -1,4 +1,5 @@
 // Tick-based research detector. Candidates cannot submit orders.
+import { FADE_STOP_BUFFER } from './fade-orders.js';
 import { entryQuality } from './entry-quality.js';
 export class SpikeFadeDetector {
   constructor({ symbols, now = () => Date.now() }) {
@@ -65,7 +66,7 @@ export class SpikeFadeDetector {
     if (!book || !Number.isFinite(book.at) || now - book.at > 1000 || book.at > now
       || ![book.bid, book.ask].every(Number.isFinite) || !(book.bid > 0 && book.ask >= book.bid)
       || book.ask / book.bid - 1 > .001) return reject('Book stale or spread too wide');
-    const stop = w.high * 1.001, quality = entryQuality({ direction: 'SHORT', entry: book.bid,
+    const stop = w.high * (1 + FADE_STOP_BUFFER), quality = entryQuality({ direction: 'SHORT', entry: book.bid,
       stop, reference: price, fee: .0005 });
     if (!quality.allowed) return reject(quality.reason);
     if (1 - book.bid / w.high > .009) return reject('Executable quote already extended');

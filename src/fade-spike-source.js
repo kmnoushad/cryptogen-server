@@ -6,12 +6,14 @@ export const spikeContracts = info => [...new Set((info.symbols ?? []).filter(s 
   && (!s.underlyingType || s.underlyingType === 'COIN') && s.symbol !== 'BTCUSDT'
   && /^[A-Z0-9]+USDT$/.test(s.symbol)).map(s => s.symbol))].sort();
 export function spikeSubscriptions(symbols) {
-  const streams = [];
-  for (let i=0;i<symbols.length;i+=100) {
-    const group=symbols.slice(i,i+100),index=i/100;
-    streams.push({key:`market:${index}`,route:'market',names:[...group,...(i===0?['BTCUSDT']:[])].map(s=>s.toLowerCase()+'@aggTrade')});
-    streams.push({key:`public:${index}`,route:'public',names:group.map(s=>s.toLowerCase()+'@bookTicker')});
+  // BTC gets an independent low-traffic connection. Book feeds are opened only
+  // for WATCH symbols, plus one probe to verify the public route while idle.
+  const streams = [{key:'market:btc',route:'market',names:['btcusdt@aggTrade']}];
+  for (let i=0;i<symbols.length;i+=50) {
+    streams.push({key:`market:${i/50}`,route:'market',names:symbols.slice(i,i+50).map(s=>s.toLowerCase()+'@aggTrade')});
   }
+  const probe = symbols.includes('ETHUSDT') ? 'ETHUSDT' : symbols[0];
+  if (probe) streams.push({key:'public:probe',route:'public',names:[probe.toLowerCase()+'@bookTicker']});
   return streams;
 }
 
@@ -27,13 +29,16 @@ export class FadeSpikeSource {
     this.detector = null; this.lastReason = 'Starting'; this.lastError = null;
     this.watches = 0; this.candidates = 0; this.retries = 0; this.retry = null;
     this.lastCandidate = null; this.candidateBlocks = 0;
-    this.requiredConnections = 2;
+    this.requiredConnections = 2; this.watchBookTimers = new Map();
+    this.feedStats = { btc: { received:0, stale:0, future:0 }, trade: { received:0, stale:0, future:0 }, book: { received:0, stale:0, future:0 } };
   }
   ready(symbol) {
     if (symbol) {
-      const keys = this.symbolStreams.get(symbol);
-      return Boolean(keys && this.connected.has(keys.market) && this.connected.has(keys.book)
-        && this.connected.has('market:0') && this.btcContext());
+      const keys = this.symbolStreams.get(symbol), book = this.books.get(symbol), last = this.latest.get(symbol);
+      const now = this.now();
+      return Boolean(book && now-book.at >= 0 && now-book.at <= 1000
+        && last && now-last.at >= 0 && now-last.at <= 2000 && keys && this.connected.has(keys.market) && this.connected.has(keys.book)
+        && this.connected.has('market:btc') && this.btcContext());
     }
     return this.connected.size === this.requiredConnections;
   }
@@ -42,9 +47,13 @@ export class FadeSpikeSource {
       ? ` · last ${this.lastCandidate.symbol} ${this.lastCandidate.outcome}${this.lastCandidate.reason ? `: ${this.lastCandidate.reason}` : ''}` : '';
     const readySymbols = this.detector ? [...this.detector.symbols].filter(s => this.ready(s)).length : 0;
     const streamState = this.ready() ? 'connected' : readySymbols ? 'partial' : 'unavailable';
-    return `spike stream ${streamState} (${this.connected.size}/${this.requiredConnections}) · ${this.detector?.symbols.size ?? 0} symbols · executable feeds ${readySymbols} · WATCH ${this.watches} · candidates ${this.candidates} · blocked ${this.candidateBlocks}${candidate} · ${this.lastError ?? this.lastReason}`;
+    const tradeFeeds = [...this.symbolStreams.values()].filter(p => this.connected.has(p.market)).length;
+    const btcAge = this.btc.at(-1) ? this.now()-this.btc.at(-1).time : null;
+    const btc = this.feedStats.btc;
+    return `spike stream ${streamState} (${this.connected.size}/${this.requiredConnections}) · ${this.detector?.symbols.size ?? 0} symbols · trade feeds ${tradeFeeds} · quote-ready symbols ${readySymbols} · BTC age ${btcAge ?? 'unknown'}ms/context ${this.btcContext() ? 'ready' : 'not ready'} · BTC received/stale ${btc.received}/${btc.stale} · WATCH ${this.watches} · candidates ${this.candidates} · blocked ${this.candidateBlocks}${candidate} · ${this.lastError ?? this.lastReason}`;
   }
   clear() {
+    for (const timer of this.watchBookTimers.values()) this.cancel(timer); this.watchBookTimers.clear();
     this.generation++; this.detector?.reset(); this.books.clear(); this.btc = [];
     this.pending = []; this.latest.clear(); this.connected.clear();
   }
@@ -89,7 +98,7 @@ export class FadeSpikeSource {
     if (this.stopped || generation !== this.generation) return;
     const { key, route, names } = stream;
     try {
-      const socket = new this.WebSocketImpl(`wss://${host}/${route}/stream?streams=${names.join('/')}`);
+      const socket = new this.WebSocketImpl(`wss://${host}/${route}/stream?streams=${names.join('/')}`, { perMessageDeflate: false });
       this.sockets.set(key, socket);
       socket.on('open', () => {
         if (generation !== this.generation || this.stopped || this.sockets.get(key) !== socket) return;
@@ -150,8 +159,8 @@ export class FadeSpikeSource {
     this.retry.unref?.();
   }
   checkLiveness() {
-    if (!this.stopped && this.connected.has('market:0') && this.now() - (this.btc.at(-1)?.time ?? 0) > 30000) {
-      this.lastError = 'BTC stream stale; rewarming'; this.reconnectStream('market:0', this.generation);
+    if (!this.stopped && this.connected.has('market:btc') && this.now() - (this.btc.at(-1)?.time ?? 0) > 30000) {
+      this.lastError = 'BTC stream stale; rewarming'; this.reconnectStream('market:btc', this.generation);
     }
   }
   btcContext() {
@@ -171,6 +180,13 @@ export class FadeSpikeSource {
     if (!data || this.stopped || !this.detector) return;
     const now = this.now();
     const pair = this.symbolStreams.get(data.s);
+    if (['aggTrade','bookTicker'].includes(data.e)) {
+      const type = data.s === 'BTCUSDT' && data.e === 'aggTrade' ? 'btc' : data.e === 'bookTicker' ? 'book' : 'trade';
+      const stats = this.feedStats[type], age = now-Number(data.T ?? data.E);
+      stats.received++; stats.lastAgeMs = age;
+      if (age < 0) stats.future++;
+      if (age > (type === 'book' ? 1000 : 2000)) stats.stale++;
+    }
     if (data.e === 'bookTicker' && this.detector.symbols.has(data.s)
       && (!streamKey || !pair || streamKey === pair.book)) {
       const at = Number(data.T ?? data.E), bid = Number(data.b), ask = Number(data.a);
@@ -178,7 +194,7 @@ export class FadeSpikeSource {
       return;
     }
     if (data.e !== 'aggTrade') return;
-    if (data.s === 'BTCUSDT' && (!streamKey || streamKey === 'market:0')) {
+    if (data.s === 'BTCUSDT' && (!streamKey || streamKey === 'market:btc')) {
       const time=Number(data.T),price=Number(data.p);
       if (!(time<=now && now-time<=2000 && price>0) || time <= (this.btc.at(-1)?.time ?? -Infinity)) return;
       if (Math.floor(time/1000) !== Math.floor((this.btc.at(-1)?.time ?? 0)/1000)) this.btc.push({time,price});
@@ -187,20 +203,50 @@ export class FadeSpikeSource {
     }
     if (!this.detector.symbols.has(data.s) || !this.connected.has(pair?.market ?? 'market:0')) return;
     if (this.isPaused()) { this.detector.reset(); this.pending=[]; this.latest.clear(); this.lastReason='Paused'; return; }
+    const watchId = this.detector.states.get(data.s)?.watch?.started;
     const result=this.detector.ingest(data.s,data,{btc:this.btcContext(),book:this.books.get(data.s)});
+    if (watchId != null && /BTC context|BTC supports|Book stale|Executable quote|Spike already faded|Modeled fees/.test(result.reason ?? ''))
+      this.onGate?.('detector', result.reason, data.s, { id: watchId });
     this.lastReason=result.reason ?? 'Spike rejection candidate';
-    if (result.watch) this.watches++;
+    if (result.watch) { this.watches++; this.ensureWatchBook(data.s); this.onWatch?.(data.s); }
     this.latest.set(data.s,{at:Number(data.T),price:Number(data.p)});
     if (!result.candidate) return;
     const signal={...result, price:result.entry, peakTime:result.detectedAt-1,
       barCloseTime:result.detectedAt, generation:this.generation};
     this.candidates++;
     this.lastCandidate={symbol:data.s, detectedAt:now, outcome:'queued', reason:null};
+    for (const dropped of this.pending) this.onGate?.('candidate drop', 'Replaced by newer candidate', dropped.symbol, { id: dropped.detectedAt });
+    this.onGate?.('candidate', 'Produced', data.s, { id: signal.detectedAt, outcome: 'info' });
     this.pending=[signal]; // latest only; never build an execution backlog
     this.onCandidate?.();
   }
+  ensureWatchBook(symbol) {
+    const pair = this.symbolStreams.get(symbol);
+    if (!pair || this.stopped || pair.book === 'public:probe') return;
+    const key = `public:watch:${symbol}`;
+    if (this.streams.has(key)) return;
+    if (this.watchBookTimers.size >= 16) { this.lastReason = 'WATCH book capacity reached; no entry without fresh book'; return; }
+    const stream = {key,route:'public',names:[symbol.toLowerCase()+'@bookTicker']};
+    pair.book = key; this.streams.set(key,stream); this.requiredConnections++;
+    const host = this.environment === 'live' ? 'fstream.binance.com' : 'fstream.binancefuture.com';
+    this.connectStream(stream,host,this.generation);
+    const generation=this.generation;
+    const timer=this.schedule(() => {
+      if (generation !== this.generation) return;
+      this.watchBookTimers.delete(symbol);
+      this.streams.delete(key); this.connected.delete(key); this.requiredConnections--;
+      this.cancel(this.retryTimers.get(key)); this.retryTimers.delete(key);
+      this.cancel(this.stableTimers.get(key)); this.stableTimers.delete(key);
+      const socket=this.sockets.get(key); this.sockets.delete(key);
+      if (pair.book === key) delete pair.book;
+      this.books.delete(symbol);
+      socket?.terminate();
+    },60000);
+    timer.unref?.(); this.watchBookTimers.set(symbol,timer);
+  }
   rejectCandidate(symbol, signal, reason) {
     this.candidateBlocks++;
+    this.onGate?.('authorization', reason, symbol, { id: signal?.detectedAt });
     this.lastCandidate={symbol, detectedAt:signal?.detectedAt ?? null, outcome:'blocked', reason};
     return false;
   }
@@ -223,6 +269,12 @@ export class FadeSpikeSource {
     if (1-book.bid/signal.resistance>.009) return reject('entry is >0.9% below failed high');
     this.lastCandidate={symbol,detectedAt:signal.detectedAt,outcome:'authorized',reason:null};
     return true;
+  }
+  recordExecution(symbol, signal, result) {
+    // A newer candidate may have arrived during the exchange checks. Preserve it.
+    if (this.lastCandidate?.symbol !== symbol || this.lastCandidate.detectedAt !== signal.detectedAt || this.lastCandidate.outcome === 'blocked') return;
+    this.lastCandidate = { symbol, detectedAt: signal.detectedAt, outcome: 'execution checked',
+      reason: result?.reason ?? 'Outcome unavailable; inspect worker status' };
   }
   drain() { const result=this.pending; this.pending=[]; return result; }
 }

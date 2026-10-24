@@ -1,3 +1,4 @@
+import { requestDeadline } from './request-deadline.js';
 import { sleep } from './util.js';
 
 export class HttpError extends Error {
@@ -22,14 +23,14 @@ export const requestJson = async (url, {
   let lastError;
   const retryableMethod = method === 'GET' || method === 'HEAD';
   for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
+      return await requestDeadline(async signal => {
       const response = await fetch(url, {
         method,
         headers: { 'accept': 'application/json', 'user-agent': 'Nexio-v6/6.8', ...headers },
         body,
-        signal: controller.signal,
+        signal,
       });
       const text = await response.text();
       if (!response.ok) {
@@ -43,13 +44,12 @@ export const requestJson = async (url, {
       } catch {
         throw new HttpError(`Invalid JSON from ${new URL(url).host}`, { status: response.status, body: text.slice(0, 500) });
       }
+      }, timeoutMs);
     } catch (error) {
       lastError = error;
-      const retryableStatus = [0, 408, 418, 425, 429, 500, 502, 503, 504].includes(error?.status ?? 0);
+      const retryableStatus = [0, 408, 425, 500, 502, 503, 504].includes(error?.status ?? 0);
       if (!retryableMethod || !retryableStatus || attempt >= retries) throw error;
       await sleep(retryDelay(attempt, error));
-    } finally {
-      clearTimeout(timer);
     }
   }
   throw lastError;

@@ -10,12 +10,12 @@ const configuredWeeklyPct = () => {
 export const weeklyLockSummary = (pct = configuredWeeklyPct()) =>
   (pct > 0 ? 'rolling 7d net loss lock (-$10 or ' + pct + '%)' : '7d PnL information only');
 
-export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, cooldownMs = 4 * 3600000,
+export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, cooldownMs = 2 * 3600000,
   weeklyLockPct = configuredWeeklyPct() }) {
-  const blocked = reason => ({ allowed: false, reason });
-  if (!(equity > 0) || !Array.isArray(rows) || !Array.isArray(jobs)) return blocked('Risk data unavailable');
-  const dayStart = gstDayStart(now);
   let dailyNet = 0, dailyPeak = 0;
+  const dayStart = gstDayStart(now);
+  const blocked = (reason, timing = {}) => ({ allowed: false, reason, checkedAt: now, dailyNet, dailyPeak, ...timing });
+  if (!(equity > 0) || !Array.isArray(rows) || !Array.isArray(jobs)) return blocked('Risk data unavailable');
   const byTime = new Map();
   for (const row of rows) {
     if (!KINDS.has(row.incomeType)) continue;
@@ -29,7 +29,7 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
     dailyNet += amount;
     dailyPeak = Math.max(dailyPeak, dailyNet);
   }
-  if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached');
+  if (dailyNet <= -equity * dayLossPct) return blocked('Daily net loss limit reached', { resetAt: dayStart + 86400000 });
   // v6.9.37: restored rolling seven-day net loss lock (removed in v6.9.26).
   // Entry-only; open positions keep native protection. Rolls off automatically.
   let weeklyNet = 0;
@@ -42,13 +42,13 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
   // meaningful gains. This does not liquidate open positions or guarantee PnL.
   if (dailyPeak >= Math.max(3, equity * 0.02)
     && dailyPeak - dailyNet >= Math.max(2, equity * 0.01)) {
-    return blocked('Daily realized profit giveback limit reached');
+    return blocked('Daily realized profit giveback limit reached', { resetAt: dayStart + 86400000 });
   }
   // Keep a seven-day read for verified trade outcomes; the seven-day net is
-  // informational only. Entry lockouts are bounded to the GST day or four
-  // hours after two verified losses, so old losses cannot veto a later regime.
+  // informational only. Entry lockouts are bounded to the GST day or two
+  // hours after three verified losses, so old losses cannot veto a later regime.
   const lastClosed = jobs.filter(j => j.phase === 'CLOSED' && Number(j.filledQty) > 0)
-    .sort((a, b) => b.closedAt - a.closedAt).slice(0, 2);
+    .sort((a, b) => b.closedAt - a.closedAt).slice(0, 3);
   if (lastClosed.some(j => !Number.isFinite(j.closedAt))) return blocked('Closed-trade accounting unavailable');
   const recent = now - lastClosed[0]?.closedAt <= cooldownMs
     ? lastClosed.filter(j => Number.isFinite(j.closedAt) && now - j.closedAt <= 7 * 86400000) : [];
@@ -63,10 +63,10 @@ export function fadeRiskDecision({ rows, jobs, equity, now, dayLossPct = 0.02, c
     }
     outcomes.push(matching.reduce((sum, r) => sum + Number(r.income), 0));
   }
-  if (outcomes.length === 2 && outcomes.every(n => n < 0) && now - recent[0].closedAt < cooldownMs) {
-    return blocked('Two consecutive losses; four-hour cooldown');
+  if (outcomes.length === 3 && outcomes.every(n => n < 0) && now - recent[0].closedAt < cooldownMs) {
+    return blocked('Three consecutive losses; two-hour cooldown', { cooldownUntil: recent[0].closedAt + cooldownMs });
   }
-  return { allowed: true, reason: 'Daily limits and loss cooldown clear', dailyNet, dailyPeak };
+  return { allowed: true, reason: 'Daily limits and loss cooldown clear', checkedAt: now, dailyNet, dailyPeak };
 }
 
 export async function readFadeIncome(exchange, startTime, now, maxPages = 5) {
@@ -83,9 +83,9 @@ export async function readFadeIncome(exchange, startTime, now, maxPages = 5) {
 
 export async function readFadeRisk(exchange, jobs, equity, now) {
   const lastClosed = jobs.filter(j => j.phase === 'CLOSED' && Number(j.filledQty) > 0)
-    .sort((a, b) => b.closedAt - a.closedAt).slice(0, 2);
+    .sort((a, b) => b.closedAt - a.closedAt).slice(0, 3);
   if (lastClosed.some(j => !Number.isFinite(j.closedAt))) return { allowed: false, reason: 'Closed-trade accounting unavailable' };
-  const recent = now - lastClosed[0]?.closedAt <= 4 * 3600000
+  const recent = now - lastClosed[0]?.closedAt <= 2 * 3600000
     ? lastClosed.filter(j => Number.isFinite(j.closedAt) && now - j.closedAt <= 7 * 86400000) : [];
   const startTime = Math.min(now - 7 * 86400000, ...recent.map(j => j.createdAt));
   if (!Number.isFinite(startTime) || startTime < now - 7 * 86400000) return { allowed: false, reason: 'Risk history older than seven days' };

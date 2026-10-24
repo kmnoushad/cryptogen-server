@@ -126,3 +126,13 @@ test('Railway ignores execution credentials/settings; worker validates its own m
   const worker = readFileSync(new URL('../src/fade-worker.js', import.meta.url), 'utf8');
   assert.doesNotMatch(worker, /pollLoop|PumpFadeRadar|new Engine/);
 });
+
+test('spike bursts permit only one entry attempt before the protection pass', async () => {
+  const h = harness(); h.store.control.paused = false; const blocked = [];
+  const queue = ['AAAUSDT', 'BBBUSDT', 'CCCUSDT'].map(symbol => ({ symbol, detectedAt: now }));
+  h.worker.signalSource = { drain: () => queue.splice(0), authorize: () => true,
+    rejectCandidate: (symbol, signal, reason) => blocked.push({symbol, reason}) };
+  await h.worker.tick(); assert.deepEqual(h.calls, ['AAAUSDT', 'monitor']);
+  assert.equal(blocked.length, 2); assert.match(blocked[0].reason, /one entry attempt/);
+  assert.equal(h.worker.stage, null);
+});
