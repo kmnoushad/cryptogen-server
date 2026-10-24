@@ -84,9 +84,14 @@ export function volatilityStop(job,price,net,atr5){
  const long=job.direction==='LONG',p=job.plan,tick=job.filters.tick;
  job.peakPrice=long?Math.max(job.peakPrice??p.entry,price):Math.min(job.peakPrice??p.entry,price);
  if(!(atr5>0&&Number.isFinite(atr5)))return p.stop;
+ // Retain the structural stop until a full modeled net R is observed. The
+ // durable latch survives pullbacks/restarts; existing stops never widen.
+ if(!Number.isFinite(net)||!Number.isFinite(p.plannedLossUsd)||!(p.plannedLossUsd>0))return p.stop;
+ if(job.momentumTrailArmed!==true&&net<p.plannedLossUsd)return p.stop;
+ job.momentumTrailArmed=true;
  let candidate=long?job.peakPrice-2*atr5:job.peakPrice+2*atr5;
- // Cost-adjusted break-even only after 1R, leaving room for initial pullbacks.
- if(net>=p.plannedLossUsd)candidate=long?Math.max(candidate,p.breakEven):Math.min(candidate,p.breakEven);
+ // Once armed, keep the cost-adjusted break-even floor on later pullbacks.
+ candidate=long?Math.max(candidate,p.breakEven):Math.min(candidate,p.breakEven);
  const next=Number(((long?Math.floor(candidate/tick):Math.ceil(candidate/tick))*tick).toFixed(12));
  return long?(next>p.stop&&next<price-tick?next:p.stop):(next<p.stop&&next>price+tick?next:p.stop);
 }

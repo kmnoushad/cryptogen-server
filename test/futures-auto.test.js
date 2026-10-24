@@ -400,10 +400,14 @@ for(const direction of ['LONG','SHORT'])test(`momentum live ${direction}: FOK, n
  assert.equal(h.calls.filter(x=>x[0]==='place'&&x[1].reduceOnly).length,0);
  assert.equal((await h.exchange.algos()).length,1);
  const initial=h.db().state.jobs[0].plan.stop;
+ assert.equal(initial,h.db().state.jobs[0].structuralStop,'no immediate ATR tightening on entry');
+ assert.notEqual(h.db().state.jobs[0].momentumTrailArmed,true);
  h.release();const restarted=h.make();await restarted.run();assert.equal(restarted.lastError,null);
+ assert.equal(h.db().state.jobs[0].plan.stop,initial,'restart before 1R retains structural stop');
  assert.equal(h.calls.filter(x=>x[0]==='place').length,1);
  h.opt.price=direction==='LONG'?101:99;await restarted.run();assert.equal(restarted.lastError,null);
  const stop=h.db().state.jobs[0].plan.stop;assert.ok(direction==='LONG'?stop>initial:stop<initial);
+ assert.equal(h.db().state.jobs[0].momentumTrailArmed,true,'arming is durably saved');
  assert.equal((await h.exchange.algos()).length,1);
 });
 test('momentum live missing or shallow depth prevents order submission',async()=>{
