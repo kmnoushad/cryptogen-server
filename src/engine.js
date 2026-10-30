@@ -5,6 +5,7 @@ import { advanceCandidate, armCandidate } from './strategy.js';
 import { closeTradeAtMarket, evaluateTrade } from './trade-evaluator.js';
 import { escapeHtml, formatPrice, gstTime, log, mapLimit, sleep } from './util.js';
 import { APP_VERSION } from './version.js';
+import { fadeChartStatus } from './fade-chart-status.js';
 import { sizePaperTrade, isPaperTest, PAPER_TEST_ID } from './paper-account.js';
 import { AltcoinBreadth, applyPaperRecovery, paperRecoveryEnabled, RECOVERY_MODEL } from './paper-recovery.js';
 
@@ -1098,7 +1099,7 @@ export class Engine {
 
     if (text === '/start' || text === '/help') {
       await this.telegram.send(`🧪 <b>NEXIO v${APP_VERSION} Actionable Alerts</b>\n` +
-        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /moverpaperstats /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /futuresauto /futurespause /futuresresume /futurescloseall /help');
+        '/version /status /why /btc /market /diagnostics /audit /stats /paperstats /moverpaperstats /fadechartpaper /statsnew /events /scan /alphascan /pause /resume /fadeauto /fadebalance /fadepause /faderesume /fadecloseall /futuresauto /futurespause /futuresresume /futurescloseall /help');
     } else if (text === '/version') {
       await this.telegram.send(`🧬 <b>NEXIO VERSION</b>\nRunning: <b>v${APP_VERSION}</b>\n` +
         `[FUTURES]: setup-aware survival + retest/reclaim + execution-book recovery\n[ALPHA]: separate guarded entry + active outcome monitoring\n` +
@@ -1139,6 +1140,8 @@ export class Engine {
     } else if (['/futurespause', '/futuresresume', '/futurescloseall'].includes(text)) {
       const action = text === '/futurespause' ? 'pause' : text === '/futuresresume' ? 'resume' : 'close';
       await this.telegram.send(this.futuresAuto ? await this.futuresAuto.control(action) : 'Futures auto unavailable.');
+    } else if (text === '/fadechartpaper') {
+      await this.telegram.send(escapeHtml(await fadeChartStatus(process.env.FADE_CHART_PAPER_STATUS_FILE)));
     } else if (text === '/fadeauto') {
       await this.telegram.send(this.fadeExecutor ? await this.fadeExecutor.status() : 'Fade execution unavailable.');
     } else if (text === '/moverpaperstats') {

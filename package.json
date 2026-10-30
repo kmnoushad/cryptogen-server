@@ -1,6 +1,6 @@
 {
   "name": "nexio-v6",
-  "version": "6.9.71",
+  "version": "6.9.72",
   "private": true,
   "type": "module",
   "description": "Separated Futures and Alpha engine with phase-aware candidate survival and streaming BTC shock protection",
@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "start:fade": "node src/fade-worker.js",
+    "start:fade-chart-paper": "node scripts/fade-chart-paper.js --paper",
     "test": "node --test test/*.test.js",
     "fade:preflight": "node scripts/fade-preflight.js",
     "fade:performance": "node scripts/fade-performance.js",
