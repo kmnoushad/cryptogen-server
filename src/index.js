@@ -134,6 +134,7 @@ try {
     `[PUMP FADE] ${cfg.enablePumpFadeAlerts ? '✅ ON · downside warnings only' : 'disabled'}\n` +
     `[MARKET MOOD] /market · BTC + alt breadth + positioning + event risk\n` +
     `[FADE AUTO] external worker only · /fadeauto\n` +
+    `[FADE CHART PAPER] separate simulation · /fadechartpaper · no Binance orders\n` +
     `[ALPHA] ${cfg.enableAlphaSignals ? '✅ ON · on-chain risk screening active' : 'disabled'}\n` +
     `[ALPHA MOVER] ${cfg.enableAlphaFastMover ? '✅ ON · early runner radar (info alerts only)' : 'disabled'}\n` +
     `🧪 Mover paper: ${paperReady ? 'READY · $100 per cohort · max $10 risk/trade · $30 GST daily loss stop · /moverpaperstats' : 'UNAVAILABLE · no simulated entries'}\n` +

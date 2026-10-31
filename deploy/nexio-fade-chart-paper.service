@@ -1,0 +1,24 @@
+[Unit]
+Description=NEXIO Phase 1B chart fade simulation (no exchange orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nexio
+Group=nexio
+WorkingDirectory=/opt/nexio
+ExecStart=/usr/bin/node /opt/nexio/scripts/fade-chart-paper.js --paper --data-dir /var/lib/nexio-fade-chart-paper
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+StateDirectory=nexio-fade-chart-paper
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexio-fade-chart-paper
+
+[Install]
+WantedBy=multi-user.target
