@@ -35,6 +35,7 @@ test('paper close applies costs and preserves a trade record',()=>{
   p.setCalibration('MT5','BINANCE','LONG',[{netEdgeUsd:2,lagMs:200}]);
   p.ingest(quote('MT5',4000,base));
   p.ingest(quote('BINANCE',4010,base));
+  p.ingest(quote('BINANCE',4010,base+100)); // establish follower baseline
   p.ingest(quote('MT5',4004,base+200));
   assert.ok(p.open);
   p.ingest(quote('BINANCE',4015,base+300));
