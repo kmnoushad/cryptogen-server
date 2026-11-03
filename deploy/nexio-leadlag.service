@@ -1,0 +1,22 @@
+[Unit]
+Description=NEXIO Gold Lead-Lag Research Collector (NO LIVE ORDERS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexio
+Group=nexio
+WorkingDirectory=/opt/nexio-leadlag
+EnvironmentFile=/etc/nexio-leadlag.env
+ExecStart=/usr/bin/node /opt/nexio-leadlag/src/gold-leadlag-worker.js
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
