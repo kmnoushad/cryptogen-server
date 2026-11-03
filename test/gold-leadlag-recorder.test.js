@@ -17,10 +17,11 @@ test('research recorder samples each venue independently and persists events', (
     recorder.event('signal', { leader: 'MT5', follower: 'BINANCE' });
     const files = readdirSync(dir);
     assert.ok(files.includes('2026-11-03.jsonl'));
-    const quotes = readFileSync(join(dir, '2026-11-03.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const quotes = readFileSync(join(dir, '2026-11-03.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter(x => x.type === 'quote');
     assert.equal(quotes.length, 3);
     assert.deepEqual(quotes.map(x => x.venue), ['MT5','BINANCE','MT5']);
     assert.equal(quotes[1].type, 'quote');
-    assert.ok(files.some(x => x.endsWith('.jsonl')));
+    const allRecords = files.filter(x => x.endsWith('.jsonl')).flatMap(file => readFileSync(join(dir, file), 'utf8').trim().split('\n').map(JSON.parse));
+    assert.equal(allRecords.filter(x => x.type === 'signal').length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
