@@ -383,10 +383,10 @@ export class FastMoverDetector {
 
   // v6.9.6: compact BTC bias tag bundled into every radar alert. Default-on;
   // a null bias engine leaves messages byte-identical to previous versions.
-  btcBiasLine() {
+  btcBiasLine({ long = true } = {}) {
     if (this.cfg.enableBtcBiasTag === false || !this.btcBias) return '';
     try {
-      const tag = this.btcBias.btcTag({ long: true });
+      const tag = this.btcBias.btcTag({ long });
       return tag ? `${tag}\n` : '';
     } catch (error) {
       log(`BTC bias tag failed: ${error.message}`);
@@ -395,32 +395,23 @@ export class FastMoverDetector {
   }
 
 
-  // v6.9.9 CROWDING TAG — funding + open-interest context on radar pings.
-  // Radar pings skip the guarded funnel, so they never had the crowded-funding
-  // check that rejects setups inside the FIRE path. This surfaces the same two
-  // inputs so a continuation entry taken AFTER a move can be judged on whether
-  // the fuel is spent (crowded longs paying funding) or whether shorts are the
-  // fuel (flat/negative funding with rising OI). Context only — never a signal,
-  // and a failure here must never suppress the alert.
+  // Report funding and OI as context for the observed move.
   async crowdingLine(symbol) {
     try {
       const [premium, oi] = await Promise.all([
         this.binance.premiumIndex(symbol),
         this.binance.oiContext(symbol).catch(() => null),
       ]);
-      const fundingPct = Number(premium?.lastFundingRate) * 100;
+      const rawFunding = premium?.lastFundingRate;
+      if (rawFunding == null || rawFunding === '') return '';
+      const fundingPct = Number(rawFunding) * 100;
       if (!Number.isFinite(fundingPct)) return '';
-      const oiPct = Number.isFinite(Number(oi?.changePct)) ? Number(oi.changePct) : null;
-      const oiPart = oiPct === null ? 'OI n/a'
-        : `OI ${oiPct >= 0 ? '+' : ''}${oiPct.toFixed(1)}%`;
-      // Crowded longs = positive funding. With OI also rising, late longs are
-      // stacking into a move that already happened — squeeze risk is on YOUR side.
-      let verdict;
-      if (fundingPct >= 0.03 && (oiPct ?? 0) > 0) verdict = '🔴 longs crowded — fuel spent, squeeze risk';
-      else if (fundingPct <= 0 && (oiPct ?? 0) > 0) verdict = '🟢 shorts paying — they are the fuel';
-      else if (fundingPct >= 0.03) verdict = '🟠 longs paying — crowded';
-      else verdict = '⚪ neutral positioning';
-      return `Crowding: funding ${fundingPct >= 0 ? '+' : ''}${fundingPct.toFixed(3)}% · ${oiPart} · ${verdict}\n`;
+      const rawOi = oi?.changePct;
+      const oiPct = rawOi == null || rawOi === '' ? NaN : Number(rawOi);
+      const oiPart = Number.isFinite(oiPct)
+        ? `OI ${oiPct >= 0 ? '+' : ''}${oiPct.toFixed(1)}%`
+        : 'OI n/a';
+      return `Market context: funding ${fundingPct >= 0 ? '+' : ''}${fundingPct.toFixed(3)}% · ${oiPart}\n`;
     } catch {
       return '';
     }
@@ -658,14 +649,14 @@ export class FastMoverDetector {
   }
 
   trendingAlertMessage(trigger, confirmation) {
-    return `<b>[FUTURES] 📈 TRENDING MOVER</b>\n` +
+    return `<b>[FUTURES] 📈 TRENDING MOVER · UPSIDE WATCH</b>\n` +
       `<b>${escapeHtml(trigger.symbol.replace('USDT', ''))}</b> +${trigger.move.pct.toFixed(2)}% in ${trigger.move.window}\n` +
       `Price: $${formatPrice(trigger.price)} · 24h quote ${usdCompact(trigger.quoteVolume24h)}\n` +
       `5m volume accel: ${trigger.volume.accel.toFixed(1)}× baseline · 1m taker buy ${(confirmation.buyRatio * 100).toFixed(0)}%\n` +
       `Spread: ${confirmation.spreadBps.toFixed(1)} bps\n` +
       (trigger.crowding ?? '') +
-      this.btcBiasLine() +
-      `⚠️ <b>Steady mover — not a burst; it can still reverse.</b> Paper simulation only; no Binance order.\n` +
+      this.btcBiasLine({ long: false }) +
+      `⚠️ <b>Rolling price gain detected. A pullback can follow.</b> Paper simulation only.\n` +
       `⏰ ${gstTime()} GST`;
   }
 
