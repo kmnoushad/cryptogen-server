@@ -465,11 +465,11 @@ test('tier-2 15m window: steady grind triggers, confirms, persists and alerts', 
   feedTrending(detector, { priceAt: RAMP_15M, finalJump: 90_000 });
   await flush();
   assert.equal(deps.sent.length, 1);
-  assert.match(deps.sent[0], /\[FUTURES\] 📈 TRENDING MOVER/);
+  assert.match(deps.sent[0], /\[FUTURES\] 📈 TRENDING MOVER · UPSIDE WATCH/);
   assert.match(deps.sent[0], /\+2\.20% in 15m/);
   assert.match(deps.sent[0], /5m volume accel: 2\.5× baseline/);
-  assert.match(deps.sent[0], /Steady mover — not a burst/);
-  assert.match(deps.sent[0], /Paper simulation only; no Binance order/);
+  assert.match(deps.sent[0], /Rolling price gain detected/);
+  assert.match(deps.sent[0], /Paper simulation only/);
   assert.equal(deps.events.length, 1);
   assert.equal(deps.events[0].event_type, 'FUTURES_TRENDING_MOVER');
   assert.equal(deps.events[0].symbol, 'TRENDUSDT');
@@ -729,7 +729,7 @@ test('health exposes tier-2 metrics, suppression breakdown and radar timestamps'
 // ── v6.9.6 BTC bias bundling ────────────────────────────────────────────────
 
 test('fast-mover and trending alerts carry the BTC bias tag when injected', () => {
-  const btcBias = { btcTag: () => '₿ BTC 15m: <b>DOWN</b> (62%) · 30m: DOWN · ⚠️ against this long' };
+  const btcBias = { btcTag: ({ long }) => '₿ BTC 15m: <b>DOWN</b> (62%) · 30m: DOWN' + (long ? ' · ⚠️ against this long' : '') };
   const detector = new FastMoverDetector({
     cfg: { enableFastMoverAlerts: true, enableTrendingMover: true },
     binance: {},
@@ -748,7 +748,7 @@ test('fast-mover and trending alerts carry the BTC bias tag when injected', () =
   const fast = detector.alertMessage(trigger, confirm);
   assert.match(fast, /₿ BTC 15m: <b>DOWN<\/b> \(62%\) · 30m: DOWN · ⚠️ against this long\n⚠️ <b>Sudden moves/);
   const trending = detector.trendingAlertMessage(trigger, confirm);
-  assert.match(trending, /₿ BTC 15m: <b>DOWN<\/b> \(62%\).*against this long\n⚠️ <b>Steady mover/);
+  assert.match(trending, /₿ BTC 15m: <b>DOWN<\/b> \(62%\) · 30m: DOWN\n⚠️ <b>Rolling price gain/);
 });
 
 test('fast-mover alerts are unchanged with a null bias or the tag disabled', () => {
@@ -773,3 +773,10 @@ test('fast-mover alerts are unchanged with a null bias or the tag disabled', () 
   assert.ok(!off.alertMessage(trigger, confirm).includes('₿ BTC'));
 });
 
+
+test('zero funding and rising OI are displayed as observations', async () => {
+  const { detector } = makeDetector();
+  detector.binance.premiumIndex = async () => ({ lastFundingRate: '0' });
+  detector.binance.oiContext = async () => ({ changePct: 3.5 });
+  assert.equal(await detector.crowdingLine('MARAUSDT'), 'Market context: funding +0.000% · OI +3.5%\n');
+});
