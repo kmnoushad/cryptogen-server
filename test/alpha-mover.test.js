@@ -540,3 +540,66 @@ test('alpha fast-mover alert is unchanged with a null bias or the tag disabled',
   });
   assert.ok(!off.alertMessage(token, { pct: 4.2, windowMin: 10 }, { riskScore: 2 }).includes('₿ BTC'));
 });
+
+test('early notices seed unknown listings quietly and deduplicate fresh listings across restarts', async () => {
+  const config = { ...cfg, enableAlphaEarlyWatch: true };
+  const first = harness({ config });
+  const existing = rawToken();
+  const fresh = rawToken({ contractAddress: '0xdef', listingTime: T0 / 1000 });
+  first.setFeed([existing, fresh]);
+  await first.radar.pollOnce();
+  assert.equal(first.messages.length, 1);
+  assert.match(first.messages[0], /NEW ALPHA LISTING/);
+  first.advance(30_000);
+  first.setFeed([existing, fresh, rawToken({ contractAddress: '0x123' })]);
+  await first.radar.pollOnce();
+  assert.equal(first.messages.length, 2);
+  assert.match(first.messages[1], /FIRST SEEN ON ALPHA/);
+
+  const restarted = harness({ config, insertResult: false });
+  restarted.setFeed([existing, fresh]);
+  await restarted.radar.pollOnce();
+  assert.equal(restarted.messages.length, 0);
+  assert.equal(restarted.events[0].event_key, first.events[0].event_key);
+});
+
+test('early pump watch reaches Telegram on the qualifying poll during a busy confirmation batch', async () => {
+  const h = harness({ config: { ...cfg, enableAlphaEarlyWatch: true, alphaMoverPollMs: 30_000 } });
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  h.radar.processConfirmations = () => pending;
+  try {
+    for (const [price, volume24h] of [[1, 500000], [1.004, 501000], [1.008, 502000], [1.035, 505000]]) {
+      h.setFeed([rawToken({ price, volume24h })]);
+      await h.radar.pollOnce({ backgroundConfirmation: true });
+      h.advance(30_000);
+    }
+    assert.ok(h.radar.confirmationTask);
+    assert.equal(h.messages.length, 1);
+    assert.match(h.messages[0], /EARLY PUMP WATCH/);
+    assert.match(h.messages[0], /snapshot age 0.0s/);
+    assert.equal(h.events[0].payload.move.high, 1.008);
+    assert.equal(h.events[0].payload.move.volumeProxyRatio, 3);
+  } finally {
+    release();
+    await h.radar.confirmationTask;
+  }
+});
+
+test('early pump watch skips extended moves and rejects an alert delayed by the database', async () => {
+  for (const price of [1.09, 1.035]) {
+    const h = harness({ config: { ...cfg, enableAlphaEarlyWatch: true, alphaMoverPollMs: 30_000 } });
+    h.radar.store.insertEvent = async event => {
+      h.events.push(event);
+      h.advance(30_000);
+      return true;
+    };
+    for (const [p, volume24h] of [[1, 500000], [1.004, 501000], [1.008, 502000], [price, 505000]]) {
+      h.setFeed([rawToken({ price: p, volume24h })]);
+      await h.radar.pollOnce();
+      h.advance(30_000);
+    }
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.radar.health().earlyWatch.stale, price === 1.035 ? 1 : 0);
+  }
+});
