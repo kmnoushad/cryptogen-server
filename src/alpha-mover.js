@@ -1,3 +1,4 @@
+import { AlphaEarlyWatch } from './alpha-early-watch.js';
 import { requestJson } from './http.js';
 import { ALPHA_URL, keyOf, parseToken } from './alpha.js';
 import { fetchAndAssessOnchain } from './onchain-risk.js';
@@ -58,6 +59,11 @@ export class AlphaFastMover {
     this.lastError = null;
     this.nextPollAt = 0;
     this.pollBackoffMs = 0;
+    this.confirmationTask = null;
+    this.earlyWatch = cfg.enableAlphaEarlyWatch ? new AlphaEarlyWatch({
+      cfg, store, telegram, now, isPaused, isEventGuarded,
+      passesFloors: token => this.passesFloors(token),
+    }) : null;
     this.metrics = {
       polls: 0,
       triggers: 0,
@@ -72,7 +78,7 @@ export class AlphaFastMover {
   start() {
     if (!this.cfg.enableAlphaFastMover || this.timer) return;
     const tick = async () => {
-      try { await this.pollOnce(); }
+      try { await this.pollOnce({ backgroundConfirmation: Boolean(this.earlyWatch) }); }
       catch (error) { // pollOnce already counts/logs; belt-and-braces so the loop keeps going
         this.metrics.errors++;
         this.lastError = error.message;
@@ -117,7 +123,7 @@ export class AlphaFastMover {
     return Math.floor(nowMs / (this.cfg.alphaMoverCooldownMin * 60_000));
   }
 
-  async pollOnce() {
+  async pollOnce({ backgroundConfirmation = false } = {}) {
     if (!this.cfg.enableAlphaFastMover) return { skipped: 'disabled' };
     if (this.polling) return { skipped: 'already running' };
     if (this.now() < this.nextPollAt) return { skipped: 'backoff', nextPollAt: this.nextPollAt };
@@ -141,31 +147,47 @@ export class AlphaFastMover {
       this.pollBackoffMs = 0;
       this.nextPollAt = 0; // routine cadence is owned by start()'s interval
       const tokens = (Array.isArray(response?.data) ? response.data : []).map(parseToken).filter(Boolean);
-      for (const token of tokens) {
-        try { await this.track(token, nowMs); }
-        catch (error) {
-          this.metrics.errors++;
-          this.lastError = error.message;
-          log(`Alpha fast-mover ${token.symbol} failed: ${error.message}`);
-        }
+      const observedAt = this.now();
+      const notices = this.earlyWatch?.observe(tokens, observedAt);
+      if (!this.confirmationTask) {
+        this.confirmationTask = this.processConfirmations(tokens, nowMs)
+          .catch(error => {
+            this.metrics.errors++;
+            this.lastError = error.message;
+            log(`Alpha mover confirmation batch failed: ${error.message}`);
+          })
+          .finally(() => { this.confirmationTask = null; });
       }
-      // Prune stale points so `tracked` reflects the live feed.
-      for (const [key, buffer] of this.buffers) {
-        while (buffer.length && nowMs - buffer[0].t > HORIZON_MS) buffer.shift();
-        if (!buffer.length) this.buffers.delete(key);
-      }
-      // Prune expired cooldown entries so the map cannot grow unboundedly.
-      const cooldownMs = this.cfg.alphaMoverCooldownMin * 60_000;
-      for (const [key, ts] of this.cooldowns) {
-        if (nowMs - ts > cooldownMs) this.cooldowns.delete(key);
-      }
-      if (this.moverPaper) await this.moverPaper.sweep();
+      await notices;
+      if (!backgroundConfirmation) await this.confirmationTask;
       this.lastPollAt = nowMs;
       this.metrics.polls++;
       return { processed: tokens.length };
     } finally {
       this.polling = false;
     }
+  }
+
+  async processConfirmations(tokens, nowMs) {
+    for (const token of tokens) {
+      try { await this.track(token, nowMs); }
+      catch (error) {
+        this.metrics.errors++;
+        this.lastError = error.message;
+        log(`Alpha fast-mover ${token.symbol} failed: ${error.message}`);
+      }
+    }
+    // Prune stale points so `tracked` reflects the live feed.
+    for (const [key, buffer] of this.buffers) {
+      while (buffer.length && nowMs - buffer[0].t > HORIZON_MS) buffer.shift();
+      if (!buffer.length) this.buffers.delete(key);
+    }
+    // Prune expired cooldown entries so the map cannot grow unboundedly.
+    const cooldownMs = this.cfg.alphaMoverCooldownMin * 60_000;
+    for (const [key, ts] of this.cooldowns) {
+      if (nowMs - ts > cooldownMs) this.cooldowns.delete(key);
+    }
+    if (this.moverPaper) await this.moverPaper.sweep();
   }
 
   async track(token, nowMs) {
@@ -373,6 +395,7 @@ export class AlphaFastMover {
       pollIntervalMs: this.cfg.alphaMoverPollMs,
       backoffUntil: this.nextPollAt > this.now() ? new Date(this.nextPollAt).toISOString() : null,
       tracked: this.buffers.size,
+      earlyWatch: this.earlyWatch?.metrics ?? null,
       metrics: this.metrics,
       lastError: this.lastError,
     };

@@ -186,6 +186,7 @@ export const loadConfig = (env = process.env) => {
       console.warn(`[CONFIG WARNING] ENABLE_ALPHA_FAST_MOVER="${raw}" is invalid; using safe default true`);
       return true;
     })(),
+    enableAlphaEarlyWatch: boolFrom(env, 'ENABLE_ALPHA_EARLY_WATCH', true),
     alphaMoverPollMs: numberFromWarn(env, 'ALPHA_MOVER_POLL_MS', 30_000, { min: 15_000, max: 600_000 }),
     moverPaperMaxRiskUsd: numberFromWarn(env, 'MOVER_PAPER_MAX_RISK_USD', 10, { min: 1, max: 10 }),
     moverPaperDailyLossUsd: numberFromWarn(env, 'MOVER_PAPER_DAILY_LOSS_USD', 30, { min: 5, max: 30 }),
