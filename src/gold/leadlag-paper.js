@@ -15,38 +15,51 @@ export class LeadLagPaper extends EventEmitter {
     this.balance=balance; this.initialBalance=balance; this.highWatermark=balance;
     this.quotes=new Map(); this.history=new Map([['MT5',[]],['BINANCE',[]]]);
     this.trades=[]; this.open=null; this.events=[]; this.calibration=new Map();
+    // Diagnostic-only counters; these never alter signal or paper-entry decisions.
+    this.diagnostics={invalidQuote:0,outOfOrder:0,missingPeer:0,stalePair:0,
+      staleExchange:0,missingWindow:0,weakImpulse:0,followerAlreadyMoved:0,
+      signals:0,calibrationMissing:0,calibrationInsufficient:0,
+      calibrationEdgeInsufficient:0,positionOpen:0,paperEntryEligible:0};
   }
   ingest({venue,bid,ask,exchangeTs,receivedTs=Date.now()}) {
     if(!['MT5','BINANCE'].includes(venue) || !finite(bid)||!finite(ask)||bid<=0||ask<bid ||
-       !finite(exchangeTs)||!finite(receivedTs)||exchangeTs>receivedTs+1000) return false;
+       !finite(exchangeTs)||!finite(receivedTs)||exchangeTs>receivedTs+1000) { this.diagnostics.invalidQuote++; return false; }
     const prior=this.quotes.get(venue);
-    if(prior && (exchangeTs<prior.exchangeTs || receivedTs<prior.receivedTs)) return false;
+    if(prior && (exchangeTs<prior.exchangeTs || receivedTs<prior.receivedTs)) { this.diagnostics.outOfOrder++; return false; }
     const q={venue,bid,ask,mid:(bid+ask)/2,exchangeTs,receivedTs};
     this.quotes.set(venue,q);
     const h=this.history.get(venue); h.push(q); if(h.length>2000) h.shift();
     this.manage(receivedTs);
     const other=this.quotes.get(venue==='MT5'?'BINANCE':'MT5');
-    if(!other || Math.abs(q.receivedTs-other.receivedTs)>this.config.maxAgeMs ||
-       receivedTs-exchangeTs>this.config.maxAgeMs || receivedTs-other.exchangeTs>this.config.maxAgeMs) return true;
+    if(!other) { this.diagnostics.missingPeer++; return true; }
+    if(Math.abs(q.receivedTs-other.receivedTs)>this.config.maxAgeMs) { this.diagnostics.stalePair++; return true; }
+    if(receivedTs-exchangeTs>this.config.maxAgeMs || receivedTs-other.exchangeTs>this.config.maxAgeMs) {
+      this.diagnostics.staleExchange++; return true;
+    }
     // Compare each venue's own recent move: absolute price levels are not interchangeable.
     const windowStart=receivedTs-1000;
     const old=h.find(x=>x.receivedTs>=windowStart);
     const otherHistory=this.history.get(other.venue);
     const oldOther=otherHistory.find(x=>x.receivedTs>=windowStart);
-    if(!old||!oldOther||old===q||oldOther===other) return true;
+    if(!old||!oldOther||old===q||oldOther===other) { this.diagnostics.missingWindow++; return true; }
     const move=q.mid-old.mid, followerMove=other.mid-oldOther.mid;
     const direction=Math.sign(move);
-    if(Math.abs(move)<this.config.spikeUsd || Math.sign(followerMove)===direction &&
-       Math.abs(followerMove)>Math.abs(move)*0.4) return true;
+    if(Math.abs(move)<this.config.spikeUsd) { this.diagnostics.weakImpulse++; return true; }
+    if(Math.sign(followerMove)===direction &&
+       Math.abs(followerMove)>Math.abs(move)*0.4) { this.diagnostics.followerAlreadyMoved++; return true; }
     const key=venue+'>'+other.venue;
     const observation={at:receivedTs,leader:venue,follower:other.venue,move,followerMove,
       direction:direction>0?'LONG':'SHORT',basis:q.mid-other.mid};
     this.events.push(observation); if(this.events.length>10000)this.events.shift();
+    this.diagnostics.signals++;
     this.emit('signal',observation);
     // No entries until the direction-specific historical catch-up evidence is calibrated.
     const calibration=this.calibration.get(key+':'+observation.direction);
-    if(!calibration || calibration.count<this.config.minHistory ||
-       calibration.medianNetEdgeUsd<this.config.minNetEdgeUsd || this.open) return true;
+    if(!calibration) { this.diagnostics.calibrationMissing++; return true; }
+    if(calibration.count<this.config.minHistory) { this.diagnostics.calibrationInsufficient++; return true; }
+    if(calibration.medianNetEdgeUsd<this.config.minNetEdgeUsd) { this.diagnostics.calibrationEdgeInsufficient++; return true; }
+    if(this.open) { this.diagnostics.positionOpen++; return true; }
+    this.diagnostics.paperEntryEligible++;
     this.enter(observation,other);
     return true;
   }
@@ -82,6 +95,7 @@ export class LeadLagPaper extends EventEmitter {
     const wins=this.trades.filter(t=>t.pnl>0).length;
     return {balance:this.balance,netPnl:this.balance-this.initialBalance,trades:this.trades.length,wins,
       winRate:this.trades.length?wins/this.trades.length:0,drawdown:this.highWatermark-this.balance,
-      open:this.open,signals:this.events.length,calibration:Object.fromEntries(this.calibration)};
+      open:this.open,signals:this.events.length,calibration:Object.fromEntries(this.calibration),
+      diagnostics:{...this.diagnostics}};
   }
 }
